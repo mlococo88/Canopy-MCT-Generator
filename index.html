@@ -7,6 +7,73 @@
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]']]},svg:{fontCache:'global'},startup:{typeset:false}};</script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<!-- Firebase (modular v10 via gstatic CDN). Exposes window.CloudAPI for the main script. -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, orderBy, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDChTsOzx_Fhyor1GuOip8oGIBGHfoMX2E",
+    authDomain: "canopy-mct-generator.firebaseapp.com",
+    projectId: "canopy-mct-generator",
+    storageBucket: "canopy-mct-generator.firebasestorage.app",
+    messagingSenderId: "217341968251",
+    appId: "1:217341968251:web:eeb8a4749fec5083b447de"
+  };
+
+  // Email allowlist mirrored in the UI. The REAL security boundary is the Firestore
+  // rules; this list only gives a friendly message and hides cloud UI for others.
+  // Keep this in sync with the allowlist in your Firestore security rules.
+  const ALLOWLIST = [
+    "you@example.com"
+  ];
+
+  let app, auth, db, provider;
+  try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    provider = new GoogleAuthProvider();
+  } catch(e){ console.error("Firebase init failed", e); }
+
+  const COL = "projects";   // shared team collection
+  const isAllowed = (email)=> !!email && ALLOWLIST.map(e=>e.toLowerCase()).includes(email.toLowerCase());
+
+  // expose a small API for the (classic) main script
+  window.CloudAPI = {
+    ready: !!app,
+    allowlist: ALLOWLIST,
+    isAllowed,
+    currentUser: ()=> auth && auth.currentUser ? {email:auth.currentUser.email, name:auth.currentUser.displayName} : null,
+    onAuth(cb){ if(!auth){cb(null);return;} onAuthStateChanged(auth, u=> cb(u?{email:u.email,name:u.displayName}:null)); },
+    async signIn(){ if(!auth) throw new Error("Firebase unavailable"); const r=await signInWithPopup(auth, provider); return {email:r.user.email,name:r.user.displayName}; },
+    async signOut(){ if(auth) await signOut(auth); },
+    // list cloud projects (newest first)
+    async list(){
+      const q=query(collection(db, COL), orderBy("updated","desc"));
+      const snap=await getDocs(q);
+      return snap.docs.map(d=>({ id:d.id, ...d.data() }));
+    },
+    // save/overwrite a project document (id = sanitized name)
+    async save(id, payload){
+      await setDoc(doc(db, COL, id), {
+        ...payload,
+        updated: serverTimestamp(),
+        updatedBy: auth.currentUser ? auth.currentUser.email : "unknown"
+      });
+    },
+    async load(id){
+      const d=await getDoc(doc(db, COL, id));
+      return d.exists() ? { id:d.id, ...d.data() } : null;
+    },
+    async remove(id){ await deleteDoc(doc(db, COL, id)); }
+  };
+  // let the main script know the API is attached
+  window.dispatchEvent(new Event('cloudapi-ready'));
+</script>
 <style>
   :root {
     --ink: #16191d; --paper: #f7f5f0; --panel: #ffffff;
@@ -128,6 +195,21 @@
     <button class="btn" id="projImportBtn">⬆ Import JSON</button>
     <input type="file" id="projImportFile" accept="application/json,.json" style="display:none">
     <span class="pb-status" id="projStatus"></span>
+  </div>
+  <div class="projects-bar" id="cloudBar" style="border-top:1px dashed #d8d3c8">
+    <span class="pb-label">☁ Cloud</span>
+    <button class="btn" id="cloudSignInBtn">Sign in with Google</button>
+    <span id="cloudSignedIn" style="display:none;align-items:center;gap:8px">
+      <span class="pb-label" id="cloudUser" style="text-transform:none;letter-spacing:0"></span>
+      <input type="text" id="cloudProjName" class="inp" placeholder="Cloud project name…" style="width:160px">
+      <input type="text" id="cloudRevNote" class="inp" placeholder="Revision note (optional)" style="width:170px">
+      <button class="btn" id="cloudSaveBtn">⬆ Save to cloud</button>
+      <select id="cloudLoad" class="inp" style="width:200px"><option value="">Cloud projects…</option></select>
+      <button class="btn" id="cloudLoadBtn">⬇ Load</button>
+      <button class="btn" id="cloudDeleteBtn" title="Delete selected cloud project">Delete</button>
+      <button class="btn" id="cloudSignOutBtn">Sign out</button>
+    </span>
+    <span class="pb-status" id="cloudStatus"></span>
   </div>
   <nav class="tabnav" id="tabnav">
     <button data-tab="geometry" class="active"><span class="step">1</span>Geometry</button>
@@ -3215,6 +3297,94 @@ document.getElementById('projImportFile').onchange=e=>{
   r.readAsText(file);
 };
 refreshProjList();
+
+// ============================================================================
+// CLOUD PROJECTS — Firebase auth + Firestore (via window.CloudAPI module)
+// ============================================================================
+(function initCloud(){
+  const $=id=>document.getElementById(id);
+  function cloudStatus(msg,err){const el=$('cloudStatus');if(!el)return;el.textContent=msg;el.style.color=err?'var(--rust)':'var(--moss)';setTimeout(()=>{if(el.textContent===msg)el.textContent='';},3500);}
+  const sanitizeId=name=>name.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'_').slice(0,80);
+
+  function wire(){
+    const API=window.CloudAPI;
+    if(!API||!API.ready){ const b=$('cloudSignInBtn'); if(b){b.disabled=true;b.textContent='Cloud unavailable';} return; }
+
+    function showSignedOut(){
+      $('cloudSignInBtn').style.display='inline-block';
+      $('cloudSignedIn').style.display='none';
+    }
+    function showSignedIn(user){
+      $('cloudSignInBtn').style.display='none';
+      const wrap=$('cloudSignedIn'); wrap.style.display='inline-flex';
+      const allowed=API.isAllowed(user.email);
+      $('cloudUser').textContent=(user.name||user.email)+(allowed?'':' — no access');
+      ['cloudProjName','cloudRevNote','cloudSaveBtn','cloudLoad','cloudLoadBtn','cloudDeleteBtn'].forEach(id=>{const el=$(id);if(el)el.disabled=!allowed;});
+      if(allowed){ refreshCloudList(); }
+      else cloudStatus('This account is not on the access list.',true);
+    }
+
+    async function refreshCloudList(sel){
+      try{
+        const items=await API.list();
+        const dd=$('cloudLoad');
+        dd.innerHTML='<option value="">Cloud projects…</option>'+items.map(it=>{
+          const when=it.updated&&it.updated.toDate?it.updated.toDate().toLocaleDateString():'';
+          const note=it.revNote?` — ${it.revNote}`:'';
+          return `<option value="${it.id}"${it.id===sel?' selected':''}>${(it.name||it.id)} (${when})${note}</option>`;
+        }).join('');
+      }catch(e){ cloudStatus('Could not list cloud projects (check rules / sign-in).',true); console.error(e); }
+    }
+
+    $('cloudSignInBtn').onclick=async()=>{
+      try{ await API.signIn(); }catch(e){ cloudStatus('Sign-in failed or cancelled.',true); console.error(e); }
+    };
+    $('cloudSignOutBtn').onclick=async()=>{ await API.signOut(); };
+
+    $('cloudSaveBtn').onclick=async()=>{
+      const user=API.currentUser(); if(!user||!API.isAllowed(user.email)){cloudStatus('Not authorized.',true);return;}
+      const name=$('cloudProjName').value.trim();
+      if(!name){cloudStatus('Enter a cloud project name first.',true);return;}
+      const id=sanitizeId(name); if(!id){cloudStatus('Invalid name.',true);return;}
+      try{
+        const existing=await API.load(id);
+        if(existing && !confirm(`A cloud project "${name}" exists (last saved by ${existing.updatedBy||'?'}). Overwrite?`)) return;
+        const revNote=$('cloudRevNote').value.trim();
+        const revisions=(existing&&Array.isArray(existing.revisions))?existing.revisions.slice(-19):[];
+        revisions.push({by:user.email, note:revNote||'(no note)', at:new Date().toISOString()});
+        await API.save(id, { name, state:snapshotState(), revNote, revisions });
+        cloudStatus(`Saved "${name}" to cloud ✓`);
+        $('cloudRevNote').value='';
+        refreshCloudList(id);
+      }catch(e){ cloudStatus('Cloud save failed (check rules / sign-in).',true); console.error(e); }
+    };
+
+    $('cloudLoadBtn').onclick=async()=>{
+      const id=$('cloudLoad').value; if(!id){cloudStatus('Select a cloud project to load.',true);return;}
+      try{
+        const it=await API.load(id);
+        if(!it||!it.state){cloudStatus('Project not found or empty.',true);return;}
+        applyProject(it.state);
+        $('cloudProjName').value=it.name||id;
+        $('projName').value=it.name||id;
+        const revs=(it.revisions||[]).slice(-1)[0];
+        cloudStatus(`Loaded "${it.name||id}"${revs?` (rev by ${revs.by})`:''} ✓`);
+      }catch(e){ cloudStatus('Cloud load failed.',true); console.error(e); }
+    };
+
+    $('cloudDeleteBtn').onclick=async()=>{
+      const id=$('cloudLoad').value; if(!id){cloudStatus('Select a cloud project to delete.',true);return;}
+      if(!confirm(`Delete cloud project "${id}" for everyone? This cannot be undone.`))return;
+      try{ await API.remove(id); cloudStatus('Deleted from cloud.'); refreshCloudList(); }
+      catch(e){ cloudStatus('Cloud delete failed.',true); console.error(e); }
+    };
+
+    API.onAuth(user=>{ if(user) showSignedIn(user); else showSignedOut(); });
+  }
+
+  if(window.CloudAPI) wire();
+  else window.addEventListener('cloudapi-ready', wire, {once:true});
+})();
 
 updateColCount(state.nCol);   // builds bay table, sets visibilities
 updateCfgTag();
