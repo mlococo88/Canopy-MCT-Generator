@@ -1165,8 +1165,15 @@ function buildMCT(s){
   // roof pressures applied LOCAL Z (normal to roof); fascia point load + column drag
   // act horizontally (global X). gamma=0 wind from left -> +X drag; gamma=180 -> -X.
   wcases.forEach(wc=>{
-    const wLower = wc.pLower*B;   // lbf/ft, signed (+ toward roof, - uplift)
-    const wUpper = wc.pUpper*B;
+    // ASCE C_N sign: +C_N = downward pressure on the roof, -C_N = uplift (suction).
+    // MIDAS beam local +z (beta=0) points UP/outward from the roof top, so a positive LZ
+    // load pushes the roof UP. These conventions are opposite, so the roof normal load is
+    // negated here: ASCE downward (+) becomes a -LZ (downward) load in MIDAS, and ASCE
+    // uplift (-) becomes +LZ (upward). Confirmed against a MIDAS unit-load check.
+    // NOTE: column drag (GX), windscreen (GX), and fascia were verified correct and are
+    // left unchanged.
+    const wLower = -wc.pLower*B;   // lbf/ft, sign flipped for MIDAS local-z
+    const wUpper = -wc.pUpper*B;
     // gamma=180: wind up the slope toward the high (right) side -> drag +X, enters at low/left tip.
     // gamma=0:   wind toward the low (left) side -> drag -X, enters at high/right tip.
     const toHigh = (wc.gamma===180);
