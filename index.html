@@ -339,14 +339,33 @@
         <div class="hint">Net roof pressure p = qₕ · G · C_N, with C_N from ASCE 7-16 Fig. 27.3-4 (monoslope free roof), interpolated at the roof angle.</div>
       </div></details>
       <details class="group" open><summary>Wind — columns &amp; fascia</summary><div class="group-body" id="colWindFields2">
-        <div id="colWindFields"></div>
-        <div class="hint">Fascia lateral wind = fascia depth × pressure × tributary length, as a point load at the beam end.</div>
+        <div class="subhead-lbl">Fascia</div>
+        <div id="fasciaDepthField"></div>
+        <div style="margin:6px 0 4px"><span class="ctl-label">Fascia wind pressure</span>
+          <div class="seg moss" id="segFasciaWind" style="width:230px"><button data-v="manual" class="on">Manual psf</button><button data-v="calc">Calculate (§29.4)</button></div>
+        </div>
+        <div id="fasciaPressField"></div>
+        <div class="note-bar" id="fasciaWindResult" style="font-size:11px;display:none"></div>
+        <div class="subhead-lbl" style="margin-top:10px">Columns</div>
+        <div style="margin:2px 0 4px"><span class="ctl-label">Column wind pressure</span>
+          <div class="seg moss" id="segColWind" style="width:230px"><button data-v="manual" class="on">Manual psf</button><button data-v="calc">Calculate (§29.4)</button></div>
+        </div>
+        <div id="colPressField"></div>
+        <div class="note-bar" id="colWindResult" style="font-size:11px;display:none"></div>
+        <div class="hint">Fascia lateral wind = fascia depth × pressure × tributary length, as a point load at the beam end. Column wind = pressure × projected column width, as a line load over the height. In Calculate mode each pressure is derived as a flat-sided member per ASCE 7-16 §29.4 (Fig. 29.4-1, normal to face) by aspect ratio.</div>
       </div></details>
       <details class="group" open><summary>Windscreen</summary><div class="group-body">
         <div class="seg moss" id="segScreen"><button data-v="none">None</button><button data-v="full">Full height</button><button data-v="partial" class="on">Partial</button></div>
-        <div id="screenPressField"></div>
         <div id="screenElevFields"></div>
-        <div class="hint">Lateral screen wind applied as a uniform load over the screen height, on one column line. Full height spans the base to the roof beam; partial uses the bottom/top elevations you enter.</div>
+        <div style="margin:8px 0 4px"><span class="ctl-label">Screen wind pressure</span>
+          <div class="seg moss" id="segScreenWind" style="width:230px"><button data-v="manual" class="on">Manual psf</button><button data-v="calc">Calculate (ASCE 29.3)</button></div>
+        </div>
+        <div id="screenPressField"></div>
+        <div id="screenCalcFields" style="display:none">
+          <div id="screenPctField"></div>
+          <div class="note-bar" id="screenWindResult" style="font-size:11px"></div>
+        </div>
+        <div class="hint">Lateral screen wind applied as a uniform load over the screen height, on one column line. In Calculate mode the pressure is derived as a solid sign per ASCE 7-16 §29.3 (Fig 29.3-1 C_f from the screen's B/s and s/h), reduced for openings via §29.3.1 using the percent-open you enter.</div>
       </div></details>
     </aside>
     <main class="canvas-col">
@@ -540,8 +559,8 @@ const DEFAULTS = {
   mesh_max: 2.8, mesh_minN: 3,
   DL: 15, SL: 45,
   q_h: 20, G: 0.85,
-  d_roof: 2, p_lat: 30, p_col: 30,
-  p_screen: 30, scr_bot: 0, scr_top: 10,
+  d_roof: 2, p_lat: 30, p_col: 30, colWindMode: 'manual', fasciaWindMode: 'manual',
+  p_screen: 30, scr_bot: 0, scr_top: 10, scrPctOpen: 0, screenWindMode: 'manual',
   // --- snow calc inputs (ASCE 7-16 Ch.7) ---
   pg: 30, Ce: 0.9, Ct: 1.0, Is: 1.0,
   // --- wind calc inputs (ASCE 7-16 §26-27) ---
@@ -608,6 +627,15 @@ function sectProps(desig){
   if(AISC_HSS[desig]){const[d,b,A,w,Ix,Sx]=AISC_HSS[desig];return{shape:'B',d,b,A,w,Ix,Sx,desig,found:true};}
   // fallback — unknown designation (e.g. from a stale imported project)
   return{shape:'B',d:8,b:4,A:3.0,w:10,Ix:30,Sx:7,desig:desig||'W12X26',found:false};
+}
+// Self-weight intensity (plf) consistent with how MIDAS computes it: density x area.
+// For HSS the AISC-published nominal weight uses the full nominal wall thickness while the
+// tabulated area A uses the reduced design thickness, so density*A differs from the published
+// w. The MCT drives self-weight off density and section area, so the report quotes density*A to
+// stay self-consistent with the analysis. (For W-shapes the two bases already agree.)
+function consistentPlf(desig, density_pcf){
+  const p=sectProps(desig); const dens=(density_pcf!=null?density_pcf:490);
+  return p.A*dens/144;
 }
 
 // ===========================================================================
@@ -680,6 +708,135 @@ function calcWind(s){
   return {Kz,qh};
 }
 
+// ASCE 7-16 Fig 29.3-1 — force coefficient Cf for solid freestanding/attached signs.
+// Cf is a function of clearance ratio s/h (rows) and aspect ratio B/s (columns).
+// B = horizontal sign dimension, s = vertical sign dimension, h = top height above grade.
+// Values below are the Fig 29.3-1 tabulation (Case A/B normal-to-sign region) and are
+// interpolated bilinearly. This is the standard table used for solid sign force.
+const SIGN_BS = [0.05, 0.1, 0.2, 0.5, 1, 2, 4, 5, 10, 20, 30, 45];   // B/s columns
+const SIGN_SH = [1.0, 0.9, 0.7, 0.5, 0.3, 0.16, 0.05];               // s/h rows
+const SIGN_CF = [
+  // s/h=1.0
+  [1.80,1.70,1.65,1.55,1.45,1.40,1.35,1.35,1.30,1.30,1.30,1.30],
+  // s/h=0.9
+  [1.85,1.75,1.70,1.60,1.55,1.50,1.45,1.45,1.40,1.40,1.40,1.40],
+  // s/h=0.7
+  [1.90,1.85,1.75,1.70,1.65,1.60,1.60,1.55,1.55,1.55,1.55,1.55],
+  // s/h=0.5
+  [1.95,1.85,1.80,1.75,1.70,1.70,1.70,1.70,1.70,1.75,1.75,1.75],
+  // s/h=0.3
+  [1.95,1.90,1.85,1.80,1.80,1.80,1.80,1.80,1.85,1.85,1.85,1.85],
+  // s/h=0.16
+  [1.95,1.90,1.85,1.85,1.85,1.85,1.85,1.90,1.90,1.95,1.95,1.95],
+  // s/h=0.05
+  [1.95,1.90,1.90,1.85,1.85,1.90,1.90,1.95,1.95,2.00,2.00,2.00]
+];
+function interp1(xs, x){ // returns {i,j,t} bracketing index + fraction for value x in xs (xs may be asc or desc)
+  const asc = xs[0] < xs[xs.length-1];
+  const arr = asc ? xs : xs.slice().reverse();
+  let lo=0; if(x<=arr[0]) return {a:asc?0:xs.length-1,b:asc?0:xs.length-1,t:0};
+  if(x>=arr[arr.length-1]) { const idx=asc?xs.length-1:0; return {a:idx,b:idx,t:0}; }
+  for(let i=0;i<arr.length-1;i++){ if(x>=arr[i] && x<=arr[i+1]){ const t=(x-arr[i])/(arr[i+1]-arr[i]);
+    const ai=asc?i:(xs.length-1-i), bi=asc?i+1:(xs.length-1-(i+1)); return {a:ai,b:bi,t}; } }
+  return {a:0,b:0,t:0};
+}
+function signCfSolid(bs, sh){
+  // clamp to table domain
+  const bsC=Math.max(SIGN_BS[0],Math.min(SIGN_BS[SIGN_BS.length-1],bs));
+  const shC=Math.max(SIGN_SH[SIGN_SH.length-1],Math.min(SIGN_SH[0],sh));
+  const ci=interp1(SIGN_BS,bsC), ri=interp1(SIGN_SH,shC);
+  const v=(r,c)=>SIGN_CF[r][c];
+  const top=v(ri.a,ci.a)+(v(ri.a,ci.b)-v(ri.a,ci.a))*ci.t;
+  const bot=v(ri.b,ci.a)+(v(ri.b,ci.b)-v(ri.b,ci.a))*ci.t;
+  return top+(bot-top)*ri.t;
+}
+// ASCE 7-16 Fig. 29.4-2 — force coefficient Cf for OPEN signs / single-plane open frames,
+// flat-sided members, as a stepped function of the solidity ratio ε (solid area / gross area).
+// Cf is applied to the NET (solid) area; NO further reduction factor is used.
+function openSignCfFlat(eps){
+  if(eps < 0.10) return 2.0;        // ε < 0.1
+  if(eps < 0.30) return 1.8;        // 0.1 ≤ ε < 0.3
+  return 1.6;                       // 0.3 ≤ ε ≤ 0.7 (open-sign range)
+}
+// ASCE 7-16 Fig. 29.4-1 — force coefficient Cf for "Other Structures", SQUARE (flat-sided)
+// cross-section, wind NORMAL TO A FACE (the design envelope). Cf is a function of the
+// aspect ratio h/D, tabulated at h/D = 1, 7, 25 and interpolated. Applied to the projected
+// area normal to the wind. Used here for the columns and the fascia (flat-sided members).
+const F2941_HD  = [1, 7, 25];           // aspect ratio rows
+const F2941_CF  = [1.3, 1.4, 2.0];      // square, normal to face
+function memberCfFlat(hOverD){
+  const x=Math.max(F2941_HD[0], Math.min(F2941_HD[F2941_HD.length-1], hOverD));
+  for(let i=0;i<F2941_HD.length-1;i++){
+    if(x>=F2941_HD[i] && x<=F2941_HD[i+1]){
+      const t=(x-F2941_HD[i])/(F2941_HD[i+1]-F2941_HD[i]);
+      return {cf:F2941_CF[i]+(F2941_CF[i+1]-F2941_CF[i])*t, clamped:(hOverD<F2941_HD[0]||hOverD>F2941_HD[F2941_HD.length-1])};
+    }
+  }
+  return {cf:F2941_CF[F2941_CF.length-1], clamped:true};
+}
+// column wind pressure per ASCE 7-16 §29.4 (Fig. 29.4-1, flat-sided, normal to face)
+function calcColWind(s){
+  const Kz=kzLookup(s.meanH,s.exposure);
+  const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
+  const G=s.G;
+  const D=sectProps(s.colSect).d/12;       // projected column width (ft)
+  const h=s.H_col;                          // column height (ft)
+  const hD=h/Math.max(D,0.01);
+  const {cf,clamped}=memberCfFlat(hD);
+  const p=qh*G*cf;                          // psf on projected area
+  return {qh,Kz,Kzt:s.Kzt,Kd:s.Kd,Ke:s.Ke,V:s.V,exposure:s.exposure,meanH:s.meanH,G,D,h,hD,cf,clamped,p};
+}
+// fascia wind pressure per ASCE 7-16 §29.4 (Fig. 29.4-1, flat-sided, normal to face);
+// aspect ratio = fascia length (tributary B) / fascia depth.
+function calcFasciaWind(s){
+  const Kz=kzLookup(s.meanH,s.exposure);
+  const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
+  const G=s.G;
+  const depth=s.d_roof;                     // fascia depth (ft)
+  const len=s.B_trib;                       // fascia length (tributary width, ft)
+  const hD=len/Math.max(depth,0.01);        // aspect ratio length/depth
+  const {cf,clamped}=memberCfFlat(hD);
+  const p=qh*G*cf;                          // psf on the fascia face
+  return {qh,Kz,Kzt:s.Kzt,Kd:s.Kd,Ke:s.Ke,V:s.V,exposure:s.exposure,meanH:s.meanH,G,depth,len,hD,cf,clamped,p};
+}
+// full windscreen sign pressure per ASCE 7-16 §29.3 with §29.3.1 porosity reduction.
+// s.scrPctOpen = percent open (0..100); epsilon (solidity) = 1 - pctOpen/100.
+function calcScreenWind(s){
+  const Kz=kzLookup(s.meanH,s.exposure);
+  const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
+  const G=s.G;
+  // geometry: width B = tributary; height s = screen band; h = top elevation above grade
+  const B=s.B_trib;
+  const sH=(s.screen==='full') ? s.H_col : Math.max(0.01,(s.scr_top - s.scr_bot));
+  const hTop=(s.screen==='full') ? s.H_col : (s.scr_top - s.El_base);
+  const bs=B/Math.max(sH,0.01);
+  const sh=Math.max(0.01,Math.min(1,sH/Math.max(hTop,0.01)));
+  const cfSolid=signCfSolid(bs,sh);
+  const pctOpen=Math.max(0,Math.min(100, (s.scrPctOpen==null?0:s.scrPctOpen)));
+  const eps=1 - pctOpen/100;                       // solidity ratio (solid area / gross area)
+  // ASCE 7-16 open-sign threshold: openings > 30% (ε < 0.70) -> treat as an OPEN sign.
+  // OPEN sign (Fig. 29.4-2): Cf read from the open-sign table by ε (flat-sided members),
+  //   applied to the NET (solid) area; NO reduction factor.
+  //   F = qh G Cf_open (ε·A_gross) -> equivalent pressure on gross area = qh G Cf_open ε
+  // CLOSED sign (≤30% open, ε ≥ 0.70): solid-sign Cf (Fig. 29.3-1) reduced per §29.3.1,
+  //   applied to the GROSS area:  F = qh G Cf_solid[1-(1-ε)^1.5] A_gross
+  const isOpenSign = eps < 0.70;
+  const cfOpen = isOpenSign ? openSignCfFlat(eps) : null;   // Fig 29.4-2, flat-sided
+  // gross-area-equivalent effective coefficient so downstream "p × gross area" gives F:
+  //   open sign  -> Cf_open · ε   (Cf_open on net area)
+  //   closed sign-> Cf_solid · [1-(1-ε)^1.5]   (reduced Cf on gross area)
+  const redux = isOpenSign ? eps : (1 - Math.pow(1-eps,1.5));
+  const cfBase = isOpenSign ? cfOpen : cfSolid;
+  const areaBasis = isOpenSign ? 'net' : 'gross';
+  const cfEff = cfBase*redux;                       // gross-area-equivalent effective coefficient
+  const p=qh*G*cfEff;                               // psf applied on the GROSS screen area downstream
+  // clamps actually used (so the reviewer sees if a value was at a table edge)
+  const bsClamped = bs<SIGN_BS[0]||bs>SIGN_BS[SIGN_BS.length-1];
+  const shClamped = sh<SIGN_SH[SIGN_SH.length-1]||sh>SIGN_SH[0];
+  return {qh,Kz,Kzt:s.Kzt,Kd:s.Kd,Ke:s.Ke,V:s.V,exposure:s.exposure,meanH:s.meanH,
+          G,B,sH,hTop,bs,sh,cfSolid,cfOpen,pctOpen,eps,isOpenSign,areaBasis,redux,cfBase,cfEff,p,bsClamped,shClamped};
+}
+
 const GEOM_FIELDS = [
   ['L_OH','Left overhang','ft','Horizontal (plan) distance the roof cantilevers past the left column, measured from the left column centerline to the low (left) roof tip. Sets where the roof starts and adds cantilever moment at the left column.'],
   ['R_OH','Right overhang','ft','Horizontal (plan) distance the roof cantilevers past the right column to the high (right) roof tip. For a single-column canopy this is the main cantilever arm.'],
@@ -721,10 +878,17 @@ const WINDCALC_FIELDS = [
   ['Kd','Directionality Kd','—','Wind directionality factor (Table 26.6-1). 0.85 for buildings/MWFRS \u2014 accounts for the low probability that peak wind aligns with the worst structural direction.'],
   ['Ke','Ground elevation Ke','—','Ground elevation factor (Table 26.9-1) for air-density change with altitude. 1.0 is conservative at any elevation; < 1.0 at high altitude.']
 ];
-const COLWIND_FIELDS = [
-  ['d_roof','Fascia depth','ft','Vertical depth of the fascia/edge band at the roof tip that catches wind. Multiplied by the fascia pressure and tributary width to get the horizontal point load at the beam end.'],
-  ['p_lat','Fascia wind press.','psf','Design wind pressure acting on the fascia face. Currently entered independently; set it consistent with your qₕ × G × C_f if tying it to the roof wind.'],
-  ['p_col','Column wind press.','psf','Design wind pressure on the projected column face. Applied as a horizontal line load = pressure × column depth over the column height.']
+const FASCIA_DEPTH_FIELDS = [
+  ['d_roof','Fascia depth','ft','Vertical depth of the fascia/edge band at the roof tip that catches wind. Multiplied by the fascia pressure and tributary width to get the horizontal point load at the beam end.']
+];
+const FASCIA_PRESS_FIELDS = [
+  ['p_lat','Fascia wind press.','psf','Design wind pressure on the fascia face. In Calculate mode it is derived from qₕ·G·C_f with C_f from ASCE 7-16 Fig. 29.4-1 (flat-sided, normal to face) by the fascia aspect ratio (length/depth).']
+];
+const COLPRESS_FIELDS = [
+  ['p_col','Column wind press.','psf','Design wind pressure on the projected column face, applied as a horizontal line load = pressure × column width over the height. In Calculate mode it is derived from qₕ·G·C_f with C_f from ASCE 7-16 Fig. 29.4-1 (flat-sided, normal to face) by the column aspect ratio h/D.']
+];
+const SCREEN_PCT_FIELDS = [
+  ['scrPctOpen','Percent open','%','Percent of the windscreen area that is open (perforations/gaps), 0 = solid. ASCE 7-16: at or below 30% open it is a closed sign — solid-sign C_f (Fig. 29.3-1) reduced per §29.3.1, applied over the gross area. Above 30% open it is an open sign — C_f from Fig. 29.4-2 (flat-sided, by solidity ε) applied over the net (solid) area, with no reduction factor.']
 ];
 const SCREEN_PRESS_FIELDS = [
   ['p_screen','Screen wind press.','psf','Design wind pressure on the windscreen/infill. Applied as a horizontal uniform load over the screen height on one column line = pressure × tributary width. Used for both full- and partial-height screens.']
@@ -744,8 +908,11 @@ buildFields('snowCalcFields',SNOWCALC_FIELDS);
 buildFields('qhField',QH_FIELDS);
 buildFields('gField',G_FIELDS);
 buildFields('windCalcFields',WINDCALC_FIELDS);
-buildFields('colWindFields',COLWIND_FIELDS);
+buildFields('fasciaDepthField',FASCIA_DEPTH_FIELDS);
+buildFields('fasciaPressField',FASCIA_PRESS_FIELDS);
+buildFields('colPressField',COLPRESS_FIELDS);
 buildFields('screenPressField',SCREEN_PRESS_FIELDS);
+buildFields('screenPctField',SCREEN_PCT_FIELDS);
 buildFields('screenElevFields',SCREEN_ELEV_FIELDS);
 
 // ---- AISC section dropdowns ----
@@ -758,7 +925,7 @@ function populateSectDropdown(id){
 function sectDescHTML(desig){
   const p=sectProps(desig);
   if(!p.found) return `<span style="color:var(--rust)">⚠ Section "${desig}" not in the AISC database — using fallback properties. Pick a listed section.</span>`;
-  return `${p.shape==='H'?'Wide-flange':'HSS'} · d = ${p.d}\u2033, ${p.shape==='H'?'b<sub>f</sub>':'b'} = ${p.b}\u2033, A = ${p.A} in\u00b2, ${p.w} plf, I<sub>x</sub> = ${p.Ix} in\u2074, S<sub>x</sub> = ${p.Sx} in\u00b3`;
+  return `${p.shape==='H'?'Wide-flange':'HSS'} · d = ${p.d}\u2033, ${p.shape==='H'?'b<sub>f</sub>':'b'} = ${p.b}\u2033, A = ${p.A} in\u00b2, ${(p.A*490/144).toFixed(2)} plf, I<sub>x</sub> = ${p.Ix} in\u2074, S<sub>x</sub> = ${p.Sx} in\u00b3`;
 }
 function refreshSectDesc(){
   document.getElementById('beamSectDesc').innerHTML=sectDescHTML(state.beamSect);
@@ -791,17 +958,50 @@ function applyWindCalc(){
   const r=calcWind(state); state.q_h=+r.qh.toFixed(2);
   const qf=document.querySelector('#qhField input[data-k=q_h]'); if(qf)qf.value=state.q_h;
   // geometry-derived mean roof height = average of low-eave and high-ridge elevations
-  // above the base. meanH is a manual input (Kz lookup); warn if it has drifted.
   const g=computeModel(state).geom;
   const hMeanGeom=((g.yStart - state.El_base)+(g.yEnd - state.El_base))/2;
   const drift=Math.abs(state.meanH - hMeanGeom);
   const warn = drift>0.5
-    ? `<br><span style="color:var(--rust)">⚠ Mean roof height entered (${f(state.meanH,1)} ft) differs from the geometry (${f(hMeanGeom,2)} ft). Update it if the geometry changed.</span>`
-    : `<br><span style="color:var(--muted)">Geometry mean roof height ≈ ${f(hMeanGeom,2)} ft (matches input).</span>`;
-  document.getElementById('windResult').innerHTML=
-    `Kz(${f(state.meanH,0)} ft, Exp ${state.exposure}) = <b>${f(r.Kz,3)}</b><br>`+
-    `qₕ = 0.00256·Kz·Kzt·Kd·Ke·V²<br>`+
-    `= 0.00256·${f(r.Kz,3)}·${state.Kzt}·${state.Kd}·${state.Ke}·${state.V}² = <b>${f(r.qh,1)} psf</b>`+warn;
+    ? ` <span style="color:var(--rust)">⚠ meanH ${f(state.meanH,1)} ft vs geometry ${f(hMeanGeom,2)} ft</span>`
+    : '';
+  const el=document.getElementById('windResult');
+  el.innerHTML=`<b>q<sub>h</sub> = ${f(r.qh,1)} psf</b> &nbsp;<span style="color:var(--muted)">computed (Eq. 26.10-1): K<sub>z</sub>=${f(r.Kz,3)}, Exp ${state.exposure}, z=${f(state.meanH,0)} ft. Full derivation in the Wind derivation panel →</span>${warn}`;
+}
+
+function applyColWindCalc(){
+  const el=document.getElementById('colWindResult');
+  if(state.colWindMode!=='calc'){ if(el){el.style.display='none';el.innerHTML='';} return; }
+  const r=calcColWind(state);
+  state.p_col=+r.p.toFixed(2);
+  const pf=document.querySelector('#colPressField input[data-k=p_col]'); if(pf)pf.value=state.p_col;
+  if(el){ el.style.display='block';
+    el.innerHTML=`<b>p<sub>col</sub> = ${f(r.p,1)} psf</b> &nbsp;<span style="color:var(--muted)">computed (§29.4, Fig. 29.4-1 flat-sided): h/D=${f(r.hD,1)} → C<sub>f</sub>=${f(r.cf,2)}. Full derivation in the Wind derivation panel →</span>${r.clamped?` <span style="color:var(--rust)">(h/D outside 1–25 — clamped)</span>`:''}`;
+  }
+}
+function applyFasciaWindCalc(){
+  const el=document.getElementById('fasciaWindResult');
+  if(state.fasciaWindMode!=='calc'){ if(el){el.style.display='none';el.innerHTML='';} return; }
+  const r=calcFasciaWind(state);
+  state.p_lat=+r.p.toFixed(2);
+  const pf=document.querySelector('#fasciaPressField input[data-k=p_lat]'); if(pf)pf.value=state.p_lat;
+  if(el){ el.style.display='block';
+    el.innerHTML=`<b>p<sub>lat</sub> = ${f(r.p,1)} psf</b> &nbsp;<span style="color:var(--muted)">computed (§29.4, Fig. 29.4-1 flat-sided): length/depth=${f(r.hD,1)} → C<sub>f</sub>=${f(r.cf,2)}. Full derivation in the Wind derivation panel →</span>${r.clamped?` <span style="color:var(--rust)">(ratio outside 1–25 — clamped)</span>`:''}`;
+  }
+}
+
+function applyScreenWindCalc(){
+  if(state.screenWindMode!=='calc' || state.screen==='none') {
+    const el=document.getElementById('screenWindResult'); if(el) el.innerHTML='';
+    return;
+  }
+  const r=calcScreenWind(state);
+  state.p_screen=+r.p.toFixed(2);
+  const sf=document.querySelector('#screenPressField input[data-k=p_screen]'); if(sf)sf.value=state.p_screen;
+  const el=document.getElementById('screenWindResult');
+  if(!el) return;
+  const edge=(r.bsClamped||r.shClamped)?` <span style="color:var(--rust)">(B/s or s/h outside Fig. 29.3-1 range — clamped)</span>`:'';
+  const basis = r.isOpenSign ? `open sign (Fig. 29.4-2), C<sub>f</sub>=${f(r.cfOpen,1)} on net area, ${f(r.pctOpen,0)}% open` : `solid sign (Fig. 29.3-1), gross area, ${f(r.pctOpen,0)}% open`;
+  el.innerHTML=`<b>p<sub>scr</sub> = ${f(r.p,1)} psf</b> &nbsp;<span style="color:var(--muted)">computed (ASCE §29.3): ${basis}. Full derivation in the Wind derivation panel →</span>${edge}`;
 }
 
 let _recomputeTimer=null;
@@ -810,10 +1010,31 @@ document.addEventListener('input',e=>{const inp=e.target.closest('input[data-k]'
   // if a snow/wind calc input changed, recompute the derived pressure
   if(['pg','Ce','Ct'].includes(inp.dataset.k))applySnowCalc();
   if(['V','meanH','Kzt','Kd','Ke'].includes(inp.dataset.k))applyWindCalc();
+  if(['scrPctOpen','scr_bot','scr_top','B_trib','H_col','V','meanH','Kzt','Kd','Ke','G'].includes(inp.dataset.k))applyScreenWindCalc();
+  if(['H_col','V','meanH','Kzt','Kd','Ke','G'].includes(inp.dataset.k))applyColWindCalc();
+  if(['d_roof','B_trib','V','meanH','Kzt','Kd','Ke','G'].includes(inp.dataset.k))applyFasciaWindCalc();
   recomputeDebounced();}});
 
 const segFix=document.getElementById('segFix');
 function bindSeg(seg,prop,cb){if(!seg)return;seg.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{seg.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');state[prop]=b.dataset.v;if(cb)cb(b.dataset.v);recompute();}));}
+
+// screen wind mode toggle (manual psf vs ASCE 29.3 calculate)
+bindSeg(document.getElementById('segScreenWind'),'screenWindMode',v=>{
+  document.getElementById('screenCalcFields').style.display=v==='calc'?'block':'none';
+  const pf=document.querySelector('#screenPressField input[data-k=p_screen]');
+  if(pf) pf.readOnly=(v==='calc');
+  if(v==='calc') applyScreenWindCalc();
+});
+// column wind mode toggle (manual vs §29.4 calculate)
+bindSeg(document.getElementById('segColWind'),'colWindMode',v=>{
+  const pf=document.querySelector('#colPressField input[data-k=p_col]'); if(pf) pf.readOnly=(v==='calc');
+  applyColWindCalc();
+});
+// fascia wind mode toggle (manual vs §29.4 calculate)
+bindSeg(document.getElementById('segFasciaWind'),'fasciaWindMode',v=>{
+  const pf=document.querySelector('#fasciaPressField input[data-k=p_lat]'); if(pf) pf.readOnly=(v==='calc');
+  applyFasciaWindCalc();
+});
 
 // ---- column count + bay-spacing table ----
 function syncBayLength(){
@@ -979,7 +1200,7 @@ function computeModel(s){
   // memoize: computeModel is pure in s and called many times per render. Cache the
   // last result keyed on a signature of the inputs that affect geometry/loads.
   const key=JSON.stringify([s.L_OH,s.R_OH,s.slope,s.H_col,s.El_base,s.B_trib,s.nCol,s.baySpacings,
-    s.DL,s.SL,s.q_h,s.G,s.flow,s.d_roof,s.p_lat,s.p_col,s.screen,s.p_screen,s.scr_bot,s.scr_top,s.colSect]);
+    s.DL,s.SL,s.q_h,s.G,s.flow,s.d_roof,s.p_lat,s.p_col,s.colWindMode,s.fasciaWindMode,s.screen,s.p_screen,s.scr_bot,s.scr_top,s.scrPctOpen,s.screenWindMode,s.colSect]);
   if(_cmCache.key===key) return _cmCache.val;
   const val=_computeModel(s);
   _cmCache={key,val};
@@ -1279,7 +1500,12 @@ function buildMCT(s){
     const beamRows=[];
     beamLoadBlock(beamRows, lowerEls, 'LZ', wLower);
     beamLoadBlock(beamRows, upperEls, 'LZ', wUpper);
-    beamLoadBlock(beamRows, colEls, 'GX', dragSign*wColWind);
+    // Column drag applies to all column elements EXCEPT the screened band on the screened
+    // column line: there the windscreen pressure governs and replaces the bare-column drag
+    // (avoids double-counting wind over the screen height). Other columns keep full drag.
+    const screenSet = new Set(screenEls);
+    const dragEls = (screenEls.length) ? colEls.filter(id=>!screenSet.has(id)) : colEls;
+    beamLoadBlock(beamRows, dragEls, 'GX', dragSign*wColWind);
     if(screenEls.length) beamLoadBlock(beamRows, screenEls, 'GX', dragSign*wScreen);
     if(beamRows.length){
       lines.push('*BEAMLOAD    ; Element Beam Loads');
@@ -1591,8 +1817,8 @@ async function buildReport(){
     ['Mesh max length / min elements', `${s.mesh_max} ft / ${Math.max(1,Math.round(s.mesh_minN||1))} per member`],
     ['Dead load $D$', s.DL+' psf'],['Snow load $S$', s.SL+' psf'],
     ['Velocity pressure $q_h$', s.q_h+' psf'],['Gust factor $G$', s.G],['Wind flow', s.flow==='clear'?'Clear':'Obstructed'],
-    ['Fascia depth $d_f$ × press.', `${s.d_roof} ft × ${s.p_lat} psf`],['Column wind press.', s.p_col+' psf'],
-    ['Windscreen', s.screen==='none'?'none':`${s.screen}, ${s.p_screen} psf`+(s.screen==='partial'?`, el ${s.scr_bot}–${s.scr_top} ft`:'')]
+    ['Fascia depth $d_f$ × press.', `${s.d_roof} ft × ${f(s.p_lat,1)} psf`+(s.fasciaWindMode==='calc'?' (§29.4)':'')],['Column wind press.', `${f(s.p_col,1)} psf`+(s.colWindMode==='calc'?' (§29.4)':'')],
+    ['Windscreen', s.screen==='none'?'none':`${s.screen}, ${f(s.p_screen,1)} psf`+(s.screenWindMode==='calc'?` (ASCE 29.3, ${f(s.scrPctOpen||0,0)}% open)`:'')+(s.screen==='partial'?`, el ${s.scr_bot}–${s.scr_top} ft`:'')]
   ].map(([l,v])=>fld(l,v)).join('');
 
   // ---- GEOMETRY derivation ----
@@ -1627,7 +1853,7 @@ async function buildReport(){
   \\[ W_{sw} = \\gamma\\left(A_{beam}L_{beam} + ${nCols(s)}\\,A_{col}H\\right)
      = ${s.density_pcf}\\left(${f(R.Abeam,4)}\\cdot${f(Lbeam,2)} + ${nCols(s)}\\cdot${f(R.Acol,4)}\\cdot${s.H_col}\\right)
      = ${f(R.W_sw*1000,1)}\\ \\text{lbf} \\]
-  <p class="note-sm">Equivalently from the tabulated weights: ${beamP.desig} = ${beamP.w} plf, ${colP.desig} = ${colP.w} plf.</p>
+  <p class="note-sm">Equivalently as line weights (\\(\\gamma A\\), consistent with the MIDAS self-weight basis): ${beamP.desig} = ${f(consistentPlf(beamP.desig,s.density_pcf),2)} plf, ${colP.desig} = ${f(consistentPlf(colP.desig,s.density_pcf),2)} plf.</p>
   `;
 
   // ---- GRAVITY LOADS ----
@@ -1671,12 +1897,38 @@ async function buildReport(){
 
   // ---- lateral wind components ----
   const latMath=`
+  ${s.fasciaWindMode==='calc'?(()=>{const r=calcFasciaWind(s);return `
+  <p>Fascia pressure — the fascia is treated as a flat-sided member per ASCE 7-16 §29.4 (Fig. 29.4-1, force coefficient normal to the face). The aspect ratio is the fascia length (tributary width \\(B\\)) over its depth, and \\(C_f\\) is interpolated across the tabulated h/D = 1, 7, 25 (\\(C_f\\) = 1.3, 1.4, 2.0):</p>
+  \\[ \\frac{\\text{length}}{\\text{depth}} = \\frac{${f(r.len,1)}}{${f(r.depth,2)}} = ${f(r.hD,1)} \\;\\Rightarrow\\; C_f = ${f(r.cf,2)} \\]
+  \\[ p_{lat} = q_h\\,G\\,C_f = (${f(r.qh,1)})(${r.G})(${f(r.cf,2)}) = ${f(r.p,1)}\\ \\text{psf} \\]${r.clamped?`<p class="note-sm" style="color:#b3502d">Note: the fascia aspect ratio is outside the tabulated h/D range (1–25); \\(C_f\\) was clamped to the nearest value.</p>`:''}`;})():''}
   <p>Fascia drag — wind on the projected fascia depth, as a horizontal point load at the roof tip:</p>
-  \\[ F_{fascia} = d_f\\cdot p_{lat}\\cdot B = ${s.d_roof}\\cdot${s.p_lat}\\cdot${s.B_trib} = ${f(ld.F_fascia*1000,0)}\\ \\text{lbf} = ${f(ld.F_fascia,2)}\\ \\text{k} \\]
-  <p>Column drag — wind on the projected column width, as a horizontal line load over each column:</p>
-  \\[ w_{col} = p_{col}\\cdot\\tfrac{d_{col}}{12} = ${s.p_col}\\cdot${f(sectProps(s.colSect).d/12,4)} = ${f(s.p_col*sectProps(s.colSect).d/12,2)}\\ \\text{lbf/ft} \\]
-  ${ld.screenH>0?`<p>Windscreen — uniform lateral load over the screen height \\(h_{scr}=${f(ld.screenH,2)}\\) ft, transferred to one column line:</p>
-  \\[ F_{scr} = p_{scr}\\cdot h_{scr}\\cdot B = ${s.p_screen}\\cdot${f(ld.screenH,2)}\\cdot${s.B_trib} = ${f(ld.F_screen*1000,0)}\\ \\text{lbf} = ${f(ld.F_screen,2)}\\ \\text{k} \\]`:''}
+  \\[ F_{fascia} = d_f\\cdot p_{lat}\\cdot B = ${f(s.d_roof,2)}\\cdot${f(s.p_lat,1)}\\cdot${s.B_trib} = ${f(ld.F_fascia*1000,0)}\\ \\text{lbf} = ${f(ld.F_fascia,2)}\\ \\text{k} \\]
+  ${s.colWindMode==='calc'?(()=>{const r=calcColWind(s);return `
+  <p>Column pressure — each column is treated as a flat-sided member per ASCE 7-16 §29.4 (Fig. 29.4-1, normal to the face). The aspect ratio is the column height over its projected width \\(h/D\\), and \\(C_f\\) is interpolated across h/D = 1, 7, 25 (\\(C_f\\) = 1.3, 1.4, 2.0):</p>
+  \\[ \\frac{h}{D} = \\frac{${f(r.h,1)}}{${f(r.D,2)}} = ${f(r.hD,1)} \\;\\Rightarrow\\; C_f = ${f(r.cf,2)} \\]
+  \\[ p_{col} = q_h\\,G\\,C_f = (${f(r.qh,1)})(${r.G})(${f(r.cf,2)}) = ${f(r.p,1)}\\ \\text{psf} \\]${r.clamped?`<p class="note-sm" style="color:#b3502d">Note: the column h/D is outside the tabulated range (1–25); \\(C_f\\) was clamped to the nearest value.</p>`:''}`;})():''}
+  <p>Column drag — wind on the projected column width, as a horizontal line load over each column${ld.screenH>0?`. Over the windscreen band on the screened column line, the windscreen pressure governs and the bare-column drag is omitted there to avoid double-counting`:''}:</p>
+  \\[ w_{col} = p_{col}\\cdot\\tfrac{d_{col}}{12} = ${f(s.p_col,1)}\\cdot${f(sectProps(s.colSect).d/12,4)} = ${f(s.p_col*sectProps(s.colSect).d/12,2)}\\ \\text{lbf/ft} \\]
+  <p class="note-sm">The projected width \\(d_{col} = ${f(sectProps(s.colSect).d,2)}\\)\u2033 is the actual ${s.colSect} face dimension from the AISC database, not a generic input.</p>
+  ${ld.screenH>0?`${s.screenWindMode==='calc'?(()=>{const r=calcScreenWind(s);return `
+  <p><b>Windscreen wind pressure — ASCE 7-16 Chapter 29 (sign provisions).</b> The windscreen is treated as a sign. The design pressure is built from the velocity pressure, the gust-effect factor \\(G\\), and the sign force coefficient \\(C_f\\) (Fig. 29.3-1). Signs with more than 30% open area are classified as open signs and the force is applied over the net (solid) area; otherwise the §29.3.1 reduced coefficient is applied over the gross area.</p>
+  <p><i>Velocity pressure</i> (Eq. 26.10-1), with \\(K_z\\) from Table 26.10-1 (Exposure ${r.exposure}, \\(z=${f(r.meanH,0)}\\) ft):</p>
+  \\[ q_h = 0.00256\\,K_z K_{zt} K_d K_e V^2 = 0.00256(${f(r.Kz,3)})(${r.Kzt})(${r.Kd})(${r.Ke})(${r.V})^2 = ${f(r.qh,1)}\\ \\text{psf} \\]
+  <p><i>Sign geometry</i> — width \\(B\\) taken as the tributary width, height \\(s\\) the screen band, and \\(h\\) the height to the top of the screen above grade:</p>
+  \\[ B = ${f(r.B,1)}\\ \\text{ft},\\quad s = ${f(r.sH,2)}\\ \\text{ft},\\quad h = ${f(r.hTop,2)}\\ \\text{ft}
+     \\;\\Rightarrow\\; \\frac{B}{s} = ${f(r.bs,2)},\\quad \\frac{s}{h} = ${f(r.sh,2)} \\]
+  ${!r.isOpenSign?`<p><i>Force coefficient</i> \\(C_f\\), interpolated from Fig. 29.3-1 (solid freestanding/attached signs) at the above \\(B/s\\) and \\(s/h\\):</p>
+  \\[ C_{f,\\text{solid}} = ${f(r.cfSolid,2)} \\]
+  ${r.bsClamped||r.shClamped?`<p class="note-sm" style="color:#b3502d">Note: \\(B/s\\) or \\(s/h\\) falls outside the tabulated range of Fig. 29.3-1; the value was clamped to the nearest tabulated entry.</p>`:''}`:''}
+  ${r.isOpenSign?`
+  <p><i>Open-sign classification</i> — ${f(r.pctOpen,0)}% open \\(>30\\%\\), so solidity \\(\\varepsilon = 1 - \\tfrac{\\%\\text{open}}{100} = ${f(r.eps,3)} < 0.70\\). The screen is an open sign (ASCE 7-16 Fig. 29.4-2). The force coefficient is read from the open-sign table by \\(\\varepsilon\\) for flat-sided members, and the wind force acts on the net (solid) area \\(A_{net} = \\varepsilon A_{gross}\\). No reduction factor is applied (the Fig. 29.3-1 solid \\(C_f\\) and the §29.3.1 reduction are not used for an open sign):</p>
+  \\[ C_{f,\\text{open}} = ${f(r.cfOpen,2)} \\quad(\\varepsilon = ${f(r.eps,2)},\\ \\text{flat-sided; } \\varepsilon<0.1\\!\\to\\!2.0,\\ 0.1\\text{–}0.29\\!\\to\\!1.8,\\ 0.3\\text{–}0.7\\!\\to\\!1.6) \\]
+  \\[ p_{scr} = q_h\\,G\\,C_{f,\\text{open}}\\,\\varepsilon = (${f(r.qh,1)})(${r.G})(${f(r.cfOpen,2)})(${f(r.eps,3)}) = \\mathbf{${f(r.p,1)}\\ \\text{psf}} \\quad(\\text{net-area basis}) \\]`:`
+  <p><i>Open-sign reduction</i> (§29.3.1) — ${f(r.pctOpen,0)}% open \\(\\le 30\\%\\), so solidity \\(\\varepsilon = ${f(r.eps,3)} \\ge 0.70\\) (closed sign). \\(C_f\\) is reduced for the openings and applied over the gross area:</p>
+  \\[ C_{f,\\text{eff}} = C_{f,\\text{solid}}\\left[\\,1-(1-\\varepsilon)^{1.5}\\,\\right] = ${f(r.cfSolid,2)}\\,(${f(r.redux,3)}) = ${f(r.cfEff,2)} \\]
+  \\[ p_{scr} = q_h\\,G\\,C_{f,\\text{eff}} = (${f(r.qh,1)})(${r.G})(${f(r.cfEff,2)}) = \\mathbf{${f(r.p,1)}\\ \\text{psf}} \\quad(\\text{gross-area basis}) \\]`}`;})():`<p>Windscreen pressure \\(p_{scr} = ${f(s.p_screen,1)}\\) psf entered directly (manual).</p>`}
+  <p>Windscreen resultant — the pressure acts as a uniform horizontal load over the screen height \\(h_{scr}=${f(ld.screenH,2)}\\) ft, transferred to one column line over tributary width \\(B=${s.B_trib}\\) ft:</p>
+  \\[ F_{scr} = p_{scr}\\cdot h_{scr}\\cdot B = ${f(s.p_screen,1)}\\cdot${f(ld.screenH,2)}\\cdot${s.B_trib} = ${f(ld.F_screen*1000,0)}\\ \\text{lbf} = ${f(ld.F_screen,2)}\\ \\text{k} \\]`:''}
   `;
 
   // ---- snow/wind CALC sections (only when calc mode active) ----
@@ -1729,7 +1981,7 @@ async function buildReport(){
     ${imgTag(imgReactFBD,'Figure 6.1 — Column base free-body: member forces (red) and equal-and-opposite reactions (blue), governing envelope.')}
     <h3>6.1 Governing base reactions (MIDAS) — all columns</h3>
     <table class="rpt"><thead><tr><th>Column</th><th>Max |N| reaction (${uForceLbl()})<br>+ = compression</th><th>Max |V| reaction (${uForceLbl()})</th><th>Max |M| base (${uMomLbl()})</th></tr></thead><tbody>${govR}</tbody></table>
-    <p class="note-sm">Governing = independent maximum of |N|, |V|, |M| across all pasted load cases / combinations; the driving case is noted beneath each value.</p>
+    <p class="note-sm">Governing = independent maximum of |N|, |V|, |M| ${gov.noEnvelope?`across all pasted load cases (no Envelope combination was found, so individual unfactored cases are included — paste the Envelope results for correct design reactions)`:`taken from the pasted <b>Envelope</b> strength combination, which already brackets the 14 ASCE 7-16 strength combinations`}; the driving ${gov.noEnvelope?'case':'envelope'} is noted beneath each value. Because the maxima are taken independently, the three values for a column may come from different points in the envelope and need not act concurrently.</p>
     <h3>6.2 Reactions by load case &amp; column (MIDAS)</h3>
     <table class="rpt"><thead><tr><th>Load / combo</th><th>Column</th><th>N (${uForceLbl()})</th><th>V (${uForceLbl()})</th><th>M (${uMomLbl()})</th></tr></thead><tbody>${caseRows}</tbody></table>`;
   }
@@ -2655,7 +2907,7 @@ function renderGravDerived(s,g,ld){
   const bp=sectProps(s.beamSect), cp=sectProps(s.colSect);
   const Abeam=bp.A/144, Acol=cp.A/144;
   const Wsw=(Abeam*Lbeam + nCols(s)*Acol*s.H_col)*s.density_pcf/1000;
-  items.push({label:'Member self weight (added automatically by MIDAS)', note:`${bp.desig} = ${bp.w} plf, ${cp.desig} = ${cp.w} plf`,
+  items.push({label:'Member self weight (added automatically by MIDAS)', note:`${bp.desig} = ${f(consistentPlf(bp.desig,s.density_pcf),2)} plf, ${cp.desig} = ${f(consistentPlf(cp.desig,s.density_pcf),2)} plf (\\u03b3A basis)`,
     tex:`W_{sw} = \\gamma\\,(A_{beam}L_{beam} + ${nCols(s)}\\,A_{col}H) = ${s.density_pcf}\\,(${f(Abeam,4)}\\cdot${f(Lbeam,2)} + ${nCols(s)}\\cdot${f(Acol,4)}\\cdot${f(s.H_col,2)}) = ${f(Wsw,2)}\\ \\text{kip}`});
   items.push({h:'Shared'});
   items.push({label:'Tributary width and span used above',
@@ -2812,16 +3064,52 @@ function renderWindDerived(s,g,ld){
       tex:`C_{NW}=${f(wc.cnw,3)},\\ C_{NL}=${f(wc.cnl,3)}\\ \\Rightarrow\\ p_W=${f(wc.pW,2)},\\ p_L=${f(wc.pL,2)}\\ \\text{psf}`});
   });
   items.push({h:'Lateral wind — fascia (point load)'});
+  if(s.fasciaWindMode==='calc'){
+    const r=calcFasciaWind(s);
+    items.push({label:'Fascia pressure (ASCE 7-16 §29.4, Fig. 29.4-1, flat-sided, normal to face)', note:`aspect ratio = fascia length (tributary \\(B\\)) / depth = \\(${f(r.len,1)}/${f(r.depth,2)} = ${f(r.hD,1)}\\); \\(C_f\\) interpolated at h/D = 1, 7, 25 \\(\\to\\) 1.3, 1.4, 2.0`+(r.clamped?'; aspect ratio outside 1–25, clamped':''),
+      tex:`p_{lat} = q_h\\,G\\,C_f = ${f(r.qh,1)}\\cdot${f(s.G,2)}\\cdot${f(r.cf,2)} = ${f(r.p,1)}\\ \\text{psf}\\quad(C_f=${f(r.cf,2)})`});
+  }
   items.push({label:'Fascia point load at the roof tip', note:'depth × pressure × tributary width',
     tex:`F_{fascia} = d_f\\,p_{lat}\\,B = ${f(s.d_roof,2)}\\cdot${f(s.p_lat,1)}\\cdot${f(B,1)} = ${f(ld.F_fascia*1000,0)}\\ \\text{lbf} = ${f(ld.F_fascia,3)}\\ \\text{kip}`});
   items.push({h:'Lateral wind — column drag (linear load)'});
-  items.push({label:'Uniform line load down each column', note:`projected column depth \\(d_{col}=${f(sectProps(s.colSect).d,2)}\\) in`,
+  if(s.colWindMode==='calc'){
+    const r=calcColWind(s);
+    items.push({label:'Column pressure (ASCE 7-16 §29.4, Fig. 29.4-1, flat-sided, normal to face)', note:`aspect ratio \\(h/D = ${f(r.h,1)}/${f(r.D,2)} = ${f(r.hD,1)}\\); \\(C_f\\) interpolated at h/D = 1, 7, 25 \\(\\to\\) 1.3, 1.4, 2.0`+(r.clamped?'; h/D outside 1–25, clamped':''),
+      tex:`p_{col} = q_h\\,G\\,C_f = ${f(r.qh,1)}\\cdot${f(s.G,2)}\\cdot${f(r.cf,2)} = ${f(r.p,1)}\\ \\text{psf}\\quad(C_f=${f(r.cf,2)})`});
+  }
+  items.push({label:'Uniform line load down each column', note:`projected column width \\(d_{col}=${f(sectProps(s.colSect).d,2)}\\) in`,
     tex:`w_{col} = p_{col}\\,\\dfrac{d_{col}}{12} = ${f(s.p_col,1)}\\cdot\\dfrac{${f(sectProps(s.colSect).d,2)}}{12} = ${f(wCol,2)}\\ \\text{lbf/ft}`});
   items.push({label:'Resultant per column (line load integrated over the height)',
     tex:`F_{col} = w_{col}\\,H = ${f(wCol,2)}\\cdot${f(s.H_col,2)} = ${f(Fcol,0)}\\ \\text{lbf} = ${f(Fcol/1000,3)}\\ \\text{kip}`});
   if(ld.screenH>0){
     items.push({h:'Lateral wind — windscreen (linear load)'});
-    items.push({label:'Uniform line load over the screen band, on the first column line', note:'pressure × tributary width',
+    if(s.screenWindMode==='calc'){
+      const r=calcScreenWind(s);
+      items.push({label:'Windscreen treated as a sign (ASCE 7-16 §29.3)', note:'the perforated screen is evaluated as a sign: \\(C_f\\) from Fig. 29.3-1, reduced for openings per §29.3.1',
+        tex:`p_{scr} = q_h\\,G\\,C_{f,\\text{eff}}`});
+      items.push({label:'Sign geometry', note:'\\(B\\) = tributary width, \\(s\\) = screen band height, \\(h\\) = height of screen top above grade. \\(B/s\\) is the aspect ratio and \\(s/h\\) the clearance ratio used in Fig. 29.3-1',
+        tex:`\\frac{B}{s}=\\frac{${f(r.B,1)}}{${f(r.sH,2)}}=${f(r.bs,2)},\\qquad \\frac{s}{h}=\\frac{${f(r.sH,2)}}{${f(r.hTop,2)}}=${f(r.sh,2)}`});
+      if(!r.isOpenSign){
+        items.push({label:'Force coefficient (Fig. 29.3-1, solid sign)', note:'interpolated at the ratios above'+((r.bsClamped||r.shClamped)?'; a ratio was outside the tabulated range and was clamped to the nearest value':''),
+          tex:`C_{f,\\text{solid}} = ${f(r.cfSolid,2)}`});
+      }
+      if(r.isOpenSign){
+        items.push({label:'Openings classification', note:`\\(${f(r.pctOpen,0)}\\%\\) open \\(>30\\%\\) \\(\\Rightarrow\\) solidity \\(\\varepsilon = ${f(r.eps,3)} < 0.70\\): OPEN sign (ASCE 7-16 Fig. 29.4-2). \\(C_f\\) is read from the open-sign table by \\(\\varepsilon\\) and applied to the NET (solid) area \\(\\varepsilon A_{gross}\\); no reduction factor is used.`,
+          tex:`A_{net} = \\varepsilon\\,A_{gross} = ${f(r.eps,3)}\\,A_{gross}`});
+        items.push({label:'Force coefficient (Fig. 29.4-2, flat-sided members)', note:`stepped by \\(\\varepsilon\\): \\(\\varepsilon<0.1\\to2.0\\), \\(0.1\\le\\varepsilon<0.3\\to1.8\\), \\(0.3\\le\\varepsilon\\le0.7\\to1.6\\)`,
+          tex:`C_{f,\\text{open}} = ${f(r.cfOpen,2)} \\quad (\\varepsilon = ${f(r.eps,2)})`});
+        items.push({label:'Design pressure (net-area force basis)', note:`gust-effect factor \\(G=${f(s.G,2)}\\) (§26.9). The equivalent uniform pressure on the gross band delivers the net-area force \\(q_h G C_{f,\\text{open}} A_{net}\\)`,
+          tex:`p_{scr} = q_h\\,G\\,C_{f,\\text{open}}\\,\\varepsilon = ${f(r.qh,1)}\\cdot${f(s.G,2)}\\cdot${f(r.cfOpen,2)}\\cdot${f(r.eps,3)} = ${f(r.p,1)}\\ \\text{psf}`});
+      } else {
+        items.push({label:'Reduction for openings (§29.3.1)', note:`\\(${f(r.pctOpen,0)}\\%\\) open \\(\\le 30\\%\\) \\(\\Rightarrow\\) \\(\\varepsilon = ${f(r.eps,3)} \\ge 0.70\\): solid (closed) sign. \\(C_f\\) is reduced for the openings and applied over the GROSS area.`,
+          tex:`C_{f,\\text{eff}} = C_{f,\\text{solid}}\\,[\\,1-(1-\\varepsilon)^{1.5}\\,] = ${f(r.cfSolid,2)}\\,(${f(r.redux,3)}) = ${f(r.cfEff,2)}`});
+        items.push({label:'Design pressure', note:`gust-effect factor \\(G=${f(s.G,2)}\\) (§26.9), on the gross screen area`,
+          tex:`p_{scr} = q_h\\,G\\,C_{f,\\text{eff}} = ${f(r.qh,1)}\\cdot${f(s.G,2)}\\cdot${f(r.cfEff,2)} = ${f(r.p,1)}\\ \\text{psf}`});
+      }
+    } else {
+      items.push({label:'Windscreen pressure (manual input)', tex:`p_{scr} = ${f(s.p_screen,1)}\\ \\text{psf}`});
+    }
+    items.push({label:'Uniform line load over the screen band, on the first column line', note:'pressure × tributary width; over this band the screen load replaces the bare-column drag so they are not double-counted',
       tex:`w_{scr} = p_{scr}\\,B = ${f(s.p_screen,1)}\\cdot${f(B,1)} = ${f(wScr,2)}\\ \\text{lbf/ft}`});
     items.push({label:`Applied over the screen band \\(z=${f(ld.scr_bot,1)}\\) to \\(${f(ld.scr_top,1)}\\) ft (height \\(h_{scr}=${f(ld.screenH,2)}\\) ft)`,
       tex:`F_{scr} = w_{scr}\\,h_{scr} = ${f(wScr,2)}\\cdot${f(ld.screenH,2)} = ${f(ld.F_screen*1000,0)}\\ \\text{lbf} = ${f(ld.F_screen,3)}\\ \\text{kip}`});
@@ -3132,6 +3420,9 @@ function recompute(){
   updateCfgTag();
   validateInputs();
   if(state.windMode==='calc') applyWindCalc();   // keep qh + meanH drift check current
+  if(state.screenWindMode==='calc') applyScreenWindCalc();
+  if(state.colWindMode==='calc') applyColWindCalc();
+  if(state.fasciaWindMode==='calc') applyFasciaWindCalc();
   // always recompute MCT (cheap) for stats + preview
   const {text,mesh}=buildMCT(state);
   _lastMCT=text; _lastMesh=mesh;
@@ -3217,7 +3508,7 @@ function refreshProjList(sel){
 function refreshAllInputs(){
   document.querySelectorAll('input[data-k]').forEach(inp=>{const k=inp.dataset.k;if(k in state)inp.value=state[k];});
   // segment buttons
-  const segMap=[['segConnect','beamConnect'],['segFix','baseFixity'],['segFlow','flow'],['segScreen','screen'],['segSnow','snowMode'],['segWind','windMode']];
+  const segMap=[['segConnect','beamConnect'],['segFix','baseFixity'],['segFlow','flow'],['segScreen','screen'],['segSnow','snowMode'],['segWind','windMode'],['segScreenWind','screenWindMode'],['segColWind','colWindMode'],['segFasciaWind','fasciaWindMode']];
   segMap.forEach(([id,prop])=>{const seg=document.getElementById(id);if(!seg)return;seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===state[prop]));});
   // column count + bay table
   document.getElementById('nColInput').value=nCols(state);
@@ -3227,6 +3518,10 @@ function refreshAllInputs(){
   document.getElementById('segFix').style.display='flex';
   document.getElementById('screenPressField').style.display=state.screen==='none'?'none':'block';
   document.getElementById('screenElevFields').style.display=state.screen==='partial'?'block':'none';
+  const scw=document.getElementById('screenCalcFields'); if(scw) scw.style.display=(state.screenWindMode==='calc'&&state.screen!=='none')?'block':'none';
+  const spf=document.querySelector('#screenPressField input[data-k=p_screen]'); if(spf) spf.readOnly=(state.screenWindMode==='calc');
+  const cpf=document.querySelector('#colPressField input[data-k=p_col]'); if(cpf) cpf.readOnly=(state.colWindMode==='calc');
+  const fpf=document.querySelector('#fasciaPressField input[data-k=p_lat]'); if(fpf) fpf.readOnly=(state.fasciaWindMode==='calc');
   document.getElementById('snowManual').style.display=state.snowMode==='manual'?'block':'none';
   document.getElementById('snowCalc').style.display=state.snowMode==='calc'?'block':'none';
   document.getElementById('windManual').style.display=state.windMode==='manual'?'block':'none';
@@ -3239,7 +3534,7 @@ function refreshAllInputs(){
   const bs=document.getElementById('beamSect'),csel=document.getElementById('colSect');
   if(bs)bs.value=state.beamSect; if(csel)csel.value=state.colSect;
   if(typeof refreshSectDesc==='function')refreshSectDesc();
-  applySnowCalc(); applyWindCalc();
+  applySnowCalc(); applyWindCalc(); applyScreenWindCalc(); applyColWindCalc(); applyFasciaWindCalc();
 }
 function applyProject(obj){
   STATE_KEYS.forEach(k=>{if(k in obj)state[k]=obj[k];});
