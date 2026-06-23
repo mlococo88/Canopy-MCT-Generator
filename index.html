@@ -10,7 +10,8 @@
 <!-- Firebase (modular v10 via gstatic CDN). Exposes window.CloudAPI for the main script. -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+           createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, orderBy, serverTimestamp }
     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -39,6 +40,22 @@
     currentUser: ()=> auth && auth.currentUser ? {email:auth.currentUser.email, name:auth.currentUser.displayName, uid:auth.currentUser.uid} : null,
     onAuth(cb){ if(!auth){cb(null);return;} onAuthStateChanged(auth, u=> cb(u?{email:u.email,name:u.displayName,uid:u.uid}:null)); },
     async signIn(){ if(!auth) throw new Error("Firebase unavailable"); const r=await signInWithPopup(auth, provider); return {email:r.user.email,name:r.user.displayName,uid:r.user.uid}; },
+    // Email/password: sign in to an existing account.
+    async signInEmail(email, password){
+      if(!auth) throw new Error("Firebase unavailable");
+      const r=await signInWithEmailAndPassword(auth, email, password);
+      return {email:r.user.email,name:r.user.displayName,uid:r.user.uid};
+    },
+    // Email/password: create a new account (the join code is redeemed separately, after sign-in).
+    async registerEmail(email, password){
+      if(!auth) throw new Error("Firebase unavailable");
+      const r=await createUserWithEmailAndPassword(auth, email, password);
+      return {email:r.user.email,name:r.user.displayName,uid:r.user.uid};
+    },
+    async resetPassword(email){
+      if(!auth) throw new Error("Firebase unavailable");
+      await sendPasswordResetEmail(auth, email); return true;
+    },
     async signOut(){ if(auth) await signOut(auth); },
     // membership: does this signed-in user have a members/{uid} doc?
     async isMember(){
@@ -196,7 +213,15 @@
   </div>
   <div class="projects-bar" id="cloudBar" style="border-top:1px dashed #d8d3c8">
     <span class="pb-label">☁ Cloud</span>
-    <button class="btn" id="cloudSignInBtn">Sign in with Google</button>
+    <span id="cloudSignedOut" style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <button class="btn" id="cloudSignInBtn">Sign in with Google</button>
+      <span class="pb-label" style="text-transform:none;letter-spacing:0;color:var(--muted)">or</span>
+      <input type="email" id="cloudEmail" class="inp" placeholder="email" style="width:150px" autocomplete="username">
+      <input type="password" id="cloudPassword" class="inp" placeholder="password" style="width:120px" autocomplete="current-password">
+      <button class="btn" id="cloudEmailSignInBtn">Sign in</button>
+      <button class="btn" id="cloudEmailRegisterBtn" title="Create a new email/password account">Create account</button>
+      <button class="btn" id="cloudResetBtn" title="Send a password reset email" style="border:none;background:none;color:var(--steel);text-decoration:underline;padding:4px 2px">Forgot?</button>
+    </span>
     <span id="cloudJoin" style="display:none;align-items:center;gap:8px">
       <span class="pb-label" id="cloudJoinUser" style="text-transform:none;letter-spacing:0"></span>
       <input type="text" id="cloudJoinCode" class="inp" placeholder="Enter access code" style="width:140px">
@@ -3607,10 +3632,14 @@ refreshProjList();
 
   function wire(){
     const API=window.CloudAPI;
-    if(!API||!API.ready){ const b=$('cloudSignInBtn'); if(b){b.disabled=true;b.textContent='Cloud unavailable';} return; }
+    if(!API||!API.ready){
+      ['cloudSignInBtn','cloudEmailSignInBtn','cloudEmailRegisterBtn','cloudResetBtn'].forEach(id=>{const b=$(id);if(b)b.disabled=true;});
+      const b=$('cloudSignInBtn'); if(b){b.textContent='Cloud unavailable';}
+      return;
+    }
 
     function setState(mode){ // 'out' | 'join' | 'in'
-      $('cloudSignInBtn').style.display = mode==='out'?'inline-block':'none';
+      $('cloudSignedOut').style.display  = mode==='out'?'inline-flex':'none';
       $('cloudJoin').style.display       = mode==='join'?'inline-flex':'none';
       $('cloudSignedIn').style.display   = mode==='in'?'inline-flex':'none';
     }
@@ -3642,6 +3671,42 @@ refreshProjList();
     }
 
     $('cloudSignInBtn').onclick=async()=>{ try{ await API.signIn(); }catch(e){ cloudStatus('Sign-in failed or cancelled.',true); console.error(e); } };
+
+    // Map Firebase auth error codes to plain-language messages.
+    function authMsg(e){
+      const c=(e&&e.code)||'';
+      if(c==='auth/invalid-email') return 'Enter a valid email address.';
+      if(c==='auth/missing-password'||c==='auth/weak-password') return 'Password must be at least 6 characters.';
+      if(c==='auth/email-already-in-use') return 'That email already has an account — use Sign in instead.';
+      if(c==='auth/invalid-credential'||c==='auth/wrong-password'||c==='auth/user-not-found') return 'Email or password is incorrect.';
+      if(c==='auth/too-many-requests') return 'Too many attempts. Try again later or reset your password.';
+      return 'Sign-in failed. Check your email and password.';
+    }
+    function emailCreds(){
+      return { email:($('cloudEmail').value||'').trim(), pw:$('cloudPassword').value||'' };
+    }
+    $('cloudEmailSignInBtn').onclick=async()=>{
+      const {email,pw}=emailCreds();
+      if(!email||!pw){ cloudStatus('Enter email and password.',true); return; }
+      try{ await API.signInEmail(email, pw); $('cloudPassword').value=''; }
+      catch(e){ cloudStatus(authMsg(e),true); console.error(e); }
+    };
+    $('cloudEmailRegisterBtn').onclick=async()=>{
+      const {email,pw}=emailCreds();
+      if(!email||!pw){ cloudStatus('Enter email and a password (6+ characters) to create an account.',true); return; }
+      if(pw.length<6){ cloudStatus('Password must be at least 6 characters.',true); return; }
+      try{ await API.registerEmail(email, pw); $('cloudPassword').value=''; cloudStatus('Account created — now enter the access code.'); }
+      catch(e){ cloudStatus(authMsg(e),true); console.error(e); }
+    };
+    $('cloudResetBtn').onclick=async()=>{
+      const email=($('cloudEmail').value||'').trim();
+      if(!email){ cloudStatus('Enter your email above, then click Forgot.',true); return; }
+      try{ await API.resetPassword(email); cloudStatus('Password reset email sent ✓'); }
+      catch(e){ cloudStatus(authMsg(e),true); console.error(e); }
+    };
+    // Enter key in the password field triggers sign-in.
+    $('cloudPassword').addEventListener('keydown', ev=>{ if(ev.key==='Enter') $('cloudEmailSignInBtn').click(); });
+
     $('cloudJoinSignOut').onclick=async()=>{ await API.signOut(); };
     $('cloudSignOutBtn').onclick=async()=>{ await API.signOut(); };
 
