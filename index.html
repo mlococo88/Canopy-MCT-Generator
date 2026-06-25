@@ -1286,20 +1286,43 @@ function buildMesh(s){
     const id=nodes.length+1; nodes.push({id,x,z}); nodeKey.set(key,id); return id;
   }
   // subdivide a straight segment from (x0,z0)->(x1,z1): at least mesh_minN
-  // elements per member, and never longer than mesh_max.
-  function subdivide(x0,z0,x1,z1){
+  // elements per member, and never longer than mesh_max. Optional forcedZ is a list
+  // of exact z-elevations that MUST land on a node — used to place nodes precisely at
+  // windscreen band edges so the screen load applies over the exact height. Forced
+  // points are snapped to the exact elevation (no float round-trip error).
+  function subdivide(x0,z0,x1,z1,forcedZ){
     const Ln=Math.hypot(x1-x0,z1-z0);
     const byMax=Math.ceil(Ln/Math.max(0.01,s.mesh_max));   // elements needed to honor max length
     const minN=Math.max(1,Math.round(s.mesh_minN||1));      // minimum elements per member
     const n=Math.max(byMax, minN);
+    const isVertical=Math.abs(x1-x0)<1e-9;
     const pts=[];
     for(let i=0;i<=n;i++){const t=i/n; pts.push([x0+(x1-x0)*t, z0+(z1-z0)*t]);}
-    return pts;
+    // merge in forced elevations as exact points (only interior, vertical members)
+    if(isVertical && forcedZ && forcedZ.length){
+      const zlo=Math.min(z0,z1), zhi=Math.max(z0,z1);
+      forcedZ.forEach(zf=>{ if(zf>zlo+1e-6 && zf<zhi-1e-6) pts.push([x0, zf]); });
+    }
+    // sort by z (vertical) or by t (general), dedupe with a tolerance so a uniform
+    // station that nearly coincides with a forced one collapses to the exact value
+    const sortDim = isVertical ? 1 : 0;
+    pts.sort((a,b)=>a[sortDim]-b[sortDim]);
+    const out=[];
+    for(const p of pts){
+      const last=out[out.length-1];
+      if(last && Math.abs(p[sortDim]-last[sortDim])<1e-4){
+        // near-duplicate: prefer an exact forced elevation if this one is forced
+        if(isVertical && forcedZ && forcedZ.some(zf=>Math.abs(zf-p[1])<1e-9)) out[out.length-1]=p;
+        continue;
+      }
+      out.push(p);
+    }
+    return out;
   }
   const elements=[]; const members={beam:[]};
-  function meshMember(x0,z0,x1,z1,sec,memberKey){
+  function meshMember(x0,z0,x1,z1,sec,memberKey,forcedZ){
     if(!members[memberKey])members[memberKey]=[];
-    const pts=subdivide(x0,z0,x1,z1);
+    const pts=subdivide(x0,z0,x1,z1,forcedZ);
     let prev=addNode(pts[0][0],pts[0][1]);
     for(let i=1;i<pts.length;i++){
       const cur=addNode(pts[i][0],pts[i][1]);
@@ -1320,10 +1343,24 @@ function buildMesh(s){
     meshMember(beamStations[i],g.yAt(beamStations[i]),beamStations[i+1],g.yAt(beamStations[i+1]),2,'beam');
   }
   // --- columns (one member key per column: col0, col1, ...) ---
+  // The windscreen attaches to the FIRST column line (col0). For a partial-height
+  // screen, force nodes exactly at the screen band edges (scr_bot, scr_top) so the
+  // screen load applies over the precise height and the bare-column drag fills the
+  // exact complement with no overlap.
+  const _scr = m.loads || {};
+  const screenOn = (s.screen!=='none') && ((_scr.screenH||0) > 1e-6);
   const cols=[];
   colX.forEach((cx,i)=>{
-    meshMember(cx,s.El_base,cx,g.yAt(cx),1,'col'+i);
-    cols.push({i,x:cx, base:addNode(cx,s.El_base), top:addNode(cx,g.yAt(cx))});
+    const z0=s.El_base, z1=g.yAt(cx);
+    let forcedZ=null;
+    if(screenOn && i===0){
+      // clamp the band to the column extent and force exact nodes there
+      const bot=Math.max(z0, Math.min(z1, _scr.scr_bot));
+      const top=Math.max(z0, Math.min(z1, _scr.scr_top));
+      forcedZ=[bot, top];
+    }
+    meshMember(cx,z0,cx,z1,1,'col'+i,forcedZ);
+    cols.push({i,x:cx, base:addNode(cx,z0), top:addNode(cx,z1)});
   });
 
   // key nodes: generalized list + backward-compatible L/R handles
@@ -1457,7 +1494,14 @@ function buildMCT(s){
   // applied to left-column elements whose midpoint z is within [scr_bot, scr_top].
   const m2=computeModel(s); const scrBot=m2.loads.scr_bot, scrTop=m2.loads.scr_top, scrH=m2.loads.screenH;
   const wScreen = (s.screen!=='none' && scrH>1e-6) ? (s.p_screen*B) : 0;  // lbf/ft
-  const screenEls = (wScreen!==0) ? mesh.elements.filter(e=>e.member==='col0' && e.zm>=scrBot-1e-6 && e.zm<=scrTop+1e-6).map(e=>e.id) : [];
+  // With forced nodes placed at scr_bot/scr_top on col0, every column element lies
+  // wholly inside or wholly outside the band. Select by both endpoints (robust to float).
+  const zOf = nid => mesh.nodes[nid-1].z;
+  const screenEls = (wScreen!==0) ? mesh.elements.filter(e=>{
+      if(e.member!=='col0') return false;
+      const za=zOf(e.n1), zb=zOf(e.n2);
+      return Math.min(za,zb) >= scrBot-1e-6 && Math.max(za,zb) <= scrTop+1e-6;
+    }).map(e=>e.id) : [];
 
   // ---- DL (gravity, global Z) + self-weight ----
   lines.push('*USE-STLD, DL');
@@ -3007,19 +3051,32 @@ function drawWindInto(plotId, wc){
   const dragSign=toHigh?1:-1;
   const cols=g.colX;
   const dragLen=1.8; // ft, visual length of the drag arrows
-  cols.forEach(cx=>{
+  // The windscreen replaces the bare-column drag over its band on the screened
+  // column line (col0 = first column). Suppress drag arrows there so the schematic
+  // matches the applied loads (no overlap between drag and screen).
+  const hasScreen = ld.screenH>0;
+  const inScreenBand = (ci,z)=> hasScreen && ci===0 && z>=ld.scr_bot-1e-6 && z<=ld.scr_top+1e-6;
+  cols.forEach((cx,ci)=>{
     const n=6;
     for(let i=0;i<=n;i++){const z=s.El_base+(g.yAt(cx)-s.El_base)*i/n;
+      if(inScreenBand(ci,z)) continue;
       const xStart=cx-dragSign*dragLen, xEnd=cx;
       // shaft
       shapes.push({type:'line',x0:xStart,x1:xEnd,y0:z,y1:z,line:{color:COL.colwind,width:1}});
     }
-    // back (load) line
-    shapes.push({type:'line',x0:cx-dragSign*dragLen,x1:cx-dragSign*dragLen,
-      y0:s.El_base,y1:g.yAt(cx),line:{color:COL.colwind,width:1.3}});
+    // back (load) line — drawn in segments that skip the screen band
+    if(hasScreen && ci===0){
+      const z0=s.El_base, z1=g.yAt(cx);
+      const bBot=Math.max(z0,Math.min(z1,ld.scr_bot)), bTop=Math.max(z0,Math.min(z1,ld.scr_top));
+      if(bBot> z0+1e-6) shapes.push({type:'line',x0:cx-dragSign*dragLen,x1:cx-dragSign*dragLen,y0:z0,y1:bBot,line:{color:COL.colwind,width:1.3}});
+      if(bTop< z1-1e-6) shapes.push({type:'line',x0:cx-dragSign*dragLen,x1:cx-dragSign*dragLen,y0:bTop,y1:z1,line:{color:COL.colwind,width:1.3}});
+    } else {
+      shapes.push({type:'line',x0:cx-dragSign*dragLen,x1:cx-dragSign*dragLen,
+        y0:s.El_base,y1:g.yAt(cx),line:{color:COL.colwind,width:1.3}});
+    }
     // arrowheads at the column face (triangle markers pointing in drag direction)
     const az=[],ax=[];
-    for(let i=0;i<=n;i++){az.push(s.El_base+(g.yAt(cx)-s.El_base)*i/n);ax.push(cx);}
+    for(let i=0;i<=n;i++){const z=s.El_base+(g.yAt(cx)-s.El_base)*i/n; if(inScreenBand(ci,z))continue; az.push(z);ax.push(cx);}
     traces.push({x:ax,y:az,mode:'markers',
       marker:{symbol:dragSign>0?'triangle-right':'triangle-left',size:8,color:COL.colwind},
       hoverinfo:'text',text:az.map(()=>`column drag ${s.p_col} psf`)});
@@ -3035,12 +3092,20 @@ function drawWindInto(plotId, wc){
     showarrow:true,arrowhead:3,arrowwidth:2.4,arrowsize:1.1,arrowcolor:'#3f7d99',
     text:`fascia ${f(ld.F_fascia,2)} k`,font:{size:9,color:'#2c5666'},
     xanchor:atRight?'left':'right',ay:fty-1.2});
-  // windscreen
+  // windscreen — drawn at the same standoff as the column drag it replaces, so it
+  // visibly occupies the band where the bare-column drag was suppressed (no overlap).
   if(ld.screenH>0){
-    const x=g.xCol;
-    shapes.push({type:'rect',x0:Math.min(x,x-dragSign*1.4),x1:Math.max(x,x-dragSign*1.4),
-      y0:ld.scr_bot,y1:ld.scr_top,fillcolor:'rgba(63,125,153,0.10)',line:{color:'#3f7d99',width:1,dash:'dot'}});
-    annotations.push({x:x-dragSign*1.4,y:ld.scr_bot+0.8,text:`screen ${f(ld.F_screen,2)} k`,
+    const x=g.colX[0];   // screen attaches to the first column line
+    const xBack=x-dragSign*dragLen;
+    shapes.push({type:'rect',x0:Math.min(x,xBack),x1:Math.max(x,xBack),
+      y0:ld.scr_bot,y1:ld.scr_top,fillcolor:'rgba(63,125,153,0.14)',line:{color:'#3f7d99',width:1.2}});
+    // screen drag arrows over the band (distinct from bare-column drag)
+    const ns=Math.max(3,Math.round((ld.scr_top-ld.scr_bot)/Math.max(0.5,(ld.scr_top-ld.scr_bot)/5)));
+    for(let i=0;i<=ns;i++){
+      const z=ld.scr_bot+(ld.scr_top-ld.scr_bot)*i/ns;
+      shapes.push({type:'line',x0:xBack,x1:x,y0:z,y1:z,line:{color:'#3f7d99',width:1}});
+    }
+    annotations.push({x:xBack,y:ld.scr_bot+0.8,text:`screen ${f(ld.F_screen,2)} k`,
       showarrow:false,font:{size:8,color:'#2c5666'},textangle:-90,xanchor:'center'});
   }
   // ---- WIND DIRECTION ARROW (big, above the roof) ----
