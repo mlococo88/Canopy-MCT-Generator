@@ -1461,21 +1461,33 @@ function buildMCT(s){
 
   // ---- BEAM-TO-COLUMN RELEASE (pinned beam connection) ----
   // When pinned, release the moment at the TOP end of each column element so the
-  // column carries no beam moment (matches the analytical model's hinge). The top
-  // column element is the one in member 'colN' whose j-node is the column top.
+  // column carries no beam moment (matches the analytical model's hinge). The beam
+  // stays continuous across the span, so its own flexural continuity restrains the
+  // shared node's rotation — this avoids the mechanism/singularity that would occur
+  // if the beam ends were released instead. The released element is the column
+  // element whose j-end (n2) is the column-top node shared with the beam.
+  //
+  // MCT *FRAME-RLS is a TWO-LINE, full-DOF format with a 6-bit binary release flag
+  // per end (order: Fx Fy Fz Mx My Mz):
+  //     ELEM,  NO, 000000, 0,0,0, 0,0,0     ; line 1 = i-end (no release)
+  //                000011, 0,0,0, 0,0,0,    ; line 2 = j-end, releases My & Mz
   if(s.beamConnect==='pinned'){
-    lines.push('*FRAME-RLS    ; Beam End Release');
-    lines.push('; iEL, bMABS, Ry1,Rz1,..., Ry2,Rz2,... (i=I-end, j=J-end)');
+    const relRows=[];
     mesh.keyNodes.cols.forEach(c=>{
-      // find the column element whose n2 (j-end) is this column top node
       const topEl=mesh.elements.find(e=>/^col\d/.test(e.member) && e.n2===c.top);
-      if(topEl){
-        // release Rz at J-end (about strong axis bending in-plane): MIDAS My/Mz mapping;
-        // release the in-plane moment at the j-end.
-        lines.push(`  ${topEl.id}, NO, 0,0,0, 0,0,1`);
-      }
+      if(topEl) relRows.push(topEl.id);
     });
-    lines.push('');
+    if(relRows.length){
+      lines.push('*FRAME-RLS    ; Beam End Release');
+      lines.push('; ELEM_LIST, bVALUE, FLAG-i, Fxi, Fyi, Fzi, Mxi, Myi, Mzi        ; 1st line');
+      lines.push(';                    FLAG-j, Fxj, Fyj, Fzj, Mxj, Myj, Mzj, GROUP ; 2nd line');
+      relRows.forEach(id=>{
+        // i-end: no release (000000). j-end: release My & Mz (000011).
+        lines.push(`    ${id},  NO, 000000, 0, 0, 0, 0, 0, 0`);
+        lines.push(`             000011, 0, 0, 0, 0, 0, 0, `);
+      });
+      lines.push('');
+    }
   }
 
   // Helper: beam elements per half (lower = x<L/2, upper = x>=L/2)
