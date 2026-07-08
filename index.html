@@ -266,9 +266,9 @@
             <div id="bayTable" class="bay-table"></div>
             <div class="field-desc">Center-to-center spacing of each bay between adjacent columns. The first column sits at the left overhang; the right overhang extends past the last column.</div>
           </div>
-          <div class="subhead-lbl">Beam-to-column connection</div>
-          <div class="seg" id="segConnect"><button data-v="continuous" class="on">Continuous</button><button data-v="pinned">Pinned at columns</button></div>
-          <div class="field-desc">Continuous: the roof beam runs as one moment-connected member over the columns (typical welded/bolted-moment canopy). Pinned: the beam is simply supported at each column. Affects how moment distributes to the columns.</div>
+          <div class="subhead-lbl">Column-to-beam connection</div>
+          <div class="seg" id="segConnect"><button data-v="continuous" class="on">Fixed to beam</button><button data-v="pinned">Pinned to beam</button></div>
+          <div class="field-desc">The roof beam is always continuous over the columns. This sets how each column connects to it. Fixed to beam: moment connection — the column and beam share rotation, so the beam transfers moment into the columns (typical welded/bolted-moment canopy). Pinned to beam: hinged connection — the column top is released, so it carries axial and shear but no moment from the beam. Affects how moment distributes to the columns.</div>
           <div class="seg rust" id="segFix"><button data-v="pinned">Pinned bases</button><button data-v="fixed" class="on">Fixed bases</button></div>
           <div class="hint">Column base support condition for the MIDAS supports.</div>
         </div>
@@ -594,7 +594,7 @@ const DEFAULTS = {
 const state = Object.assign({}, DEFAULTS, {
   nCol: 2,                       // integer column count (>=1)
   baySpacings: [8],              // length nCol-1; per-bay center-to-center (ft)
-  beamConnect: 'continuous',     // 'continuous' or 'pinned' at columns
+  beamConnect: 'continuous',     // column-to-beam connection: 'continuous' = fixed/moment, 'pinned' = hinged (releases column top)
   baseFixity: 'fixed', flow: 'clear', screen: 'partial',
   snowMode: 'manual', windMode: 'manual',   // 'manual' or 'calc'
   riskCat: 'II', exposure: 'C',
