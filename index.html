@@ -106,6 +106,9 @@
   .header-top { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .title-block h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
   .title-block .sub { font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); margin-top: 2px; }
+  .projmeta { display:flex; flex-wrap:wrap; gap:4px 22px; margin:8px 0 2px; padding:7px 10px;
+              border:1px solid var(--line); background:#fbfaf6; font-size:11px; }
+  .projmeta b { color: var(--muted); font-weight:600; }
   .rev { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
   .rev b { color: var(--steel); }
   .projects-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0 10px; border-top: 1px solid var(--line); margin-top: 4px; }
@@ -266,6 +269,17 @@
             <div id="bayTable" class="bay-table"></div>
             <div class="field-desc">Center-to-center spacing of each bay between adjacent columns. The first column sits at the left overhang; the right overhang extends past the last column.</div>
           </div>
+          <div class="subhead-lbl">Project information</div>
+          <div class="field"><label>Project</label><input type="text" class="inp" data-k="projTitle" placeholder="Project name" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Subject</label><input type="text" class="inp" data-k="projSubject" placeholder="Subject" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Task</label><input type="text" class="inp" data-k="projTask" placeholder="Task" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Computed by</label><input type="text" class="inp" data-k="projComputedBy" placeholder="Initials or name" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Date</label><input type="text" class="inp" data-k="projDate" placeholder="blank = today" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Checked by</label><input type="text" class="inp" data-k="projCheckedBy" placeholder="Initials or name" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Checked date</label><input type="text" class="inp" data-k="projCheckedDate" placeholder="Checked date" style="grid-column:2/4;width:100%"></div>
+          <div class="field-desc">These populate the page header of the Excel calc (Project / Subject / Task on the left, Computed and Checked by on the right) and the PDF report title block.</div>
+          <div class="field" style="align-items:start"><label>References</label><textarea class="inp" data-k="projRefs" rows="4" placeholder="One per line. Blank = standard set." style="grid-column:2/4;width:100%;font-size:11px"></textarea></div>
+          <div class="field" style="align-items:start"><label>Notes / assumptions</label><textarea class="inp" data-k="projNotes" rows="4" placeholder="One per line. Blank = standard set." style="grid-column:2/4;width:100%;font-size:11px"></textarea></div>
           <div class="subhead-lbl">Column-to-beam connection</div>
           <div class="seg" id="segConnect"><button data-v="continuous" class="on">Fixed to beam</button><button data-v="pinned">Pinned to beam</button></div>
           <div class="field-desc">The roof beam is always continuous over the columns. This sets how each column connects to it. Fixed to beam: moment connection — the column and beam share rotation, so the beam transfers moment into the columns (typical welded/bolted-moment canopy). Pinned to beam: hinged connection — the column top is released, so it carries axial and shear but no moment from the beam. Affects how moment distributes to the columns.</div>
@@ -557,6 +571,7 @@
     <div class="toolbar">
       <button class="btn primary" id="reportBtn">↻ Refresh report</button>
       <button class="btn primary" id="printReportBtn">⬇ Download Report (PDF)</button>
+      <button class="btn primary" id="xlsxBtn" title="Formal submittal workbook with live Excel formulas">⬇ Excel calc (.xlsx)</button>
       <button class="btn" id="downloadReportBtn">Download as HTML</button>
       <span class="hint" style="margin-left:auto">The report refreshes automatically when you open this tab. "Download Report (PDF)" opens your browser's print dialog — choose "Save as PDF" as the destination.</span>
     </div>
@@ -594,6 +609,10 @@ const DEFAULTS = {
   q_h: 20, G: 0.85,
   d_roof: 2, p_lat: 30, p_col: 30, colWindMode: 'manual', fasciaWindMode: 'manual',
   fasciaCfMethod: 'flat',        // 'flat' = Fig 29.4-1 (flat-sided member) | 'sign' = Fig 29.3-1 (solid sign)
+  // --- project identification (title block on the report and the Excel export) ---
+  projTitle: '', projNo: '', projClient: '', projEngineer: '',
+  projSubject: '', projTask: '', projComputedBy: '', projDate: '',
+  projCheckedBy: '', projCheckedDate: '', projRefs: '', projNotes: '',
   p_screen: 30, scr_bot: 0, scr_top: 10, scrPctOpen: 0, screenWindMode: 'manual',
   // --- snow calc inputs (ASCE 7-16 Ch.7) ---
   pg: 30, Ce: 0.9, Ct: 1.0, Is: 1.0,
@@ -1084,7 +1103,9 @@ function applyScreenWindCalc(){
 
 let _recomputeTimer=null;
 function recomputeDebounced(){ clearTimeout(_recomputeTimer); _recomputeTimer=setTimeout(recompute,120); }
-document.addEventListener('input',e=>{const inp=e.target.closest('input[data-k]');if(!inp)return;const v=parseFloat(inp.value);if(!isNaN(v)){state[inp.dataset.k]=v;
+document.addEventListener('input',e=>{const inp=e.target.closest('input[data-k],textarea[data-k]');if(!inp)return;
+  if(inp.type==='text'||inp.tagName==='TEXTAREA'){ state[inp.dataset.k]=inp.value; recomputeDebounced(); return; }
+  const v=parseFloat(inp.value);if(!isNaN(v)){state[inp.dataset.k]=v;
   // if a snow/wind calc input changed, recompute the derived pressure
   if(['pg','Ce','Ct'].includes(inp.dataset.k))applySnowCalc();
   if(['V','meanH','Kzt','Kd','Ke'].includes(inp.dataset.k))applyWindCalc();
@@ -1871,6 +1892,671 @@ function updateStaleWarning(){
 }
 
 let _reportBuilding=false;
+// ===================================================================
+// EXCEL EXPORT (.xlsx) - formal submittal workbook
+// Every derived cell carries a live Excel formula written against named
+// inputs, plus the app's computed value as the cached result so the file
+// opens showing correct numbers before Excel recalculates.
+// ExcelJS is loaded from CDN on first use only.
+// ===================================================================
+// ===================================================================
+// EXCEL EXPORT (.xlsx) - single-sheet submittal workbook, HDR template styling
+// ===================================================================
+const XLSX_CDN='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
+const JSZIP_CDN='https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+const HDR_LOGO_B64='iVBORw0KGgoAAAANSUhEUgAAAD0AAAAhCAMAAABdqFM7AAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAGnUExURQAAAFNWWk9XV1NXWVJXWVJXWlNVWlFcXFVVWlNXWVNWWVJXWlJXWlFYWGZmZlJWWVJWWVNXW1NWWlJXWlJWWVFbW1NWWVVVVVJXWlJWWlNXWlVVVVJWWVFYW1JWWlJXWlVVWVRUW1NXWVJXWVJXWlJXWlNYWH9/f09PX1FWW1NVWlNWWlNXWlNWWVRUVFFWW1JWWVRUXFNWWVJaWlJWWVJXWVFWXFJWWVNYWFJWWlJXWQAAAFJXWVNVWFNXWVRUVFNXWlNYWlRUWVNWWlJXWlNWWVNWWkhISFJWWlNWWVNYWk1YWFJWWlNXWlJXWlNXW1NWWV9fX1RUWVJXWlJXWlJXWVJXWVJXWlJWWVRXWk9XV1NWWlJaWlNWWlJWWVJXWVJWWUxMZlJWWlJWWVRUVFNWWk5OYlRUWlJXWVRWWVRUXlJWWVtbW1xcXFJXWVRWWVJXWlVVVVRWWVNXWVNWWVJWWVJXWk5YWFNWWlVVXVNXWlNXWlFbW1NXWVNWWlJWWlBXV1JWWlRWWVJXWlNXWVFWW1NYWFJWWVNXWj8/P1VVVVNXWgAAAJlrTYYAAACLdFJOUwCQIO/Po2UWMPLpxpVLBf2zPeJarRmiBupBsgP6ToX5PCfQ1ef8KwIQNWi0/uYVcO4knyL0dSxNNHygAeRZwQm4aza9ZqWHB4ixbhfOUslA3Qg/p1femvC/VR3oH4SO21AKyIsSlg0tbGob9w4LeGepD1vTmUqYGtwe+08c9eVzKetY7YMyN/FJBAz3e6RPAAAAAWJLR0QAiAUdSAAAAAlwSFlzAAALEwAACxMBAJqcGAAAAAd0SU1FB+gKEgozERUvdO4AAAHlSURBVDjLjZT5XxJBGIcn0FDUoJLwAA8sy7zAWwHvqzTLEzU1VLyP8r5NU0mdf9rlnRmYWZfd+f40+7zf57PD7iwIQ14gLiZA5pTUl5Y4S8M06daMzKxXDCe1Y7HZX6ttyJu3MraSbIeGjfE7p5SNc3K1bJyXL2Vjl1vLxgVyNi4sQqjYQ1LyntEPpdr2x09KHGWfyytosbKKm1qqvYSmatvx+MqpXiPgWnL/Oqe+jVA91RsE2khgk5GNmsm8RYD+AMCgoe1vJbtsE2g7wA5DG3WSQpYAu4B1M7snjY+Tb3qg0MujPjMwN7PFmPhqP6AvPPpKagMSdhDQIEe+uQANIQn7O6Af7HJ4ZJS2xuTtcVhPhELx0qRfxp4ClBJbTrsSnZ8zSMaeBWSPLecSlV+lKGHbw3zmeXsBCovKKlLHXNfSMuLs5KdlhRTCynKVuta1dTY1sslntrGpLLeGqL6NJO3fZP4HLnae6fr2ro3MO8llZE+l69mRfVrOZqRKpSe1LQeH7Bl7p+P06FjQNeyTkJLTxLu1nXHDc0HXsFX/qRXdwp58AU43tC/GVD/Jd0knf43thavnB+iajPaNbM8/v8a7WLmJPY1q3Z2bW2/vkhyD6H+cfg9VSISfPQB6RDqJ7sE39gSZxtz/kITwnwAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNC0xMC0xOFQxMDo1MToxNyswMDowMMt4gqIAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjQtMTAtMThUMTA6NTE6MTcrMDA6MDC6JToeAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI0LTEwLTE4VDEwOjUxOjE3KzAwOjAw7TAbwQAAAABJRU5ErkJggg==';
+function loadScriptOnce(src, globalName, cache){
+  if(window[globalName]) return Promise.resolve(window[globalName]);
+  if(cache.p) return cache.p;
+  cache.p=new Promise((res,rej)=>{
+    const sc=document.createElement('script'); sc.src=src;
+    sc.onload=()=>window[globalName]?res(window[globalName]):rej(new Error(globalName+' did not initialise'));
+    sc.onerror=()=>rej(new Error('Could not load '+globalName+' from the CDN'));
+    document.head.appendChild(sc);
+  });
+  return cache.p;
+}
+const _xlCache={}, _zipCache={};
+const loadExcelJS=()=>loadScriptOnce(XLSX_CDN,'ExcelJS',_xlCache);
+const loadJSZip  =()=>loadScriptOnce(JSZIP_CDN,'JSZip',_zipCache);
+
+// ---- HDR template palette (pulled from the reference workbook) ----
+const NAVY='FF1F497D', BLUE='FF4F81BD', INFONT='FF3F3F76',
+      INFILL='FFDCE6F1', OUTFILL='FFF2F2F2', BAND='FFD9D9D9',
+      GREENF='FF00B050', REDF='FFFF0000';
+const THIN={style:'thin',color:{argb:'FF000000'}};
+const BOX={top:THIN,left:THIN,bottom:THIN,right:THIN};
+const SYMC='H', VALC='I', REFC='K', CONTENT_LAST=8;
+
+// 'L_OH' -> rich text with a real subscript run
+function xlSym(t,size){
+  size=size||10;
+  if(typeof t!=='string'||t.indexOf('_')<0) return t;
+  const i=t.indexOf('_');
+  return {richText:[
+    {text:t.slice(0,i),font:{name:'Arial',size:size}},
+    {text:t.slice(i+1),font:{name:'Arial',size:size,vertAlign:'subscript'}}]};
+}
+
+// Put the HDR logo into the page header the way the template does: a VML
+// header drawing referenced by <legacyDrawingHF>. ExcelJS cannot write this,
+// so the package is patched after the fact.
+const XL_CHILD_ORDER=['sheetPr','dimension','sheetViews','sheetFormatPr','cols','sheetData','sheetCalcPr',
+ 'sheetProtection','protectedRanges','scenarios','autoFilter','sortState','dataConsolidate','customSheetViews',
+ 'mergeCells','phoneticPr','conditionalFormatting','dataValidations','hyperlinks','printOptions','pageMargins',
+ 'pageSetup','headerFooter','rowBreaks','colBreaks','customProperties','cellWatches','ignoredErrors','smartTags',
+ 'drawing','legacyDrawing','legacyDrawingHF','picture','oleObjects','controls','webPublishItems','tableParts','extLst'];
+function xlChildOrderOK(x){
+  const body=x.slice(x.indexOf('<worksheet'));
+  const inner=body.slice(body.indexOf('>')+1);
+  const kids=[]; let depth=0;
+  inner.replace(/<(\/?)([A-Za-z][\w]*)([^>]*?)(\/?)>/g,(m,close,name,attrs,selfc)=>{
+    if(close){ depth--; } else if(selfc){ if(depth===0) kids.push(name); }
+    else { if(depth===0) kids.push(name); depth++; }
+    return m;
+  });
+  const idx=kids.filter(k=>XL_CHILD_ORDER.indexOf(k)>=0).map(k=>XL_CHILD_ORDER.indexOf(k));
+  for(let i=0;i<idx.length-1;i++) if(idx[i]>idx[i+1]) return false;
+  return true;
+}
+const HF_VML='<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"'
+ +' xmlns:x="urn:schemas-microsoft-com:office:excel">'
+ +'<o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout>'
+ +'<v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t"'
+ +' path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f"><v:stroke joinstyle="miter"/>'
+ +'<v:formulas><v:f eqn="if lineDrawn pixelLineWidth 0"/><v:f eqn="sum @0 1 0"/><v:f eqn="sum 0 0 @1"/>'
+ +'<v:f eqn="prod @2 1 2"/><v:f eqn="prod @3 21600 pixelWidth"/><v:f eqn="prod @3 21600 pixelHeight"/>'
+ +'<v:f eqn="sum @0 0 1"/><v:f eqn="prod @6 1 2"/><v:f eqn="prod @7 21600 pixelWidth"/>'
+ +'<v:f eqn="sum @8 21600 0"/><v:f eqn="prod @7 21600 pixelHeight"/><v:f eqn="sum @10 21600 0"/></v:formulas>'
+ +'<v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/><o:lock v:ext="edit" aspectratio="t"/>'
+ +'</v:shapetype><v:shape id="LH" o:spid="_x0000_s1025" type="#_x0000_t75"'
+ +" style='position:absolute;margin-left:0;margin-top:0;width:48.75pt;height:26.25pt;z-index:1'>"
+ +'<v:imagedata o:relid="rId1" o:title="HDR logo"/><o:lock v:ext="edit" rotation="t"/></v:shape></xml>';
+const HF_VML_RELS='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+ +'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+ +'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"'
+ +' Target="../media/hdrlogo.png"/></Relationships>';
+
+async function xlInjectHeaderLogo(buf){
+  try{
+    await loadJSZip();
+    const zip=await JSZip.loadAsync(buf);
+    // ExcelJS writes editAs on <xdr:oneCellAnchor>, which the DrawingML schema
+    // only allows on twoCellAnchor. Excel repairs the drawing unless it is removed.
+    const drawings=Object.keys(zip.files).filter(n=>/^xl\/drawings\/drawing\d+\.xml$/.test(n));
+    for(const dn of drawings){
+      let dx=await zip.file(dn).async('string');
+      const fixed=dx.replace(/(<xdr:oneCellAnchor)\s+editAs="[^"]*"/g,'$1');
+      if(fixed!==dx) zip.file(dn,fixed);
+    }
+    const sheetName=Object.keys(zip.files).find(n=>/^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+    if(!sheetName) return buf;
+    let sx=await zip.file(sheetName).async('string');
+    const relsName='xl/worksheets/_rels/'+sheetName.split('/').pop()+'.rels';
+    let rx=zip.file(relsName)?await zip.file(relsName).async('string'):null;
+    let nid=1;
+    if(rx){
+      const used=(rx.match(/Id="rId(\d+)"/g)||[]).map(m=>+m.replace(/\D/g,''));
+      nid=used.length?Math.max.apply(null,used)+1:1;
+      rx=rx.replace('</Relationships>',
+        '<Relationship Id="rId'+nid+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawingHF.vml"/></Relationships>');
+    } else {
+      rx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        +'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        +'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawingHF.vml"/></Relationships>';
+    }
+    sx=sx.replace(/<legacyDrawingHF[^>]*\/>/g,'');
+    const tag='<legacyDrawingHF r:id="rId'+nid+'"/>';
+    const m=sx.match(/<drawing\s[^>]*\/>/);
+    if(m) sx=sx.replace(m[0], m[0]+tag);
+    else   sx=sx.replace('</worksheet>', tag+'</worksheet>');
+    if(!xlChildOrderOK(sx)) return buf;      // never ship an out-of-order sheet
+    let ct=await zip.file('[Content_Types].xml').async('string');
+    if(ct.indexOf('Extension="vml"')<0)
+      ct=ct.replace('</Types>','<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/></Types>');
+    if(ct.indexOf('Extension="png"')<0)
+      ct=ct.replace('</Types>','<Default Extension="png" ContentType="image/png"/></Types>');
+    zip.file(sheetName,sx); zip.file(relsName,rx); zip.file('[Content_Types].xml',ct);
+    zip.file('xl/drawings/vmlDrawingHF.vml',HF_VML);
+    zip.file('xl/drawings/_rels/vmlDrawingHF.vml.rels',HF_VML_RELS);
+    zip.file('xl/media/hdrlogo.png',HDR_LOGO_B64,{base64:true});
+    return await zip.generateAsync({type:'arraybuffer',compression:'DEFLATE'});
+  }catch(e){ console.warn('logo injection skipped:',e); return buf; }
+}
+
+// ---- shared worksheet helpers ----
+function xlMakeSheet(wb, meta){
+  const ws=wb.addWorksheet('Calculation');
+  const W={A:11.15,B:11.15,C:11.15,D:11.15,E:11.15,F:11.15,G:11.15,H:11.15,I:12,J:3.5,K:16};
+  Object.keys(W).forEach(c=>ws.getColumn(c).width=W[c]);
+  ws.views=[{showGridLines:false}];
+  ws.pageSetup={orientation:'portrait',scale:80,
+    margins:{left:0.25,right:0.25,top:0.8921568627450981,bottom:0.75,header:0.3,footer:0.3}};
+  const dash='________';
+  ws.headerFooter={
+    oddHeader:'&L&G&C'
+      +'Project: '+(meta.project||dash)+'\nSubject: '+(meta.subject||dash)+'\nTask: '+(meta.task||dash)+'\n'
+      +'&RComputed by: &U'+(meta.by||dash)+'&U Date'+(meta.date||dash)
+      +'\nChecked by: '+(meta.checkedBy||dash)+' Date: &U'+(meta.checkedDate||dash)+'&U'
+      +'\nPage: &U&P of &N',
+    oddFooter:'&L&Z&F'};
+  return ws;
+}
+
+async function buildCalcWorkbook(s, A, meta, H){
+  const wb=new window.ExcelJS.Workbook();
+  wb.creator=meta.by||'Canopy MCT Generator';
+  const ws=xlMakeSheet(wb,meta);
+  let r=1;
+  const breakCands=[];
+  const cellA=n=>ws.getCell('A'+n), cellS=n=>ws.getCell(SYMC+n),
+        cellV=n=>ws.getCell(VALC+n), cellR=n=>ws.getCell(REFC+n);
+
+  function title(t,sub){
+    ws.mergeCells('A'+r+':'+REFC+r);
+    const c=ws.getCell('A'+r);
+    c.value=t; c.font={name:'Calibri',size:14,bold:true};
+    c.alignment={horizontal:'center',vertical:'middle'}; c.border=BOX;
+    ws.getRow(r).height=20; r++;
+    ws.mergeCells('A'+r+':'+REFC+r);
+    const sc=ws.getCell('A'+r);
+    sc.value=sub; sc.font={name:'Calibri',size:9,italic:true};
+    sc.alignment={horizontal:'center'}; r++;
+  }
+  function sect(t,ref){
+    breakCands.push(r);
+    ws.mergeCells('A'+r+':C'+r);
+    const c=ws.getCell('A'+r);
+    c.value=t; c.font={name:'Calibri',size:11,bold:true,color:{argb:NAVY}};
+    c.border={bottom:{style:'thin',color:{argb:NAVY}}};
+    if(ref){ cellR(r).value=ref; cellR(r).font={name:'Arial',size:9}; }
+    r++;
+  }
+  function sub(t,ref){
+    ws.mergeCells('A'+r+':C'+r);
+    const c=ws.getCell('A'+r);
+    c.value=t; c.font={name:'Calibri',size:10,bold:true,color:{argb:NAVY}};
+    if(ref){ cellR(r).value=ref; cellR(r).font={name:'Arial',size:9}; }
+    r++;
+  }
+  // Formulas reference plain cell addresses (e.g. =I23+I25). Each named input or
+  // derived value records the cell it landed in, and formulas are resolved against
+  // that map at write time. Every reference points at a row already written above.
+  const REF={};
+  const esc=t=>t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  function resolveF(f){
+    if(!f) return f;
+    let out=f;
+    Object.keys(REF).sort((a,b)=>b.length-a.length).forEach(n=>{
+      out=out.replace(new RegExp('\\b'+esc(n)+'\\b','g'), REF[n]);
+    });
+    return out;
+  }
+  function row(label,symTxt,val,fmt,kind,ref,opts){
+    opts=opts||{};
+    ws.mergeCells('A'+r+':C'+r);
+    cellA(r).value=label;
+    cellA(r).font={name:'Arial',size:10,italic:!opts.plain};
+    cellA(r).alignment={horizontal:'left'};
+    if(symTxt){ cellS(r).value=xlSym(symTxt); cellS(r).font={name:'Arial',size:10}; }
+    const h=cellV(r);
+    // Derived cells carry a live formula plus the app's value as the cached
+    // result, so the file opens showing the right number and still recalculates.
+    h.value=(opts.formula&&Number.isFinite(Number(val)))?{formula:resolveF(opts.formula),result:Number(val)}:num(val);
+    h.numFmt=fmt||'General';
+    if(opts.name) REF[opts.name]=VALC+r;
+    h.alignment={horizontal:'center'}; h.border=BOX;
+    if(kind==='in'){ h.font={name:'Calibri',size:11,italic:true,color:{argb:INFONT}};
+      h.fill={type:'pattern',pattern:'solid',fgColor:{argb:INFILL}}; }
+    else if(kind==='ok'){ h.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}};
+      h.fill={type:'pattern',pattern:'solid',fgColor:{argb:GREENF}}; }
+    else if(kind==='bad'){ h.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}};
+      h.fill={type:'pattern',pattern:'solid',fgColor:{argb:REDF}}; }
+    else { h.font={name:'Calibri',size:11,bold:!!opts.bold,color:{argb:BLUE}};
+      h.fill={type:'pattern',pattern:'solid',fgColor:{argb:OUTFILL}}; }
+    if(ref){ cellR(r).value=ref; cellR(r).font={name:'Arial',size:9}; }
+    r++;
+  }
+  function note(t){
+    ws.mergeCells('A'+r+':'+SYMC+r);
+    const c=ws.getCell('A'+r);
+    c.value=t; c.font={name:'Arial',size:9,italic:true,color:{argb:'FF404040'}};
+    c.alignment={wrapText:true,vertical:'top'};
+    ws.getRow(r).height=Math.max(12,Math.ceil(t.length/105)*11);
+    r++;
+  }
+  function tbl(rows2,opts){
+    opts=opts||{};
+    rows2.forEach((rw,ri)=>{
+      rw.forEach((v,i)=>{
+        const c=ws.getRow(r).getCell(1+i);
+        c.value=num((typeof v==='string'&&v.indexOf('_')>0&&opts.subs)?xlSym(v,9):v);
+        c.border=BOX; c.alignment={horizontal:(ri>0&&i===0&&opts.leftFirst)?'left':'center',wrapText:ri===0};
+        if(ri===0){ c.font={name:'Calibri',size:9,bold:true,color:{argb:NAVY}};
+          c.fill={type:'pattern',pattern:'solid',fgColor:{argb:INFILL}}; }
+        else { c.font={name:'Calibri',size:10,bold:!!opts.bold,color:{argb:BLUE}};
+          c.fill={type:'pattern',pattern:'solid',fgColor:{argb:OUTFILL}};
+          if(typeof v==='number') c.numFmt=opts.numFmt||'0.00'; }
+      });
+      r++;
+    });
+    r++;
+  }
+  function refTable(caption,headers,rows2,ref){
+    sub(caption,ref);
+    tbl([headers].concat(rows2),{numFmt:'0.00'});
+  }
+  function frontMatter(refs,notes){
+    ws.getCell('A'+r).value='References';
+    ws.getCell('A'+r).font={name:'Calibri',size:11,bold:true,color:{argb:NAVY}}; r++;
+    refs.forEach((t,i)=>{
+      const n=ws.getCell('A'+r);
+      n.value='['+(i+1)+']'; n.font={name:'Arial',size:10,italic:true};
+      ws.mergeCells('B'+r+':'+REFC+r);
+      const c=ws.getCell('B'+r);
+      c.value='\u2022   '+t; c.font={name:'Arial',size:10,italic:true};
+      r++;
+    });
+    r++;
+    ws.getCell('A'+r).value='Notes/Assumptions:';
+    ws.getCell('A'+r).font={name:'Calibri',size:11,bold:true,color:{argb:NAVY}}; r++;
+    notes.forEach(t=>{
+      ws.mergeCells('A'+r+':'+REFC+r);
+      const c=ws.getCell('A'+r);
+      c.value='\u2022   '+t;
+      c.font={name:'Arial',size:10,italic:true,color:{argb:INFONT}};
+      c.alignment={wrapText:true,vertical:'top'};
+      ws.getRow(r).height=Math.max(12,Math.ceil(t.length/120)*11);
+      r++;
+    });
+    r++;
+    ws.getCell('A'+r).value='Legend:';
+    ws.getCell('A'+r).font={name:'Calibri',size:11,bold:true};
+    const li=ws.getCell('B'+r);
+    li.value='Input'; li.numFmt='@';
+    li.font={name:'Calibri',size:11,italic:true,color:{argb:INFONT}};
+    li.fill={type:'pattern',pattern:'solid',fgColor:{argb:INFILL}};
+    li.border=BOX; li.alignment={horizontal:'center'}; r++;
+    const lo=ws.getCell('B'+r);
+    lo.value='Output'; lo.numFmt='@';
+    lo.font={name:'Calibri',size:11,bold:true,color:{argb:BLUE}};
+    lo.fill={type:'pattern',pattern:'solid',fgColor:{argb:OUTFILL}};
+    lo.border=BOX; lo.alignment={horizontal:'center'}; r+=2;
+    [['A','Description'],[SYMC,'Variable'],[VALC,'Result/Input'],[REFC,'Reference/Notes']]
+      .forEach(function(p){
+        const c=ws.getCell(p[0]+r);
+        c.value=p[1];
+        c.font={name:'Arial',size:10,italic:p[0]==='A',bold:p[0]!=='A'};
+        c.alignment={horizontal:p[0]==='A'?'left':'center'};
+        c.border={bottom:THIN};
+      });
+    r+=2;
+  }
+  const brk=()=>{ breakCands.push(r); r++; };
+  const f=(x,n)=>Number.isFinite(Number(x))?Number(x).toFixed(n==null?2:n):'\u2014';
+  // A non-finite value written to a cell emits <v>NaN</v>, which Excel repairs.
+  const num=v=>(typeof v==='number'&&!Number.isFinite(v))?null:v;
+
+  // ---------- derived values ----------
+  const g=A.geom, ld=A.loads;
+  const nC=H.nCols(s);
+  const bayTot=(s.baySpacings||[]).slice(0,Math.max(0,nC-1)).reduce((a,b)=>a+(+b||0),0);
+  const Ab=H.sectProps(s.beamSect).A, Ac=H.sectProps(s.colSect).A, dCol=H.sectProps(s.colSect).d;
+  const Lp=g.L, cosTh=g.cos, Lbeam=Lp/cosTh, thDeg=g.theta*180/Math.PI;
+  const AbFt=Ab/144, AcFt=Ac/144;
+  const wD=s.DL*s.B_trib, wS=s.SL*s.B_trib;
+  const Wsw=s.density_pcf*(AbFt*Lbeam+nC*AcFt*s.H_col);
+  const zColL=s.El_base+s.H_col, zTipL=zColL-s.slope*s.L_OH,
+        zColN=zColL+s.slope*bayTot, zTipR=zTipL+s.slope*Lp, Htall=s.H_col+s.slope*bayTot;
+  const FT='0.000\\ "ft"', PSF='0.00\\ "psf"', PLF='0.0\\ "lbf/ft"', LBF='0\\ "lbf"',
+        IN='0.00\\ "in"', IN2='0.00\\ "in^2"', DEG='0.000\\ "deg"';
+
+  // ---------- sheet ----------
+  title('Mono-slope Canopy \u2014 Structural Design',
+        'MIDAS CIVIL MCT MODEL GENERATION PER ASCE 7-16');
+  frontMatter(meta.refs, meta.notes);
+
+  const gov=H.governing?H.governing():null;
+  if(gov&&gov.length){
+    sect('Design Summary \u2014 Governing Base Reactions');
+    const rows=[['Column','Max |N| (lbf)','Max |V| (lbf)','Max |M| (ft-lbf)','Driving case']];
+    gov.forEach((c,i)=>rows.push(['Col '+(i+1),Math.round(c.N.v),Math.round(c.V.v),Math.round(c.M.v),c.N.load]));
+    tbl(rows,{numFmt:'#,##0',bold:true,leftFirst:true});
+    note('Reactions are imported from the MIDAS analysis and are not recomputed by this workbook. '
+        +'Maxima are taken independently and need not act concurrently.');
+    r++;
+  }
+
+  sect('Geometry Input');
+  row('Left overhang','L_OH',s.L_OH,FT,'in',null,{name:'L_OH'});
+  row('Right overhang','L_OH,R',s.R_OH,FT,'in',null,{name:'R_OH'});
+  row('Bay spacing, total','L_bays',bayTot,FT,'in',null,{name:'L_bays'});
+  row('Roof slope, rise over run','m',s.slope,'0.0000','in',null,{name:'slope'});
+  row('Column height, low column','H',s.H_col,FT,'in',null,{name:'H_col'});
+  row('Tributary width','B',s.B_trib,FT,'in',null,{name:'B_trib'});
+  row('Number of columns','n',nC,'0','in',null,{name:'n_col'});
+  r++;
+
+  sect('Geometry Derivation');
+  row('Plan span, tip to tip','L',Lp,FT,'out',null,{name:'L_plan',formula:'L_OH+L_bays+R_OH'});
+  row('Roof angle','\u03b8',thDeg,DEG,'out',null,{name:'theta_deg',formula:'DEGREES(ATAN(slope))'});
+  row('True (sloped) beam length','L_beam',Lbeam,FT,'out',null,{name:'L_beam',formula:'L_plan/COS(ATAN(slope))'});
+  row('Tall column height','H_tall',Htall,FT,'out',null,{name:'H_tall',formula:'H_col+slope*L_bays'});
+  row('Left roof tip elevation','z_tip,L',zTipL,FT,'out',null,{formula:'H_col-slope*L_OH'});
+  row('High column top elevation','z_col,N',zColN,FT,'out',null,{formula:'H_col+slope*L_bays'});
+  row('Right roof tip elevation','z_tip,R',zTipR,FT,'out',null,{formula:'H_col-slope*L_OH+slope*L_plan'});
+  brk();
+
+  sect('Sections and Material');
+  row('Beam section','\u2014',s.beamSect,'@','in');
+  row('Beam area','A_beam',Ab,IN2,'in',null,{name:'A_beam_in2'});
+  row('Column section','\u2014',s.colSect,'@','in');
+  row('Column area','A_col',Ac,IN2,'in',null,{name:'A_col_in2'});
+  row('Column face width','d_col',dCol,IN,'in',null,{name:'d_col_in'});
+  row('Steel unit weight','\u03b3',s.density_pcf,'0\\ "pcf"','in',null,{name:'gamma_st'});
+  row('Elastic modulus','E',s.E_ksi,'0\\ "ksi"','in');
+  r++;
+
+  sect('Gravity Loading','ASCE 7-16 Ch. 7');
+  row('Superimposed dead load','D',s.DL,PSF,'in',null,{name:'DL_psf'});
+  row('Dead line load','w_D',wD,PLF,'out',null,{name:'w_D',formula:'DL_psf*B_trib'});
+  if(s.snowMode==='calc'&&typeof calcSnow==='function'){
+    const sn=calcSnow(s);
+    sub('Balanced snow load');
+    row('Ground snow load','p_g',s.pg,PSF,'in','Fig. 7.2-1',{name:'pg_psf'});
+    row('Exposure factor','C_e',s.Ce,'0.00','in','Table 7.3-1',{name:'Ce_snow'});
+    row('Thermal factor','C_t',s.Ct,'0.00','in','Table 7.3-2',{name:'Ct_snow'});
+    row('Importance factor','I_s',sn.Is,'0.00','in','Table 1.5-2',{name:'Is_snow'});
+    row('Flat-roof snow','p_f',sn.pf,PSF,'out','Eq. 7.3-1',{name:'pf_snow',formula:'0.7*Ce_snow*Ct_snow*Is_snow*pg_psf'});
+    row('Slope factor','C_s',sn.Cs,'0.000','out','Fig. 7.4-1',{name:'Cs_snow',formula:'IF(theta_deg<=30,1,IF(theta_deg>=70,0,(70-theta_deg)/40))'});
+    row('Sloped-roof snow','p_s',sn.ps,PSF,'out','Eq. 7.4-1',{name:'ps_snow',formula:'Cs_snow*pf_snow'});
+    row('Minimum roof snow','p_m',sn.pm,PSF,'out','\u00a77.3.4',{name:'pm_snow',formula:'IF(pg_psf<=20,Is_snow*pg_psf,20*Is_snow)'});
+    row('Governing balanced snow','S',sn.sGov,PSF,'out',null,{bold:true,name:'SL_psf',formula:'IF(AND(theta_deg<15,pm_snow>ps_snow),pm_snow,ps_snow)'});
+    if(sn.minApplies&&sn.pm>sn.ps) note('The §7.3.4 minimum governs: p_m = '+f(sn.pm)+' psf exceeds p_s = '+f(sn.ps)+' psf.');
+  } else {
+    row('Balanced snow load','S',s.SL,PSF,'in',null,{name:'SL_psf'});
+  }
+  row('Snow line load','w_S',wS,PLF,'out',null,{name:'w_S',formula:'SL_psf*B_trib'});
+  sub('Member self weight');
+  row('Self weight, added by MIDAS','W_sw',Wsw,LBF,'out',null,{name:'W_sw',formula:'gamma_st*(A_beam_in2/144*L_beam+n_col*A_col_in2/144*H_col)'});
+  brk();
+
+  sect('Wind \u2014 Velocity Pressure','ASCE 7-16 \u00a726.10');
+  row('Basic wind speed','V',s.V,'0\\ "mph"','in','Fig. 26.5-1B',{name:'V_wind'});
+  row('Mean roof height','h',s.meanH,'0.00\\ "ft"','in');
+  row('Exposure category','\u2014',s.exposure,'@','in','\u00a726.7');
+  row('Topographic factor','K_zt',s.Kzt,'0.00','in','\u00a726.8',{name:'Kzt'});
+  row('Directionality factor','K_d',s.Kd,'0.00','in','Table 26.6-1',{name:'Kd'});
+  row('Ground elevation factor','K_e',s.Ke,'0.00','in','Table 26.9-1',{name:'Ke'});
+  row('Gust-effect factor','G',s.G,'0.00','in','\u00a726.11',{name:'G_gust'});
+  refTable('Table 26.10-1 \u2014 velocity pressure exposure coefficient K_z',
+    ['z (ft)','Exp B','Exp C','Exp D'],
+    [[0,0.57,0.85,1.03],[15,0.57,0.85,1.03],[20,0.62,0.90,1.08],[25,0.66,0.94,1.12],
+     [30,0.70,0.98,1.16],[40,0.76,1.04,1.22],[50,0.81,1.09,1.27],[60,0.85,1.13,1.31]],
+    'Table 26.10-1');
+  const Kz=kzLookup(s.meanH,s.exposure);
+  const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
+  row('Exposure coefficient','K_z',Kz,'0.0000','out','Table 26.10-1',{name:'Kz'});
+  row('Velocity pressure','q_h',qh,PSF,'out','Eq. 26.10-1',{bold:true,name:'q_h',formula:'0.00256*Kz*Kzt*Kd*Ke*V_wind^2'});
+  brk();
+
+  sect('Wind \u2014 Roof Net Pressure Coefficients','ASCE 7-16 \u00a727.3');
+  row('Wind flow condition','\u2014',(s.flow==='obstr'?'Obstructed':'Clear'),'@','in','Fig. 27.3-4');
+  const cnRows=(gm)=>[0,7.5,15,22.5,30,37.5,45].map(a=>{
+    const A0=cnLookup(a,'A',gm,s.flow==='obstr'?'obstr':'clear');
+    const B0=cnLookup(a,'B',gm,s.flow==='obstr'?'obstr':'clear');
+    return [a,A0[0],A0[1],B0[0],B0[1]];
+  });
+  refTable('Figure 27.3-4 \u2014 monoslope free roof, \u03b3 = 0\u00b0',
+    ['\u03b8 (deg)','Case A  C_NW','Case A  C_NL','Case B  C_NW','Case B  C_NL'], cnRows(0),'Fig. 27.3-4');
+  refTable('Figure 27.3-4 \u2014 monoslope free roof, \u03b3 = 180\u00b0',
+    ['\u03b8 (deg)','Case A  C_NW','Case A  C_NL','Case B  C_NW','Case B  C_NL'], cnRows(180),'Fig. 27.3-4');
+  note('C_N is interpolated linearly on the roof angle between the bracketing tabulated rows.');
+  const wc0=(ld.wcases||[])[0];
+  sub('Net pressures by case');
+  const pr=[['Case','C_NW','C_NL','p_W (psf)','p_L (psf)','Windward half']];
+  (ld.wcases||[]).forEach(w=>pr.push(['Wind '+(w.kase||'A')+'-'+w.gamma,
+      +f(w.cnw,3),+f(w.cnl,3),+f(w.pW),+f(w.pL), w.gamma===180?'lower (left)':'upper (right)']));
+  tbl(pr,{numFmt:'0.000',leftFirst:true});
+  brk();
+
+  sect('Wind \u2014 Lateral Components','ASCE 7-16 \u00a729.4');
+  row('Fascia depth','d_f',s.d_roof,'0.00\\ "ft"','in',null,{name:'d_fascia'});
+  refTable('Figure 29.4-1 \u2014 force coefficient C_f, flat-sided member',
+    ['h/D','C_f'],[[1,1.30],[7,1.40],[25,2.00]],'Fig. 29.4-1');
+  row('Fascia pressure','p_lat',s.p_lat,PSF,'in',null,{name:'p_lat'});
+  const Ffas=s.d_roof*s.p_lat*s.B_trib;
+  row('Fascia point load at roof tip','F_fascia',Ffas,LBF,'out',null,{bold:true,name:'F_fascia',formula:'d_fascia*p_lat*B_trib'});
+  sub('Column drag');
+  row('Column pressure','p_col',s.p_col,PSF,'in','Fig. 29.4-1',{name:'p_col'});
+  const wCol=s.p_col*dCol/12;
+  row('Column drag line load','w_col',wCol,PLF,'out',null,{bold:true,name:'w_coldrag',formula:'p_col*d_col_in/12'});
+  if(ld.screenH>0){
+    brk();
+    sect('Wind \u2014 Windscreen','ASCE 7-16 \u00a729.3');
+    row('Screen bottom elevation','z_scr,bot',ld.scr_bot,'0.00\\ "ft"','in');
+    row('Screen top elevation','z_scr,top',ld.scr_top,'0.00\\ "ft"','in');
+    row('Screen height','s',ld.screenH,'0.00\\ "ft"','out');
+    row('Screen pressure','p_screen',s.p_screen,PSF,'in',null,{bold:true,name:'p_screen'});
+    row('Screen line load','w_screen',s.p_screen*s.B_trib,PLF,'out',null,{formula:'p_screen*B_trib'});
+  }
+  brk();
+
+  sect('Load Combinations','ASCE 7-16 \u00a72.3.1');
+  tbl([['Combination','','Dead','Snow','Wind','Wind case'],
+    ['STR1  1.4D','',1.4,0,0,'\u2014'],
+    ['STR2  1.2D+1.6S','',1.2,1.6,0,'\u2014'],
+    ['STR3  1.2D+1.6S+0.5W','',1.2,1.6,0.5,'A-0 / B-0 / A-180 / B-180'],
+    ['STR4  1.2D+1.0W+0.5S','',1.2,0.5,1.0,'A-0 / B-0 / A-180 / B-180'],
+    ['STR5  0.9D+1.0W','',0.9,0,1.0,'A-0 / B-0 / A-180 / B-180']],{numFmt:'0.0',leftFirst:true});
+  note('Fourteen strength combinations are generated (four wind cases across STR3, STR4, and STR5) '
+      +'plus an envelope, and written into the MIDAS model.');
+
+  const cr=H.caseReactions();
+  if(cr&&cr.have){
+    brk();
+    sect('Base Reactions by Load Case','from MIDAS');
+    const hdr=['Load case'];
+    cr.colNames.forEach(cn=>hdr.push(cn+' N',cn+' V',cn+' M'));
+    const rows=[hdr];
+    ['DL','Snow','Wind A-0','Wind B-0','Wind A-180','Wind B-180'].forEach(lc=>{
+      if(!cr.byCase[lc]) return;
+      const rw=[lc];
+      cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rw.push(Math.round(v[0]),Math.round(v[1]),Math.round(v[2])); });
+      rows.push(rw);
+    });
+    tbl(rows,{numFmt:'#,##0',leftFirst:true});
+    note('Values come directly from the MIDAS analysis and are not recomputed here.');
+  }
+
+  brk();
+  sect('Design Assumptions and Limitations');
+  (meta.notes||[]).forEach(t=>note('\u2022  '+t));
+
+  // ---- figures ----
+  if(meta.images && meta.images.length){
+    brk();
+    sect('Figures');
+    for(const im of meta.images){
+      ws.mergeCells('A'+r+':'+SYMC+r);
+      const c=ws.getCell('A'+r);
+      c.value=im.title;
+      c.font={name:'Arial',size:9,italic:true,color:{argb:NAVY}};
+      r++;
+      const rows=Math.max(1,Math.ceil(im.h*0.75/15));
+      try{
+        const id=wb.addImage({base64:im.dataUrl.split(',')[1],extension:'png'});
+        ws.addImage(id,{tl:{col:0.2,row:r-1+0.05},ext:{width:im.w,height:im.h}});
+      }catch(e){}
+      r+=rows+1;
+    }
+  }
+
+  // ---- pagination, band, print area ----
+  const PAGE_PT=(11*72-0.8921568627450981*72-0.75*72)/0.80;
+  const rowH=i=>{ const rr=ws.getRow(i); return (rr&&rr.height)?rr.height:15; };
+  const cum=[0]; for(let i=1;i<=r;i++) cum[i]=cum[i-1]+rowH(i);
+  const cands=Array.from(new Set(breakCands)).sort((a,b)=>a-b);
+  let lastBreak=0, guard=0;
+  while(guard++<200){
+    let limit=lastBreak;
+    while(limit+1<=r && cum[limit+1]-cum[lastBreak]<=PAGE_PT) limit++;
+    if(limit>=r) break;
+    let pick=null;
+    for(let k=0;k<cands.length;k++) if(cands[k]>lastBreak&&cands[k]<=limit) pick=cands[k];
+    if(pick===null){ lastBreak=limit; continue; }
+    const rr=ws.getRow(pick); if(rr.addPageBreak) rr.addPageBreak();
+    lastBreak=pick;
+  }
+  let lastRow=1;
+  for(let i=1;i<=r;i++){
+    for(let ci=1;ci<=CONTENT_LAST+1;ci++){
+      const v=ws.getRow(i).getCell(ci).value;
+      if(v!==null&&v!==undefined&&v!==''){ lastRow=i; break; }
+    }
+  }
+  for(let i=4;i<=lastRow;i++)
+    ['J',REFC].forEach(c=>{ ws.getCell(c+i).fill={type:'pattern',pattern:'solid',fgColor:{argb:BAND}}; });
+  ws.pageSetup.printArea='A1:'+REFC+lastRow;
+
+  // ---- MCT import file on its own sheet ----
+  if(meta.mct){
+    const ms=wb.addWorksheet('MCT');
+    ms.views=[{showGridLines:false}];
+    ms.getColumn('A').width=118;
+    ms.pageSetup={orientation:'portrait',scale:70,
+      margins:{left:0.4,right:0.25,top:0.8921568627450981,bottom:0.75,header:0.3,footer:0.3}};
+    ms.headerFooter={
+      oddHeader:'&L&G&C'
+        +'Project: '+(meta.project||'________')+'\nSubject: '+(meta.subject||'________')
+        +'\nTask: '+(meta.task||'________')+'\n'
+        +'&RComputed by: &U'+(meta.by||'________')+'&U Date'+(meta.date||'________')
+        +'\nChecked by: '+(meta.checkedBy||'________')+' Date: &U'+(meta.checkedDate||'________')+'&U'
+        +'\nPage: &U&P of &N',
+      oddFooter:'&L&Z&F'};
+    let mr=1;
+    ms.mergeCells('A1:A1');
+    const t=ms.getCell('A1');
+    t.value='MIDAS Civil MCT Import File';
+    t.font={name:'Calibri',size:14,bold:true};
+    t.alignment={horizontal:'center'}; t.border=BOX;
+    ms.getRow(1).height=20; mr=3;
+    const nt=ms.getCell('A'+mr);
+    nt.value='Generated by the Canopy MCT Generator. This is the exact text imported into MIDAS Civil; '
+      +'it defines the nodes, elements, sections, supports, load cases, and load combinations used for the analysis.';
+    nt.font={name:'Arial',size:9,italic:true,color:{argb:'FF404040'}};
+    nt.alignment={wrapText:true,vertical:'top'};
+    ms.getRow(mr).height=26; mr+=2;
+    String(meta.mct).split('\n').forEach(line=>{
+      const c=ms.getCell('A'+mr);
+      c.value=line;
+      c.font={name:'Consolas',size:8};
+      c.alignment={horizontal:'left',vertical:'top'};
+      mr++;
+    });
+    ms.pageSetup.printArea='A1:A'+(mr-1);
+  }
+  return wb;
+}
+
+// Report figures are already base64 PNGs in the built report, so they are
+// scraped rather than re-rendered.
+function xlCollectFigures(){
+  const host=document.getElementById('reportInline');
+  if(!host) return [];
+  const figs=[];
+  host.querySelectorAll('figure').forEach(fg=>{
+    const img=fg.querySelector('img');
+    if(!img||!img.src||img.src.indexOf('data:image')!==0) return;
+    const cap=fg.querySelector('figcaption');
+    const nw=img.naturalWidth||720, nh=img.naturalHeight||420;
+    const w=Math.min(660,nw), h=Math.round(nh*(w/nw));
+    figs.push({title:cap?cap.textContent.trim():('Figure '+(figs.length+1)),dataUrl:img.src,w:w,h:h});
+  });
+  return figs;
+}
+
+function xlCaseReactions(){
+  const out={have:false,colNames:[],byCase:{},byCombo:{}};
+  if(typeof RESULT_ROWS==='undefined'||!RESULT_ROWS.length) return out;
+  const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
+  if(!loads.length) return out;
+  const mesh=buildMCT(state).mesh;
+  const nC=mesh.keyNodes.cols.length;
+  out.colNames=Array.from({length:nC},(_,i)=>'Col '+(i+1));
+  loads.forEach(ld=>{
+    const cf=midasColumnForces(ld);
+    const vals=cf.map(c=>c&&c.reaction?[c.reaction.N,c.reaction.V,c.reaction.M]:[0,0,0]);
+    if(/^(DL|Snow|Wind )/i.test(ld)) out.byCase[ld]=vals; else out.byCombo[ld]=vals;
+  });
+  out.have=!!Object.keys(out.byCase).length;
+  return out;
+}
+
+const XL_DEFAULT_REFS=[
+ 'ASCE 7-16 \u2014 Minimum Design Loads and Associated Criteria for Buildings and Other Structures',
+ 'AISC 360-16 \u2014 Specification for Structural Steel Buildings',
+ 'AISC Steel Construction Manual, 15th Edition',
+ 'International Building Code, 2021 Edition',
+ 'MIDAS Civil \u2014 MCT Command Reference'];
+const XL_DEFAULT_NOTES=[
+ 'Wind uses the open-building monoslope free-roof procedure (ASCE 7-16 \u00a727.3, Fig. 27.3-4); the canopy is open on both faces.',
+ 'Dead and snow are applied over the horizontal projection; member self weight is added automatically by MIDAS.',
+ 'Only balanced snow is applied. Unbalanced, drift, partial, and sliding snow are not generated.',
+ 'Base reactions are imported from the MIDAS analysis and are not recomputed in this workbook.',
+ 'Member design, code checks, connection design, and foundation design are not performed.'];
+
+async function exportCalcXlsx(btn){
+  const label=btn?btn.textContent:'';
+  const setLbl=t=>{ if(btn) btn.textContent=t; };
+  try{
+    if(btn) btn.disabled=true;
+    setLbl('Loading\u2026');
+    await loadExcelJS();
+    setLbl('Building workbook\u2026');
+    const host=document.getElementById('reportInline');
+    if(host && !host.dataset.built){ setLbl('Building report\u2026'); await buildReport(); }
+    const A=computeModel(state);
+    const today=new Date().toLocaleDateString('en-US');
+    const meta={
+      project:state.projTitle||'', subject:state.projSubject||'', task:state.projTask||'',
+      by:state.projComputedBy||'', date:state.projDate||today,
+      checkedBy:state.projCheckedBy||'', checkedDate:state.projCheckedDate||'',
+      refs:(state.projRefs&&state.projRefs.trim())?state.projRefs.split('\n').filter(x=>x.trim()):XL_DEFAULT_REFS,
+      notes:(state.projNotes&&state.projNotes.trim())?state.projNotes.split('\n').filter(x=>x.trim()):XL_DEFAULT_NOTES,
+      images:xlCollectFigures(),
+      mct:(function(){ try{ return buildMCT(state).text; }catch(e){ return ''; } })()
+    };
+    const H={nCols:nCols,sectProps:sectProps,caseReactions:xlCaseReactions,
+      governing:()=>{ try{ return (typeof RESULT_ROWS!=='undefined'&&RESULT_ROWS.length)?midasGoverning():null; }catch(e){ return null; } }};
+    const wb=await buildCalcWorkbook(state,A,meta,H);
+    let buf=await wb.xlsx.writeBuffer();
+    setLbl('Adding header\u2026');
+    buf=await xlInjectHeaderLogo(buf);
+    const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const base=(state.projTitle||'Canopy').replace(/[^\w\-]+/g,'_').replace(/^_+|_+$/g,'')||'Canopy';
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=base+'_Calc_'+new Date().toISOString().slice(0,10)+'.xlsx';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1500);
+  }catch(e){
+    console.error(e); alert('Excel export failed: '+e.message);
+  }finally{
+    if(btn) btn.disabled=false;
+    setLbl(label||'\u2b07 Excel calc (.xlsx)');
+  }
+}
+
+function projMetaHTML(s){
+  const rows=[['Project',s.projTitle],['Subject',s.projSubject],['Task',s.projTask],['Computed by',s.projComputedBy],['Checked by',s.projCheckedBy]]
+    .filter(([,v])=>v&&String(v).trim());
+  if(!rows.length) return '';
+  return `<div class="projmeta">`+rows.map(([k,v])=>
+    `<span><b>${k}:</b> ${String(v).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</span>`
+  ).join('')+`</div>`;
+}
+
 async function buildReport(){
   if(_reportBuilding) return;          // avoid overlapping builds (tab open + click)
   _reportBuilding=true;
@@ -2217,6 +2903,7 @@ async function buildReport(){
   const reportBody=`
   <h1>Mono-slope Canopy — Structural Design Report</h1>
   <div class="sub">MIDAS Civil MCT model · ASCE 7-16 · generated ${today}</div>
+  ${projMetaHTML(s)}
   <div class="toc"><b>Contents</b>
     <a href="#s0">Summary</a><a href="#s1">1 Inputs</a><a href="#s2">2 Geometry</a><a href="#s3">3 Gravity</a>
     <a href="#s4">4 Wind</a><a href="#s5">5 Model</a><a href="#s6">6 Reactions</a>
@@ -3656,6 +4343,7 @@ document.getElementById('threedReact').addEventListener('change',()=>draw3D());
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
+document.getElementById('xlsxBtn').onclick=function(){ exportCalcXlsx(this); };
 document.getElementById('downloadReportBtn').onclick=downloadReport;
 
 // ============================================================================
