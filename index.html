@@ -328,7 +328,12 @@
         <summary>Snow load</summary>
         <div class="group-body">
           <div class="seg moss" id="segSnow"><button data-v="manual" class="on">Enter psf</button><button data-v="calc">Calculate (ASCE 7-16)</button></div>
-          <div id="snowManual"><div id="snowFields"></div></div>
+          <div id="snowManual">
+            <div id="snowFields"></div>
+            <div class="field"><label>Ground snow p<sub>g</sub></label><input type="number" step="any" class="inp" data-k="pg"><span class="unit">psf</span></div>
+            <div class="field-desc">Used only to check the entered snow load against the ASCE 7-16 §7.3.4 minimum. It does not change the applied load.</div>
+            <div class="note-bar" id="snowMinWarn" style="font-size:11px;display:none"></div>
+          </div>
           <div id="snowCalc" style="display:none">
             <div class="subhead-lbl">ASCE 7-16 Ch. 7 inputs</div>
             <div id="snowCalcFields"></div>
@@ -615,7 +620,7 @@ const DEFAULTS = {
   projCheckedBy: '', projCheckedDate: '', projRefs: '', projNotes: '',
   p_screen: 30, scr_bot: 0, scr_top: 10, scrPctOpen: 0, screenWindMode: 'manual',
   // --- snow calc inputs (ASCE 7-16 Ch.7) ---
-  pg: 30, Ce: 0.9, Ct: 1.0, Is: 1.0,
+  pg: 30, Ce: 0.9, Ct: 1.2, Is: 1.0,
   // --- wind calc inputs (ASCE 7-16 §26-27) ---
   V: 115, Kzt: 1.0, Kd: 0.85, Ke: 1.0, meanH: 14
 };
@@ -738,15 +743,30 @@ function kzLookup(h,exp){
 }
 // sloped-roof snow factor Cs — warm/cold roof, simplified (slope < 30° -> ~1.0 for typical Ct)
 function snowCs(thetaDeg,Ct){
-  // ASCE 7-16 Fig 7.4-1: for slopes <~5-15° Cs≈1.0; linear reduction toward 70° where Cs=0
-  // Warm roof (Ct<=1.0) unobstructed slippery would reduce earlier; use conservative all-other-surfaces:
-  // Cs=1.0 for theta<=30, then linear to 0 at 70.
-  if(thetaDeg<=30)return 1.0;
-  if(thetaDeg>=70)return 0;
-  return (70-thetaDeg)/40;
+  // ASCE 7-16 Fig. 7.4-1, "all other surfaces" curves (conservative; the tool does
+  // not claim an unobstructed slippery surface). Cs = 1.0 out to a breakpoint that
+  // depends on the thermal factor, then falls linearly to zero at 70 degrees:
+  //   Ct <= 1.0 (warm roof)              -> 1.0 to 30.0 deg
+  //   Ct  = 1.1 (cold, ventilated)       -> 1.0 to 37.5 deg
+  //   Ct >= 1.2 (unheated / open air)    -> 1.0 to 45.0 deg
+  // Using the warm-roof curve on a cold roof understates Cs, and therefore snow,
+  // between the two breakpoints, so the curve must follow Ct.
+  const brk = (Ct>=1.2) ? 45.0 : (Ct>=1.1 ? 37.5 : 30.0);
+  if(thetaDeg<=brk) return 1.0;
+  if(thetaDeg>=70) return 0;
+  return (70-thetaDeg)/(70-brk);
 }
 
 // compute snow load (psf) from ASCE 7-16 Ch.7
+// ASCE 7-16 §7.3.4 minimum roof snow load, and whether it applies to this roof.
+// It is a low-slope provision: monoslope roofs shallower than 15 degrees.
+function snowMinimum(s){
+  const Is=SNOW_IS[s.riskCat]||1.0;
+  const pg=+s.pg||0;
+  const pm=(pg<=20)?Is*pg:20*Is;
+  const thetaDeg=Math.atan(s.slope)*180/Math.PI;
+  return {pm,Is,thetaDeg,applies:thetaDeg<15};
+}
 function calcSnow(s){
   const pg=s.pg, Ce=s.Ce, Ct=s.Ct, Is=SNOW_IS[s.riskCat]||1.0;
   const pf=0.7*Ce*Ct*Is*pg;                 // flat-roof snow (Eq 7.3-1)
@@ -1027,15 +1047,43 @@ refreshSectDesc();
 
 // ---- snow/wind calculator toggles & recompute ----
 function applySnowCalc(){
-  if(state.snowMode!=='calc')return;
+  const res=document.getElementById('snowResult');
+  const warn=document.getElementById('snowMinWarn');
+
+  // ---- manual mode: do not overwrite the entered value, but still check it
+  // against the §7.3.4 minimum and say so. Silently accepting a value below the
+  // code minimum would be the tool failing to flag its own range of applicability.
+  if(state.snowMode!=='calc'){
+    if(res){ res.innerHTML=''; }
+    if(warn){
+      const m=snowMinimum(state);
+      if(!m.applies || !(+state.pg>0)){
+        warn.style.display='none'; warn.innerHTML='';
+      } else if((+state.SL||0) < m.pm-1e-9){
+        warn.style.display='block';
+        warn.innerHTML=`<b>Below the ASCE 7-16 §7.3.4 minimum.</b> With p<sub>g</sub> = ${f(+state.pg,1)} psf `
+          +`and I<sub>s</sub> = ${f(m.Is,2)}, the minimum roof snow load is `
+          +`p<sub>m</sub> = <b>${f(m.pm,1)} psf</b> for this ${f(m.thetaDeg,1)}° roof. `
+          +`The entered value of ${f(+state.SL||0,1)} psf is lower. Raise it, or switch to Calculate.`;
+      } else {
+        warn.style.display='block';
+        warn.innerHTML=`<span style="color:var(--muted)">Checked against ASCE 7-16 §7.3.4: `
+          +`p<sub>m</sub> = ${f(m.pm,1)} psf for this ${f(m.thetaDeg,1)}° roof. `
+          +`The entered ${f(+state.SL||0,1)} psf meets the minimum.</span>`;
+      }
+    }
+    return;
+  }
+
+  if(warn){ warn.style.display='none'; warn.innerHTML=''; }
   const r=calcSnow(state); state.SL=+r.sGov.toFixed(2);
   const sf=document.querySelector('#snowFields input[data-k=SL]'); if(sf)sf.value=state.SL;
   const minLine = r.minApplies
     ? `p_m = ${state.pg<=20?'Is·pg':'20·Is'} = <b>${f(r.pm,1)} psf</b> (§7.3.4 min, θ<15°)${r.pm>r.ps?' <span style="color:var(--rust)">governs</span>':''}<br>`
     : `<span style="color:var(--muted)">§7.3.4 minimum n/a (θ ≥ 15°)</span><br>`;
-  document.getElementById('snowResult').innerHTML=
+  if(res) res.innerHTML=
     `p_f = 0.7·Ce·Ct·Is·pg = 0.7·${state.Ce}·${state.Ct}·${r.Is}·${state.pg} = <b>${f(r.pf,1)} psf</b><br>`+
-    `θ = ${f(r.thetaDeg,1)}° → Cs = ${f(r.Cs,3)}<br>`+
+    `θ = ${f(r.thetaDeg,1)}° → Cs = ${f(r.Cs,3)} <span style="color:var(--muted)">(Fig. 7.4-1, all-other-surfaces at Ct = ${state.Ct})</span><br>`+
     `p_s = Cs·p_f = <b>${f(r.ps,1)} psf</b><br>`+
     minLine+
     `Applied S = <b>${f(r.sGov,1)} psf</b>`;
@@ -1107,7 +1155,7 @@ document.addEventListener('input',e=>{const inp=e.target.closest('input[data-k],
   if(inp.type==='text'||inp.tagName==='TEXTAREA'){ state[inp.dataset.k]=inp.value; recomputeDebounced(); return; }
   const v=parseFloat(inp.value);if(!isNaN(v)){state[inp.dataset.k]=v;
   // if a snow/wind calc input changed, recompute the derived pressure
-  if(['pg','Ce','Ct'].includes(inp.dataset.k))applySnowCalc();
+  if(['pg','Ce','Ct','SL','slope'].includes(inp.dataset.k))applySnowCalc();
   if(['V','meanH','Kzt','Kd','Ke'].includes(inp.dataset.k))applyWindCalc();
   if(['scrPctOpen','scr_bot','scr_top','B_trib','H_col','V','meanH','Kzt','Kd','Ke','G'].includes(inp.dataset.k))applyScreenWindCalc();
   if(['H_col','V','meanH','Kzt','Kd','Ke','G'].includes(inp.dataset.k))applyColWindCalc();
