@@ -262,10 +262,24 @@
       <details class="group" open>
         <summary>Configuration</summary>
         <div class="group-body">
+          <div class="subhead-lbl">Model</div>
+          <div class="seg" id="segDim"><button data-v="2d" class="on">2D frame</button><button data-v="3d">3D structure</button></div>
+          <div class="field-desc">2D frame: one frame, with roof loads taken from the tributary width. 3D structure: the frame below repeats along the length of the canopy. The frames are tied together by longitudinal edge and eave beams, and the columns act as cantilevers for wind along the length (fixed bases).</div>
+          <div id="dim3dWrap" style="display:none">
+            <div class="field"><label>Bays along length</label><input type="number" min="1" max="30" step="1" id="nFrameBayInput" value="3"><span class="unit"></span></div>
+            <div class="field-desc">Number of bays between frames along the canopy length. Frames = bays + 1.</div>
+            <div class="subhead-lbl">Frame spacing (ft, center-to-center)</div>
+            <div id="frameBayTable" class="bay-table"></div>
+            <div id="oh3dFields"></div>
+            <div class="subhead-lbl">Edge / eave beams</div>
+            <div class="field"><label>Shape</label><select id="longSect" class="inp" style="grid-column:2/4;width:100%"></select></div>
+            <div class="field-desc" id="longSectDesc"></div>
+            <div class="field-desc">Longitudinal beams run the full length along the low and high roof edges and over every column line, and cantilever past the end frames to the front and back overhangs. They are written to the MCT as AISC10(US) database sections.</div>
+          </div>
           <div class="field"><label>Number of columns</label><input type="number" min="1" max="10" step="1" id="nColInput" value="2"><span class="unit"></span></div>
           <div class="field-desc">Number of column lines supporting the roof beam. 1 = cantilever; 2 = simple bay; 3+ = multi-bay continuous canopy (statically indeterminate, solved by the in-app stiffness analysis).</div>
           <div id="bayTableWrap">
-            <div class="subhead-lbl">Bay spacings (ft, center-to-center)</div>
+            <div class="subhead-lbl" id="bayTableLbl">Bay spacings (ft, center-to-center)</div>
             <div id="bayTable" class="bay-table"></div>
             <div class="field-desc">Center-to-center spacing of each bay between adjacent columns. The first column sits at the left overhang; the right overhang extends past the last column.</div>
           </div>
@@ -518,7 +532,9 @@
         <div class="toolbar" style="margin:10px 0 0">
           <button class="btn primary" id="parseBtn">Parse &amp; plot</button>
           <button class="btn" id="clearResBtn">Clear</button>
+          <span id="resFrameWrap" style="display:none;margin-left:auto;align-items:center;gap:6px"><span class="ctl-label">Frame shown</span><select id="resFrameSel"></select></span>
         </div>
+        <div class="hint" id="resFrameHint" style="display:none;margin-top:6px">3D model: the diagrams, member key and free-body below show one frame at a time. Pick it here. The table under the free-body lists the governing base reactions for every frame.</div>
       </div>
     </div>
     <div class="panel" id="resKeyPanel" style="display:none">
@@ -563,6 +579,11 @@
           <div id="noEnvNote" style="display:none;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:8px 12px;margin-bottom:8px;font-size:11.5px;color:var(--rust)">No <b>Envelope</b> combination was found in the pasted results. Governing values below fall back to the maximum across all pasted cases, which may include individual unfactored load cases. Paste the envelope combination results for correct governing design reactions.</div>
           <div id="plotReact" class="plot" style="height:330px"></div>
           <div id="reactTable" style="margin-top:8px"></div>
+          <div id="reactAllWrap" style="display:none;margin-top:14px">
+            <div class="subhead-lbl">Governing base reactions — all frames (envelope)</div>
+            <div class="hint" style="margin-bottom:6px">V and M act in the frame plane (Shear-z, Moment-y). V<sub>long</sub> and M<sub>long</sub> act along the length (Shear-y, Moment-z), from wind along the canopy. Each value is the independent maximum.</div>
+            <div id="reactAllTable"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -625,12 +646,19 @@ const DEFAULTS = {
   // --- snow calc inputs (ASCE 7-16 Ch.7) ---
   pg: 30, Ce: 0.9, Ct: 1.2, Is: 1.0,
   // --- wind calc inputs (ASCE 7-16 §26-27) ---
-  V: 115, Kzt: 1.0, Kd: 0.85, Ke: 1.0, meanH: 14
+  V: 115, Kzt: 1.0, Kd: 0.85, Ke: 1.0, meanH: 14,
+  // --- 3D structure (modelDim '3d') ---
+  OH_front: 5, OH_back: 5
 };
 const state = Object.assign({}, DEFAULTS, {
   nCol: 2,                       // integer column count (>=1)
   baySpacings: [8],              // length nCol-1; per-bay center-to-center (ft)
   colBases: [],                  // per-column base elevation (ft); null/missing entry = datum El_base
+  modelDim: '2d',                // '2d' single frame | '3d' repeated frames tied by longitudinal beams
+  nFrameBays: 3,                 // 3D: bays along the length (frames = bays + 1)
+  frameSpacings: [20,20,20],     // 3D: per-bay frame spacing along Y (ft)
+  longSect: 'HSS6X6X.250',       // 3D: longitudinal edge/eave beam section
+  B_trib2D: null,                // B_trib entered in 2D, restored when switching back from 3D
   beamConnect: 'continuous',     // column-to-beam connection: 'continuous' = fixed/moment, 'pinned' = hinged (releases column top)
   baseFixity: 'fixed', flow: 'clear', screen: 'partial',
   snowMode: 'manual', windMode: 'manual',   // 'manual' or 'calc'
@@ -729,6 +757,41 @@ function colBaseEls(s){
 function colHeights(s){
   const xs=columnXs(s), zb=colBaseEls(s), datum=+s.El_base||0;
   return xs.map((x,i)=>datum+s.H_col+(x-s.L_OH)*s.slope-zb[i]);
+}
+// ---------------------------------------------------------------------------
+// 3D LAYOUT — frames repeat along global Y. y = 0 at the front roof edge; the
+// first frame sits at y = OH_front, the back roof edge at y = total length.
+// ---------------------------------------------------------------------------
+function is3D(s){ return s.modelDim==='3d'; }
+function nFrameBays(s){ return Math.max(1, Math.min(30, Math.round(s.nFrameBays||1))); }
+function frameSpans(s){
+  const n=nFrameBays(s), out=[], fs=s.frameSpacings||[];
+  for(let i=0;i<n;i++) out.push((fs[i]!=null && !isNaN(+fs[i]))?+fs[i]:(+fs[0]||20));
+  return out;
+}
+function frameYs(s){
+  const ys=[+s.OH_front||0]; frameSpans(s).forEach(b=>ys.push(ys[ys.length-1]+b));
+  return ys;
+}
+function length3D(s){ const ys=frameYs(s); return ys[ys.length-1]+(+s.OH_back||0); }
+// tributary width of every frame: half of each adjacent bay, plus the overhang at the ends
+function frameTribs(s){
+  const sp=frameSpans(s), n=sp.length+1, out=[];
+  for(let j=0;j<n;j++){
+    const lo=(j===0)?(+s.OH_front||0):sp[j-1]/2;
+    const hi=(j===n-1)?(+s.OH_back||0):sp[j]/2;
+    out.push(lo+hi);
+  }
+  return out;
+}
+// roof strip [y0,y1] carried by each frame (used for the longitudinal wind zones)
+function frameStrips(s){
+  const ys=frameYs(s), L3=length3D(s), n=ys.length, out=[];
+  for(let j=0;j<n;j++){
+    const y0=(j===0)?0:(ys[j-1]+ys[j])/2, y1=(j===n-1)?L3:(ys[j]+ys[j+1])/2;
+    out.push([y0,y1]);
+  }
+  return out;
 }
 // x-positions of every column, first column at x = L_OH
 function columnXs(s){
@@ -887,12 +950,14 @@ function calcColWind(s){
 }
 // fascia wind pressure per ASCE 7-16 §29.4 (Fig. 29.4-1, flat-sided, normal to face);
 // aspect ratio = fascia length (tributary B) / fascia depth.
-function calcFasciaWind(s){
+// lenOverride: fascia length to use instead of the default. In 3D the side fascia runs
+// the full canopy length; the end (front/back) fascia passes the plan span L.
+function calcFasciaWind(s, lenOverride){
   const Kz=kzLookup(s.meanH,s.exposure);
   const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
   const G=s.G;
   const depth=s.d_roof;                     // fascia depth (ft) = sign height "s"
-  const len=s.B_trib;                       // fascia length (tributary width, ft) = sign width "B"
+  const len=(lenOverride!=null)?lenOverride:(is3D(s)?length3D(s):s.B_trib);   // fascia length (ft) = sign width "B"
   const method=(s.fasciaCfMethod==='sign')?'sign':'flat';
   if(method==='sign'){
     // ---- ASCE 7-16 Fig. 29.3-1: treat the fascia as a solid sign ----
@@ -928,8 +993,8 @@ function calcScreenWind(s){
   const Kz=kzLookup(s.meanH,s.exposure);
   const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
   const G=s.G;
-  // geometry: width B = tributary; height s = screen band; h = top elevation above grade
-  const B=s.B_trib;
+  // geometry: width B = tributary (2D) or full canopy length (3D); height s = screen band; h = top elevation above grade
+  const B=is3D(s)?length3D(s):s.B_trib;
   const h0=colHeights(s)[0], z0=colBaseEls(s)[0];   // screen hangs on the first column line
   const sH=(s.screen==='full') ? h0 : Math.max(0.01,(s.scr_top - s.scr_bot));
   const hTop=(s.screen==='full') ? h0 : (s.scr_top - z0);
@@ -969,7 +1034,7 @@ const GEOM_FIELDS = [
   ['slope','Roof slope','—','Roof pitch as rise over run (e.g. 0.10 = 1.2 in 12). Drives the roof angle θ = tan⁻¹(slope), which sets the wind C_N coefficients and the true sloped beam length.'],
   ['H_col','Column height','ft','Vertical height from the datum (base elevation) to the roof beam at the first (left) column. Fixes where the roof sits. A column whose base is set below the datum is longer by that amount. Taller columns increase wind overturning moment and base shear lever arm.'],
   ['El_base','Base elevation','ft','Datum elevation of the column bases. Usually 0; set to a site elevation if you want model coordinates to match plans. The column height is measured from this datum at the first (left) column. Individual column bases can step up or down from it under Configuration → Column base elevations.'],
-  ['B_trib','Tributary width','ft','Out-of-plane width of roof this 2D frame carries (typically the bay spacing between frames). All surface pressures (psf) are multiplied by this to get line loads (lbf/ft).']
+  ['B_trib','Tributary width','ft','Out-of-plane width of roof this 2D frame carries (typically the bay spacing between frames). All surface pressures (psf) are multiplied by this to get line loads (lbf/ft). In 3D mode this is set automatically to the largest frame tributary width (the governing frame), and the MCT uses each frame\u2019s own tributary width.']
 ];
 const MAT_FIELDS = [
   ['E_ksi','Elastic modulus','ksi','Young\u2019s modulus of the member material (29,000 ksi for steel). Sets axial and bending stiffness; written to the MIDAS USER material.'],
@@ -1056,13 +1121,69 @@ function sectDescHTML(desig){
 function refreshSectDesc(){
   document.getElementById('beamSectDesc').innerHTML=sectDescHTML(state.beamSect);
   document.getElementById('colSectDesc').innerHTML=sectDescHTML(state.colSect);
+  const ld=document.getElementById('longSectDesc'); if(ld) ld.innerHTML=sectDescHTML(state.longSect);
 }
 populateSectDropdown('beamSect'); populateSectDropdown('colSect');
 document.getElementById('beamSect').value=state.beamSect;
 document.getElementById('colSect').value=state.colSect;
 document.getElementById('beamSect').addEventListener('change',e=>{state.beamSect=e.target.value;refreshSectDesc();recompute();});
 document.getElementById('colSect').addEventListener('change',e=>{state.colSect=e.target.value;refreshSectDesc();recompute();});
+populateSectDropdown('longSect');
+document.getElementById('longSect').value=state.longSect;
+document.getElementById('longSect').addEventListener('change',e=>{state.longSect=e.target.value;refreshSectDesc();recompute();});
 refreshSectDesc();
+
+// ---- 3D structure inputs ----
+const OH3D_FIELDS = [
+  ['OH_front','Front overhang','ft','Distance the roof runs past the first frame at the front of the canopy (along the length). The edge and eave beams cantilever this far, and this strip is added to the first frame\u2019s tributary width.'],
+  ['OH_back','Back overhang','ft','Distance the roof runs past the last frame at the back of the canopy. Added to the last frame\u2019s tributary width.']
+];
+buildFields('oh3dFields',OH3D_FIELDS);
+function syncFrameSpacings(){
+  const n=nFrameBays(state);
+  if(!Array.isArray(state.frameSpacings))state.frameSpacings=[];
+  const last=state.frameSpacings[state.frameSpacings.length-1]||20;
+  while(state.frameSpacings.length<n)state.frameSpacings.push(last);
+  state.frameSpacings.length=n;
+}
+function buildFrameBayTable(){
+  syncFrameSpacings();
+  document.getElementById('frameBayTable').innerHTML=state.frameSpacings.map((b,i)=>
+    `<div class="bay-row"><label>Bay ${i+1}</label><input type="number" step="any" min="0" data-fbay="${i}" value="${b}"><span class="u">ft</span></div>`
+  ).join('');
+}
+document.getElementById('nFrameBayInput').addEventListener('input',e=>{
+  const n=parseInt(e.target.value); if(isNaN(n))return;
+  state.nFrameBays=Math.max(1,Math.min(30,n)); buildFrameBayTable(); recompute();
+});
+document.getElementById('frameBayTable').addEventListener('input',e=>{
+  const inp=e.target.closest('input[data-fbay]'); if(!inp)return;
+  const v=parseFloat(inp.value); if(!isNaN(v)){ state.frameSpacings[+inp.dataset.fbay]=v; recomputeDebounced(); }
+});
+// In 3D the tributary width is derived (largest frame tributary = governing frame) so
+// every typical-frame derivation, plot and calc shows the governing frame.
+function sync3DTrib(){
+  const inp=document.querySelector('#geomFields input[data-k=B_trib]');
+  if(is3D(state)){
+    state.B_trib=+Math.max(...frameTribs(state)).toFixed(4);
+    if(inp){ inp.value=state.B_trib; inp.readOnly=true; inp.title='Set automatically in 3D mode (largest frame tributary width)'; }
+  } else if(inp){ inp.readOnly=false; inp.title=''; }
+}
+function apply3DVis(){
+  const on=is3D(state);
+  document.getElementById('dim3dWrap').style.display=on?'block':'none';
+  document.getElementById('bayTableLbl').textContent=on?'Column spacing within each frame (ft, center-to-center)':'Bay spacings (ft, center-to-center)';
+  // 3D: columns are cantilevers along the length, so the bases must be fixed
+  if(on && state.baseFixity!=='fixed'){
+    state.baseFixity='fixed';
+    segFix.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v==='fixed'));
+  }
+  segFix.querySelectorAll('button[data-v=pinned]').forEach(b=>{ b.disabled=on; b.title=on?'3D model: columns resist wind along the length as cantilevers, so bases are fixed':''; });
+  document.getElementById('nFrameBayInput').value=nFrameBays(state);
+  buildFrameBayTable();
+  document.getElementById('longSect').value=state.longSect;
+  sync3DTrib();
+}
 
 // ---- snow/wind calculator toggles & recompute ----
 function applySnowCalc(){
@@ -1262,6 +1383,13 @@ document.getElementById('colBaseTable').addEventListener('input',e=>{
 });
 bindSeg(document.getElementById('segConnect'),'beamConnect');
 bindSeg(segFix,'baseFixity',updateCfgTag);
+bindSeg(document.getElementById('segDim'),'modelDim',v=>{
+  // keep the 2D tributary width so switching back restores what was entered
+  if(v==='3d'){ if(state.B_trib2D==null) state.B_trib2D=state.B_trib; }
+  else if(state.B_trib2D!=null){ state.B_trib=state.B_trib2D; state.B_trib2D=null;
+    const inp=document.querySelector('#geomFields input[data-k=B_trib]'); if(inp) inp.value=state.B_trib; }
+  apply3DVis(); refreshWindCaseOptions();
+});
 bindSeg(document.getElementById('segFlow'),'flow');
 bindSeg(document.getElementById('segScreen'),'screen',v=>{
   document.getElementById('screenPressField').style.display=v==='none'?'none':'block';
@@ -1290,7 +1418,18 @@ let windShowCase='A-0', gravShow='both';
 document.getElementById('windCaseSel').addEventListener('change',e=>{windShowCase=e.target.value;drawWind();});
 document.getElementById('gravCaseSel').addEventListener('change',e=>{gravShow=e.target.value;drawGravity();});
 
-function updateCfgTag(){const t=document.getElementById('cfgTag');const n=nCols(state);t.textContent=(n===1?'1-COL':n+'-COL')+' · '+(n===1?'CANT':state.baseFixity.toUpperCase());}
+// wind-case selectors list the 4 cross cases, plus the 4 longitudinal cases in 3D
+function refreshWindCaseOptions(){
+  const tags=['A-0','B-0','A-180','B-180'].concat(is3D(state)?['A-90','B-90','A-270','B-270']:[]);
+  const ws=document.getElementById('windCaseSel');
+  if(ws){ ws.innerHTML=tags.map(t=>`<option value="${t}">Wind ${t}</option>`).join('');
+    if(!tags.includes(windShowCase)) windShowCase='A-0'; ws.value=windShowCase; }
+  const ts=document.getElementById('threedCaseSel');
+  if(ts){ ts.innerHTML='<option value="none">None (structure only)</option><option value="DL">Dead</option><option value="Snow">Snow</option>'
+      +tags.map(t=>`<option value="Wind ${t}">Wind ${t}</option>`).join('');
+    if(typeof threedCase!=='undefined'){ if(threedCase!=='none'&&threedCase!=='DL'&&threedCase!=='Snow'&&!tags.includes(threedCase.replace('Wind ',''))) threedCase='none'; ts.value=threedCase; } }
+}
+function updateCfgTag(){const t=document.getElementById('cfgTag');const n=nCols(state);t.textContent=(is3D(state)?`3D ${nFrameBays(state)+1}-FRAME · `:'')+(n===1?'1-COL':n+'-COL')+' · '+(n===1?'CANT':state.baseFixity.toUpperCase());}
 
 function f(v,d=2){if(Math.abs(v)<1e-9)v=0;return(+v).toFixed(d);}
 
@@ -1380,6 +1519,44 @@ function windCases(s){
   return cases;
 }
 
+// ASCE 7-16 Fig. 27.3-7 — MWFRS net pressure coefficient C_N for open buildings with
+// free roofs, θ ≤ 45°, γ = 90° and 270° (wind blowing along the length, parallel to
+// the frames). C_N depends on horizontal distance from the windward edge in terms of
+// the mean roof height h, and applies to every roof shape. +C_N acts toward the top
+// surface (downward), -C_N away from it (uplift). Load Cases A and B are both checked.
+const CN90_ZONES = [
+  {lim:1,        clear:{A:-0.8, B:0.8}, obstr:{A:-1.2, B:0.5}},   // distance <= h
+  {lim:2,        clear:{A:-0.6, B:0.5}, obstr:{A:-0.9, B:0.5}},   // h < distance <= 2h
+  {lim:Infinity, clear:{A:-0.3, B:0.3}, obstr:{A:-0.6, B:0.3}}    // distance > 2h
+];
+// mean roof height above the datum (average of the low and high roof tips)
+function roofMeanHeight(s){
+  const yStart=s.H_col - s.L_OH*s.slope;
+  return yStart + totalLength(s)*s.slope/2;
+}
+// The 4 longitudinal wind cases (3D only). Each frame carries a strip of roof; its
+// roof pressure is C_N averaged over that strip (distance-weighted across the zones),
+// applied uniformly along the frame beam. gamma=90: wind enters at the FRONT edge
+// (y = 0) and blows toward +Y; gamma=270: enters at the BACK edge and blows toward -Y.
+function longWindCases(s){
+  if(!is3D(s)) return [];
+  const h=Math.max(0.01, roofMeanHeight(s)), qhG=s.q_h*s.G, L3=length3D(s), strips=frameStrips(s);
+  const flow=(s.flow==='obstr')?'obstr':'clear';
+  const out=[];
+  [['A',90],['B',90],['A',270],['B',270]].forEach(([kase,gamma])=>{
+    const zones=CN90_ZONES.map((z,i)=>({d0:i===0?0:CN90_ZONES[i-1].lim*h, d1:z.lim*h, cn:z[flow][kase]}));
+    const frames=strips.map(([y0,y1])=>{
+      const a=(gamma===90)?y0:L3-y1, b=(gamma===90)?y1:L3-y0;   // strip distances from the windward edge
+      let acc=0; zones.forEach(z=>{ const lo=Math.max(a,z.d0), hi=Math.min(b,z.d1); if(hi>lo) acc+=z.cn*(hi-lo); });
+      const cn=(b>a+1e-9)?acc/(b-a):zones[0].cn;
+      return {y0,y1,d0:a,d1:b,cn,p:qhG*cn};
+    });
+    out.push({name:`Wind ${kase}-${gamma}`, kase, gamma, long:true, h, qhG, zones, frames,
+              ySign:(gamma===90)?1:-1});
+  });
+  return out;
+}
+
 // ============================================================================
 // GEOMETRY + LOADS
 // ============================================================================
@@ -1388,7 +1565,8 @@ function computeModel(s){
   // memoize: computeModel is pure in s and called many times per render. Cache the
   // last result keyed on a signature of the inputs that affect geometry/loads.
   const key=JSON.stringify([s.L_OH,s.R_OH,s.slope,s.H_col,s.El_base,s.colBases,s.B_trib,s.nCol,s.baySpacings,
-    s.DL,s.SL,s.q_h,s.G,s.flow,s.d_roof,s.p_lat,s.p_col,s.colWindMode,s.fasciaWindMode,s.fasciaCfMethod,s.screen,s.p_screen,s.scr_bot,s.scr_top,s.scrPctOpen,s.screenWindMode,s.colSect]);
+    s.DL,s.SL,s.q_h,s.G,s.flow,s.d_roof,s.p_lat,s.p_col,s.colWindMode,s.fasciaWindMode,s.fasciaCfMethod,s.screen,s.p_screen,s.scr_bot,s.scr_top,s.scrPctOpen,s.screenWindMode,s.colSect,
+    s.modelDim,s.nFrameBays,s.frameSpacings,s.OH_front,s.OH_back,s.longSect]);
   if(_cmCache.key===key) return _cmCache.val;
   const val=_computeModel(s);
   _cmCache={key,val};
@@ -1430,7 +1608,8 @@ function _computeModel(s){
   }
 
   const geom={theta,cos,sin,L,xCol,yCol,yStart,yEnd,yAt,colX,C1x,C1y,C2x,C2y,C3x,C3y,El_base:s.El_base,H_col:s.H_col,colBase,colH};
-  const loads={F_dead,F_snow,F_wLn,F_wRn,P1x,P1y,P2x,P2y,F_fascia,F_colwind,z_colcent,Wlower,Wupper,wcases,
+  const lcases=longWindCases(s);   // [] in 2D
+  const loads={F_dead,F_snow,F_wLn,F_wRn,P1x,P1y,P2x,P2y,F_fascia,F_colwind,z_colcent,Wlower,Wupper,wcases,lcases,
                screenH:scrH,F_screen,z_screen_cent,scr_bot:scrBot,scr_top:scrTop};
   const res={mode:nCols(s)===1?'single':(s.baseFixity==='fixed'?'fixed':'pinned'), nCol:nCols(s)};
   return {geom,loads,res};
@@ -1544,7 +1723,17 @@ function buildMesh(s){
 function inToFt(v){return v/12;}
 function num(v,d=6){ if(Math.abs(v)<1e-12)v=0; let s=(+v).toFixed(d); return s; }
 
+// buildMCT is pure in the inputs; memoize on them (the pasted results text excluded)
+// because the results, reaction and report paths call it once per load case and frame.
+let _mctCache={key:null,val:null};
 function buildMCT(s){
+  const key=JSON.stringify(s,(k,v)=>k==='midasPaste'?undefined:v)+'|'+new Date().toISOString().slice(0,10);
+  if(_mctCache.key===key) return _mctCache.val;
+  const val=is3D(s)?buildMCT3D(s):_buildMCT2D(s);
+  _mctCache={key,val};
+  return val;
+}
+function _buildMCT2D(s){
   const mesh=buildMesh(s), g=mesh.geom;
   const L=g.L, B=s.B_trib;
   const lines=[];
@@ -1789,6 +1978,305 @@ function buildMCT(s){
   return {text:lines.join('\n'), mesh, wcases};
 }
 
+// ============================================================================
+// 3D MESH — frames along global Y tied by longitudinal edge/eave beams
+// ============================================================================
+// Each frame is the 2D frame placed at y = frameYs[j]. Longitudinal beams (section 3)
+// run along Y over the low roof edge (x = 0), the high roof edge (x = L) and every
+// column line, from the front roof edge (y = 0) to the back edge (y = length3D), and
+// share nodes with the frames where they cross. Elements carry .frame (index, or null
+// for longitudinal members) so a single frame can be viewed like the 2D mesh.
+function buildMesh3D(s){
+  const m=computeModel(s), g=m.geom;
+  const nodes=[]; const nodeKey=new Map();
+  function addNode(x,y,z){
+    const key=x.toFixed(6)+','+y.toFixed(6)+','+z.toFixed(6);
+    if(nodeKey.has(key)) return nodeKey.get(key);
+    const id=nodes.length+1; nodes.push({id,x,y,z}); nodeKey.set(key,id); return id;
+  }
+  // same rules as the 2D mesher: >= mesh_minN elements, none longer than mesh_max,
+  // forced z-stations on vertical members (windscreen band edges) snapped exactly.
+  function subdivide(p0,p1,forcedZ){
+    const Ln=Math.hypot(p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]);
+    const byMax=Math.ceil(Ln/Math.max(0.01,s.mesh_max));
+    const minN=Math.max(1,Math.round(s.mesh_minN||1));
+    const n=Math.max(byMax,minN);
+    const isVertical=Math.abs(p1[0]-p0[0])<1e-9 && Math.abs(p1[1]-p0[1])<1e-9;
+    const pts=[];
+    for(let i=0;i<=n;i++){const t=i/n; pts.push([p0[0]+(p1[0]-p0[0])*t, p0[1]+(p1[1]-p0[1])*t, p0[2]+(p1[2]-p0[2])*t, t]);}
+    if(isVertical && forcedZ && forcedZ.length){
+      const zlo=Math.min(p0[2],p1[2]), zhi=Math.max(p0[2],p1[2]);
+      forcedZ.forEach(zf=>{ if(zf>zlo+1e-6 && zf<zhi-1e-6) pts.push([p0[0],p0[1],zf,(zf-p0[2])/(p1[2]-p0[2])]); });
+    }
+    pts.sort((a,b)=>a[3]-b[3]);
+    const out=[];
+    for(const q of pts){
+      const last=out[out.length-1];
+      if(last && Math.abs((q[3]-last[3])*Ln)<1e-4){
+        if(isVertical && forcedZ && forcedZ.some(zf=>Math.abs(zf-q[2])<1e-9)) out[out.length-1]=q;
+        continue;
+      }
+      out.push(q);
+    }
+    return out;
+  }
+  const elements=[];
+  function meshMember(p0,p1,sec,member,frame,forcedZ){
+    const pts=subdivide(p0,p1,forcedZ);
+    let prev=addNode(pts[0][0],pts[0][1],pts[0][2]);
+    for(let i=1;i<pts.length;i++){
+      const cur=addNode(pts[i][0],pts[i][1],pts[i][2]);
+      const a=nodes[prev-1], b=nodes[cur-1];
+      elements.push({id:elements.length+1,n1:prev,n2:cur,sec,member,frame,
+        xm:(a.x+b.x)/2, ym:(a.y+b.y)/2, zm:(a.z+b.z)/2});
+      prev=cur;
+    }
+  }
+  const colX=g.colX, ys=frameYs(s), L3=length3D(s);
+  let beamStations=[0, g.C1x, g.C3x, g.C2x, g.L, ...colX];
+  beamStations=[...new Set(beamStations.map(x=>+x.toFixed(6)))].filter(x=>x>=-1e-6&&x<=g.L+1e-6).sort((a,b)=>a-b);
+  const _scr=m.loads||{};
+  const screenOn=(s.screen!=='none') && ((_scr.screenH||0)>1e-6);
+  const frames=ys.map((y,j)=>{
+    for(let i=0;i<beamStations.length-1;i++){
+      const x0=beamStations[i], x1=beamStations[i+1];
+      meshMember([x0,y,g.yAt(x0)],[x1,y,g.yAt(x1)],2,'beam',j);
+    }
+    const cols=[];
+    colX.forEach((cx,i)=>{
+      const z0=g.colBase[i], z1=g.yAt(cx);
+      let forcedZ=null;
+      if(screenOn && i===0){
+        forcedZ=[Math.max(z0,Math.min(z1,_scr.scr_bot)), Math.max(z0,Math.min(z1,_scr.scr_top))];
+      }
+      meshMember([cx,y,z0],[cx,y,z1],1,'col'+i,j,forcedZ);
+      cols.push({i,x:cx,y,base:addNode(cx,y,z0),top:addNode(cx,y,z1)});
+    });
+    const keyNodes={cols, Ltip:addNode(0,y,g.yAt(0)), Rtip:addNode(g.L,y,g.yAt(g.L)),
+      Lbase:cols[0].base, Ltop:cols[0].top, Rbase:cols[cols.length-1].base, Rtop:cols[cols.length-1].top};
+    return {j,y,keyNodes};
+  });
+  // longitudinal lines: low edge, every column line, high edge (deduped if a column sits at a tip)
+  const lineXs=[...new Set([0,...colX,g.L].map(x=>+x.toFixed(6)))].sort((a,b)=>a-b);
+  const yStations=[...new Set([0,...ys,L3].map(y=>+y.toFixed(6)))].sort((a,b)=>a-b);
+  const longLines=lineXs.map((x,li)=>{
+    const z=g.yAt(x);
+    for(let k=0;k<yStations.length-1;k++) meshMember([x,yStations[k],z],[x,yStations[k+1],z],3,'long'+li,null);
+    return {li,x,z,
+      kind:(Math.abs(x)<1e-6)?'low edge':(Math.abs(x-g.L)<1e-6)?'high edge':'column line',
+      front:addNode(x,0,z), back:addNode(x,L3,z)};
+  });
+  return {nodes,elements,frames,longLines,geom:g,beamStations,colX,ys,L3,is3D:true};
+}
+// A single frame of the 3D mesh, shaped like the 2D mesh (members 'beam' / 'colN',
+// keyNodes, geom) so the 2D plots, results diagrams and reaction readers work on it.
+function frameView(mesh3,j){
+  const fr=mesh3.frames[Math.max(0,Math.min(mesh3.frames.length-1,j|0))];
+  const elements=mesh3.elements.filter(e=>e.frame===fr.j);
+  const members={};
+  elements.forEach(e=>{ (members[e.member]=members[e.member]||[]).push(e.id); });
+  return {nodes:mesh3.nodes, elements, members, keyNodes:fr.keyNodes, geom:mesh3.geom,
+          beamStations:mesh3.beamStations, colX:mesh3.colX,
+          xL:mesh3.colX[0], xR:mesh3.colX[mesh3.colX.length-1], frame:fr.j, full:mesh3};
+}
+// The mesh the results / diagrams / reactions read: the selected frame in 3D.
+let resFrame=0;
+function resultsMesh(){
+  const r=buildMCT(state);
+  if(!r.mesh.is3D) return r.mesh;
+  return frameView(r.mesh, Math.min(resFrame, r.mesh.frames.length-1));
+}
+
+function buildMCT3D(s){
+  const mesh=buildMesh3D(s), g=mesh.geom, A=computeModel(s);
+  const L=g.L, tribs=frameTribs(s);
+  const lines=[];
+  const date=new Date().toISOString().slice(0,10).replace(/-/g,'/');
+  lines.push(';---------------------------------------------------------------------------');
+  lines.push(';  MIDAS/Civil Text(MCT) File — generated by Canopy MCT Generator (3D structure)');
+  lines.push(';  Date : '+date);
+  lines.push(`;  ${mesh.frames.length} frames at Y = ${mesh.ys.map(y=>num(y,2)).join(', ')} ft; length ${num(mesh.L3,2)} ft`);
+  lines.push(';  Global axes: X across the frame (low edge -> high edge), Y along the length (front -> back), Z up');
+  lines.push(';---------------------------------------------------------------------------');
+  lines.push('');
+  lines.push('*VERSION');
+  lines.push('   9.5.5');
+  lines.push('');
+  lines.push('*UNIT    ; Unit System');
+  lines.push('; FORCE, LENGTH, HEAT, TEMPER');
+  lines.push('   LBF  , FT, BTU, F');
+  lines.push('');
+  lines.push('*STRUCTYPE');
+  lines.push('; iSTYP, iMASS, iSMAS, bMASSOFFSET, bSELFWEIGHT, GRAV, TEMPER, bALIGNBEAM, bALIGNSLAB, bROTRIGID');
+  lines.push('     0, 1, 1, NO, NO, 32.1719, 0, NO, NO, NO');
+  lines.push('');
+
+  lines.push('*NODE    ; Nodes');
+  lines.push('; iNO, X, Y, Z');
+  mesh.nodes.forEach(n=>{ lines.push(`  ${n.id}, ${num(n.x)}, ${num(n.y)}, ${num(n.z)}`); });
+  lines.push('');
+
+  // Beta angle 0 for every member. MIDAS: for a vertical member local z = global X, so the
+  // column strong axis resists frame (X) bending as in the 2D model; for horizontal and
+  // sloped members local z lies in the vertical plane, pointing up.
+  lines.push('*ELEMENT    ; Elements');
+  lines.push('; iEL, TYPE, iMAT, iPRO, iN1, iN2, ANGLE, iSUB');
+  mesh.elements.forEach(e=>{ lines.push(`  ${e.id}, BEAM  , 1, ${e.sec}, ${e.n1}, ${e.n2}, 0, 0`); });
+  lines.push('');
+
+  lines.push('*MATERIAL    ; Material');
+  lines.push('; iMAT, TYPE, MNAME, SPHEAT, HEATCO, PLAST, TUNIT, bMASS, DAMPRATIO, [DATA]');
+  const E_psf = s.E_ksi*1000*144;
+  lines.push(`  1, USER, Steel, 0, 0, , F, NO, 0.02, 2, ${num(E_psf,1)}, ${num(s.poisson,4)}, 6.5e-06, ${num(s.density_pcf,3)}, 0`);
+  lines.push('');
+
+  lines.push('*SECTION    ; Section');
+  lines.push('; iSEC, TYPE, SNAME, [OFFSET], bSD, bWE, SHAPE, [DATA1], [DATA2]');
+  const DB='AISC10(US)';
+  const sectLine=(iSEC,desig)=>{
+    const p=sectProps(desig);
+    if(p.shape==='H') return `  ${iSEC}, DBUSER, ${desig}, CC, 0, 0, 0, 0, 0, 0, YES, NO, H, 1, ${DB}, ${desig}`;
+    return `  ${iSEC}, DBUSER, ${desig}, CC, 0, 0, 0, 0, 0, 0, YES, NO, B, 1, ${DB}, ${desig}, NO, 0, NO, 0, 0`;
+  };
+  lines.push(sectLine(1, s.colSect));    // 1 = columns
+  lines.push(sectLine(2, s.beamSect));   // 2 = frame roof beams
+  lines.push(sectLine(3, s.longSect));   // 3 = longitudinal edge/eave beams
+  lines.push('');
+
+  const wcases=windCases(s), lcases=longWindCases(s), allW=wcases.concat(lcases);
+  lines.push('*STLDCASE    ; Static Load Cases');
+  lines.push('; LCNAME, LCTYPE, DESC');
+  lines.push('   DL, D, ');
+  lines.push('   Snow, S, ');
+  allW.forEach(wc=> lines.push(`   ${wc.name}, W, `));
+  lines.push('');
+
+  // Fixed bases always: the columns are the longitudinal lateral system (cantilevers).
+  lines.push('*CONSTRAINT    ; Supports');
+  lines.push('; NODE_LIST, CONST(Dx,Dy,Dz,Rx,Ry,Rz), GROUP');
+  const baseNodes=[]; mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>baseNodes.push(c.base)));
+  for(let i=0;i<baseNodes.length;i+=12) lines.push(`   ${baseNodes.slice(i,i+12).join(' ')}, 111111, `);
+  lines.push('');
+
+  // A single column line pinned to the beams would let the roof rotate about the line of
+  // column tops (a mechanism), so the release is only written with 2+ columns per frame.
+  if(s.beamConnect==='pinned' && nCols(s)>1){
+    const relRows=[];
+    mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>{
+      const topEl=mesh.elements.find(e=>e.frame===fr.j && /^col\d/.test(e.member) && e.n2===c.top);
+      if(topEl) relRows.push(topEl.id);
+    }));
+    if(relRows.length){
+      lines.push('*FRAME-RLS    ; Beam End Release');
+      lines.push('; ELEM_LIST, bVALUE, FLAG-i, Fxi, Fyi, Fzi, Mxi, Myi, Mzi        ; 1st line');
+      lines.push(';                    FLAG-j, Fxj, Fyj, Fzj, Mxj, Myj, Mzj, GROUP ; 2nd line');
+      relRows.forEach(id=>{
+        lines.push(`    ${id},  NO, 000000, 0, 0, 0, 0, 0, 0`);
+        lines.push(`             000011, 0, 0, 0, 0, 0, 0, `);
+      });
+      lines.push('');
+    }
+  }
+
+  // ---- element sets per frame ----
+  const zOf=nid=>mesh.nodes[nid-1].z;
+  const scrBot=A.loads.scr_bot, scrTop=A.loads.scr_top, scrH=A.loads.screenH;
+  const screenActive=(s.screen!=='none' && scrH>1e-6 && Math.abs(s.p_screen)>0);
+  const F=mesh.frames.map(fr=>{
+    const els=mesh.elements.filter(e=>e.frame===fr.j);
+    const beam=els.filter(e=>e.member==='beam');
+    const cols=els.filter(e=>/^col\d/.test(e.member));
+    const screen=screenActive ? cols.filter(e=>{
+      if(e.member!=='col0') return false;
+      const za=zOf(e.n1), zb=zOf(e.n2);
+      return Math.min(za,zb)>=scrBot-1e-6 && Math.max(za,zb)<=scrTop+1e-6;
+    }) : [];
+    const scrSet=new Set(screen.map(e=>e.id));
+    return {fr, B:tribs[fr.j],
+      lower:beam.filter(e=>e.xm < L/2-1e-6).map(e=>e.id), upper:beam.filter(e=>e.xm >= L/2-1e-6).map(e=>e.id),
+      beam:beam.map(e=>e.id), cols:cols.map(e=>e.id), screen:screen.map(e=>e.id),
+      drag:cols.filter(e=>!scrSet.has(e.id)).map(e=>e.id)};
+  });
+  const wColWind=s.p_col*(sectProps(s.colSect).d/12);       // lbf/ft, same projected width both directions
+  const pEnd=(s.fasciaWindMode==='calc') ? calcFasciaWind(s, L).p : s.p_lat;   // end (front/back) fascia, psf
+  const emit=(name,conRows,beamRows,extra)=>{
+    lines.push(`*USE-STLD, ${name}`);
+    lines.push('');
+    if(extra) extra.forEach(l=>lines.push(l));
+    if(conRows.length){
+      lines.push('*CONLOAD    ; Nodal Loads');
+      lines.push('; NODE_LIST, FX, FY, FZ, MX, MY, MZ, GROUP');
+      conRows.forEach(r=>lines.push(r));
+      lines.push('');
+    }
+    if(beamRows.length){
+      lines.push('*BEAMLOAD    ; Element Beam Loads');
+      lines.push('; ELEM_LIST, CMD, TYPE, DIR, bPROJ, [ECCEN], [VALUE], GROUP');
+      beamRows.forEach(r=>lines.push(r));
+      lines.push('');
+    }
+    lines.push(`; End of data for load case [${name}] -------------------------`);
+    lines.push('');
+  };
+
+  // DL + self weight, Snow: per-frame tributary width, over the horizontal projection
+  { const rows=[]; F.forEach(fe=>beamLoadBlock(rows, fe.beam, 'GZ', -(s.DL*fe.B), true));
+    emit('DL',[],rows,['*SELFWEIGHT    ; Self Weight','; X, Y, Z, GROUP','   0, 0, -1, ','']); }
+  { const rows=[]; F.forEach(fe=>beamLoadBlock(rows, fe.beam, 'GZ', -(s.SL*fe.B), true));
+    emit('Snow',[],rows); }
+
+  // Cross wind (gamma 0/180): the 2D frame loading on every frame, scaled by its tributary
+  wcases.forEach(wc=>{
+    const toHigh=(wc.gamma===180), dragSign=toHigh?1:-1;
+    const con=[], rows=[];
+    F.forEach(fe=>{
+      const fv=dragSign*s.d_roof*s.p_lat*fe.B;
+      if(Math.abs(fv)>=5e-4){
+        const nd=toHigh?fe.fr.keyNodes.Ltip:fe.fr.keyNodes.Rtip;
+        con.push(`   ${nd}, ${num(fv,3)}, 0, 0, 0, 0, 0, ,`);
+      }
+      beamLoadBlock(rows, fe.lower, 'LZ', -wc.pLower*fe.B);
+      beamLoadBlock(rows, fe.upper, 'LZ', -wc.pUpper*fe.B);
+      beamLoadBlock(rows, fe.drag, 'GX', dragSign*wColWind);
+      if(fe.screen.length) beamLoadBlock(rows, fe.screen, 'GX', dragSign*s.p_screen*fe.B);
+    });
+    emit(wc.name,con,rows);
+  });
+
+  // Longitudinal wind (gamma 90/270): Fig. 27.3-7 roof zones per frame strip, column
+  // drag along Y, and the windward end fascia shared among the longitudinal lines by
+  // their tributary width across the frame. The windscreen is edge-on: no load.
+  const lx=mesh.longLines.map(l=>l.x);
+  const lineTrib=lx.map((x,i)=>((i<lx.length-1?lx[i+1]:x)-(i>0?lx[i-1]:x))/2);
+  lcases.forEach(lc=>{
+    const con=[], rows=[];
+    F.forEach(fe=>{
+      beamLoadBlock(rows, fe.beam, 'LZ', -lc.frames[fe.fr.j].p*fe.B);
+      beamLoadBlock(rows, fe.cols, 'GY', lc.ySign*wColWind);
+    });
+    mesh.longLines.forEach((ln,i)=>{
+      const fy=lc.ySign*s.d_roof*pEnd*lineTrib[i];
+      if(Math.abs(fy)>=5e-4) con.push(`   ${lc.gamma===90?ln.front:ln.back}, 0, ${num(fy,3)}, 0, 0, 0, 0, ,`);
+    });
+    emit(lc.name,con,rows);
+  });
+
+  lines.push('*LOADCOMB    ; Combinations');
+  lines.push('; NAME, KIND, ACTIVE, bES, iTYPE, DESC');
+  lines.push('; line 2+: ANAL, LCNAME, FACT, ...');
+  const combos=lrfdCombos(allW);
+  combos.forEach(c=>{
+    lines.push(`   NAME=${c.name}, STEEL, STRENGTH, 0, 0, ${c.desc}, 0, 0, 0, 1`);
+    lines.push('        '+c.terms.map(([lc,fc])=>`ST, ${lc}, ${fc}`).join(', '));
+  });
+  lines.push('   NAME=Envelope, STEEL, STRENGTH, 0, 1, ASCE strength envelope, 0, 0, 0, 1');
+  const cbsTerms=combos.map(c=>`CBS, ${c.name}, 1`);
+  for(let i=0;i<cbsTerms.length;i+=4) lines.push('        '+cbsTerms.slice(i,i+4).join(', '));
+  lines.push('');
+  lines.push('*ENDDATA');
+  return {text:lines.join('\n'), mesh, wcases:allW, pEnd, lineTrib};
+}
+
 // ASCE 7-16 §2.3.1 LRFD strength combinations for this canopy (L, Lr = 0).
 // Returns [{name, desc, terms:[[loadcase,factor],...]}]. Wind combos enumerate all 4 cases.
 function lrfdCombos(wcases){
@@ -1870,8 +2358,15 @@ function parseBeamResults(text){
 //   Shear-z -> horizontal force    (in frame plane)
 //   Moment-y-> base moment         (in frame plane)
 // MIDAS reports MEMBER forces at the base; the REACTION is equal and opposite.
-function midasColumnForces(load){
-  const {mesh}=buildMCT(state);
+// fj: frame index (3D) — omitted in 3D means every frame, flattened, labelled Fj-Ci.
+// In 3D each base element also reports the longitudinal components: Shear-y (VL) and
+// Moment-z (ML), the column's weak-axis shear and moment from wind along the length.
+function midasColumnForces(load, fj){
+  const full=buildMCT(state).mesh;
+  if(full.is3D && fj==null){
+    return full.frames.flatMap(fr=>midasColumnForces(load, fr.j));
+  }
+  const mesh=full.is3D?frameView(full,fj):full;
   const cols=mesh.keyNodes.cols;  // [{i,x,base,top}]
   return cols.map((c,ci)=>{
     const baseEl=mesh.elements.find(e=>e.member==='col'+c.i && (e.n1===c.base||e.n2===c.base));
@@ -1883,10 +2378,12 @@ function midasColumnForces(load){
     const mAxial = row? row.axial : null;
     const mShear = row? row.shearZ : null;
     const mMom   = row? row.momentY : null;
+    const lng = full.is3D && row;
     return {
-      ci, x:c.x, elem:baseEl?baseEl.id:null, found: !!row,
-      member: row? {N:mAxial, V:mShear, M:mMom} : null,        // red (as MIDAS reports)
-      reaction: row? {N:-mAxial, V:-mShear, M:-mMom} : null    // blue (equal & opposite)
+      ci, fj:full.is3D?mesh.frame:null, label:full.is3D?`F${mesh.frame+1}-C${ci+1}`:`Col ${ci+1}`,
+      x:c.x, elem:baseEl?baseEl.id:null, found: !!row,
+      member: row? Object.assign({N:mAxial, V:mShear, M:mMom}, lng?{VL:row.shearY, ML:row.momentZ}:{}) : null,        // red (as MIDAS reports)
+      reaction: row? Object.assign({N:-mAxial, V:-mShear, M:-mMom}, lng?{VL:-row.shearY, ML:-row.momentZ}:{}) : null  // blue (equal & opposite)
     };
   });
 }
@@ -1897,31 +2394,37 @@ function envelopeLoads(){
   const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
   return loads.filter(l=>/envelope/i.test(l));
 }
-function midasGoverning(){
-  const {mesh}=buildMCT(state);
-  const nC=mesh.keyNodes.cols.length;
-  const gov=Array.from({length:nC},()=>({N:{v:0,load:'—'},V:{v:0,load:'—'},M:{v:0,load:'—'}}));
+function midasGoverning(fj){
+  const full=buildMCT(state).mesh;
+  const nC=full.is3D?(fj==null?full.frames.length*nCols(state):nCols(state)):full.keyNodes.cols.length;
+  const gov=Array.from({length:nC},()=>({N:{v:0,load:'—'},V:{v:0,load:'—'},M:{v:0,load:'—'},VL:{v:0,load:'—'},ML:{v:0,load:'—'}}));
   // ONLY the envelope combination(s). If the paste has no envelope row, fall back
   // to all loads so the panel still shows something, but flag it via gov.noEnvelope.
   let loads=envelopeLoads();
   const noEnvelope = loads.length===0;
   if(noEnvelope) loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
   loads.forEach(ld=>{
-    const cf=midasColumnForces(ld);
+    const cf=midasColumnForces(ld, fj);
     cf.forEach((c,ci)=>{
+      gov[ci].label=c.label; gov[ci].ci=c.ci; gov[ci].fj=c.fj;
       if(!c.reaction)return;
       const R=c.reaction;
       if(Math.abs(R.N)>Math.abs(gov[ci].N.v)) gov[ci].N={v:R.N,load:ld};
       if(Math.abs(R.V)>Math.abs(gov[ci].V.v)) gov[ci].V={v:R.V,load:ld};
       if(Math.abs(R.M)>Math.abs(gov[ci].M.v)) gov[ci].M={v:R.M,load:ld};
+      if(R.VL!=null && Math.abs(R.VL)>Math.abs(gov[ci].VL.v)) gov[ci].VL={v:R.VL,load:ld};
+      if(R.ML!=null && Math.abs(R.ML)>Math.abs(gov[ci].ML.v)) gov[ci].ML={v:R.ML,load:ld};
     });
   });
+  gov.forEach((g,i)=>{ if(!g.label) g.label=full.is3D?'':`Col ${i+1}`; });
   gov.noEnvelope=noEnvelope;
   return gov;
 }
+// every frame and column (3D), each tagged with fj / ci / label
+function midasGoverningAll(){ return midasGoverning(); }
 
 function resultPoints(load, field){
-  const {mesh}=buildMCT(state);
+  const mesh=resultsMesh();
   const nodePos={}; mesh.nodes.forEach(n=>nodePos[n.id]={x:n.x,z:n.z});
   // separate beam vs column by node membership
   const beamElIds=new Set(mesh.elements.filter(e=>e.member==='beam').map(e=>e.id));
@@ -2309,7 +2812,7 @@ async function buildCalcWorkbook(s, A, meta, H){
   if(gov&&gov.length){
     sect('Design Summary \u2014 Governing Base Reactions');
     const rows=[['Column','Max |N| (lbf)','Max |V| (lbf)','Max |M| (ft-lbf)','Driving case']];
-    gov.forEach((c,i)=>rows.push(['Col '+(i+1),Math.round(c.N.v),Math.round(c.V.v),Math.round(c.M.v),c.N.load]));
+    gov.forEach((c,i)=>rows.push([c.label||('Col '+(i+1)),Math.round(c.N.v),Math.round(c.V.v),Math.round(c.M.v),c.N.load]));
     tbl(rows,{numFmt:'#,##0',bold:true,leftFirst:true});
     note('Reactions are imported from the MIDAS analysis and are not recomputed by this workbook. '
         +'Maxima are taken independently and need not act concurrently.');
@@ -2322,7 +2825,7 @@ async function buildCalcWorkbook(s, A, meta, H){
   row('Bay spacing, total','L_bays',bayTot,FT,'in',null,{name:'L_bays'});
   row('Roof slope, rise over run','m',s.slope,'0.0000','in',null,{name:'slope'});
   row('Column height, low column','H',s.H_col,FT,'in',null,{name:'H_col'});
-  row('Tributary width','B',s.B_trib,FT,'in',null,{name:'B_trib'});
+  row(is3D(s)?'Tributary width, governing frame':'Tributary width','B',s.B_trib,FT,'in',null,{name:'B_trib'});
   row('Number of columns','n',nC,'0','in',null,{name:'n_col'});
   r++;
 
@@ -2343,6 +2846,18 @@ async function buildCalcWorkbook(s, A, meta, H){
   }
   brk();
 
+  if(is3D(s)){
+    const ys3=frameYs(s), tr3=frameTribs(s), sp3=frameSpans(s);
+    sect('3D Structure \u2014 Frames Along the Length');
+    row('Front overhang','L_OH,F',s.OH_front,FT,'in');
+    sp3.forEach((b,k)=>row(`Frame spacing, bay ${k+1}`,`s_${k+1}`,b,FT,'in'));
+    row('Back overhang','L_OH,B',s.OH_back,FT,'in');
+    row('Canopy length','L_Y',length3D(s),FT,'out');
+    ys3.forEach((y,j)=>row(`Frame ${j+1} tributary width (at y = ${f(y,2)} ft)`,`B_${j+1}`,tr3[j],FT,'out'));
+    row('Edge / eave beam section','\u2014',s.longSect,'@','in');
+    note('Each frame takes half of each adjacent bay, and the end frames also take the front or back overhang. The Tributary width B above is the governing (largest) frame value; the MIDAS model applies each frame\u2019s own width. Column bases are fixed, and the columns resist wind along the length as cantilevers.');
+    r++;
+  }
   sect('Sections and Material');
   row('Beam section','\u2014',s.beamSect,'@','in');
   row('Beam area','A_beam',Ab,IN2,'in',null,{name:'A_beam_in2'});
@@ -2438,29 +2953,55 @@ async function buildCalcWorkbook(s, A, meta, H){
   }
   brk();
 
+  const xl3D=is3D(s), xlNW=xl3D?8:4;
+  const xlWindTags=xl3D?'A/B-0, A/B-180, A/B-90, A/B-270':'A-0 / B-0 / A-180 / B-180';
+  if(xl3D){
+    const lcs=A.loads.lcases||[], fl=(s.flow==='obstr')?'obstr':'clear';
+    sect('Wind \u2014 Along the Length (3D)','ASCE 7-16 Fig. 27.3-7');
+    row('Mean roof height','h',lcs[0].h,FT,'out');
+    refTable('Net pressure coefficient C_N by distance from windward edge',['Distance','','Case A','Case B'],
+      [['\u2264 h','',CN90_ZONES[0][fl].A,CN90_ZONES[0][fl].B],['h to 2h','',CN90_ZONES[1][fl].A,CN90_ZONES[1][fl].B],['> 2h','',CN90_ZONES[2][fl].A,CN90_ZONES[2][fl].B]],'Fig. 27.3-7');
+    lcs.forEach(lc=>{
+      sub(lc.name+(lc.gamma===90?' (enters at front edge)':' (enters at back edge)'));
+      lc.frames.forEach((fr,j)=>row(`Frame ${j+1}: C_N = ${f(fr.cn,3)}, roof pressure`,`p_${j+1}`,fr.p,PSF,'out'));
+    });
+    const pE=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L).p:s.p_lat;
+    row('End fascia pressure','p_lat,end',pE,PSF,'out');
+    row('End fascia force (windward edge)','F_end',s.d_roof*pE*g.L,LBF,'out');
+    brk();
+  }
   sect('Load Combinations','ASCE 7-16 \u00a72.3.1');
   tbl([['Combination','','Dead','Snow','Wind','Wind case'],
     ['STR1  1.4D','',1.4,0,0,'\u2014'],
     ['STR2  1.2D+1.6S','',1.2,1.6,0,'\u2014'],
-    ['STR3  1.2D+1.6S+0.5W','',1.2,1.6,0.5,'A-0 / B-0 / A-180 / B-180'],
-    ['STR4  1.2D+1.0W+0.5S','',1.2,0.5,1.0,'A-0 / B-0 / A-180 / B-180'],
-    ['STR5  0.9D+1.0W','',0.9,0,1.0,'A-0 / B-0 / A-180 / B-180']],{numFmt:'0.0',leftFirst:true});
-  note('Fourteen strength combinations are generated (four wind cases across STR3, STR4, and STR5) '
+    ['STR3  1.2D+1.6S+0.5W','',1.2,1.6,0.5,xlWindTags],
+    ['STR4  1.2D+1.0W+0.5S','',1.2,0.5,1.0,xlWindTags],
+    ['STR5  0.9D+1.0W','',0.9,0,1.0,xlWindTags]],{numFmt:'0.0',leftFirst:true});
+  note(`${2+3*xlNW} strength combinations are generated (${xlNW} wind cases across STR3, STR4, and STR5) `
       +'plus an envelope, and written into the MIDAS model.');
 
   const cr=H.caseReactions();
   if(cr&&cr.have){
     brk();
     sect('Base Reactions by Load Case','from MIDAS');
-    const hdr=['Load case'];
-    cr.colNames.forEach(cn=>hdr.push(cn+' N',cn+' V',cn+' M'));
-    const rows=[hdr];
-    ['DL','Snow','Wind A-0','Wind B-0','Wind A-180','Wind B-180'].forEach(lc=>{
-      if(!cr.byCase[lc]) return;
-      const rw=[lc];
-      cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rw.push(Math.round(v[0]),Math.round(v[1]),Math.round(v[2])); });
-      rows.push(rw);
-    });
+    const caseList=['DL','Snow','Wind A-0','Wind B-0','Wind A-180','Wind B-180','Wind A-90','Wind B-90','Wind A-270','Wind B-270'];
+    let rows;
+    if(cr.colNames.length>3){
+      // many supports (3D): one row per load case and support keeps the table narrow
+      rows=[['Load case','Support','N','V','M']];
+      caseList.forEach(lc=>{ if(!cr.byCase[lc]) return;
+        cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rows.push([lc,cn,Math.round(v[0]),Math.round(v[1]),Math.round(v[2])]); }); });
+    } else {
+      const hdr=['Load case'];
+      cr.colNames.forEach(cn=>hdr.push(cn+' N',cn+' V',cn+' M'));
+      rows=[hdr];
+      caseList.forEach(lc=>{
+        if(!cr.byCase[lc]) return;
+        const rw=[lc];
+        cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rw.push(Math.round(v[0]),Math.round(v[1]),Math.round(v[2])); });
+        rows.push(rw);
+      });
+    }
     tbl(rows,{numFmt:'#,##0',leftFirst:true});
     note('Values come directly from the MIDAS analysis and are not recomputed here.');
   }
@@ -2577,11 +3118,9 @@ function xlCaseReactions(){
   if(typeof RESULT_ROWS==='undefined'||!RESULT_ROWS.length) return out;
   const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
   if(!loads.length) return out;
-  const mesh=buildMCT(state).mesh;
-  const nC=mesh.keyNodes.cols.length;
-  out.colNames=Array.from({length:nC},(_,i)=>'Col '+(i+1));
   loads.forEach(ld=>{
     const cf=midasColumnForces(ld);
+    if(!out.colNames.length) out.colNames=cf.map(c=>c.label);
     const vals=cf.map(c=>c&&c.reaction?[c.reaction.N,c.reaction.V,c.reaction.M]:[0,0,0]);
     if(/^(DL|Snow|Wind )/i.test(ld)) out.byCase[ld]=vals; else out.byCombo[ld]=vals;
   });
@@ -2659,7 +3198,9 @@ async function buildReport(){
   const _host0=document.getElementById('reportInline');
   if(_host0 && !_host0.dataset.built) _host0.innerHTML='<div class="placeholder">Generating report…</div>';
   try{
-  const s=state, A=computeModel(s), g=A.geom, ld=A.loads, {text,mesh,wcases}=buildMCT(s);
+  const s=state, A=computeModel(s), g=A.geom, ld=A.loads, {text,mesh}=buildMCT(s);
+  const wcases=A.loads.wcases, lcases=A.loads.lcases||[], allW=wcases.concat(lcases);
+  const nCombo=lrfdCombos(allW).length, is3d=is3D(s);
   const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const fld=(label,val,unit='')=>`<tr><td>${label}</td><td>${val}${unit?' '+unit:''}</td></tr>`;
   const today=new Date().toISOString().slice(0,10);
@@ -2685,20 +3226,24 @@ async function buildReport(){
   const imgGeom=await snap('plotGeom'), imgMesh=await snap('plotMesh'),
         imgGrav=await snap('plotGravity');
   // snapshot ALL FOUR wind cases by rendering each into the offscreen scratch plot
-  const windImgs=[];
+  const windImgs=[], longImgs=[];
   for(const wc of wcases){
     try{ drawWindInto('plotScratch', wc); }catch(e){}
     windImgs.push({wc, img: await snap('plotScratch')});
+  }
+  for(const lc of lcases){
+    try{ drawWindInto('plotScratch', lc); }catch(e){}
+    longImgs.push({lc, img: await snap('plotScratch')});
   }
   let imgKey=null; const comboImgs=[];
   if(RESULT_ROWS.length){
     try{ drawResultsPlot(); }catch(e){}
     imgKey=await snap('plotKey');
     // render each combo's M+V overlay into the scratch div and snapshot it
-    const {mesh}=buildMCT(state); const gg=mesh.geom;
+    const fmesh=resultsMesh(); const gg=fmesh.geom, fEls=new Set(fmesh.elements.map(e=>e.id));
     const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
     let gMaxM=1e-9,gMaxV=1e-9;
-    loads.forEach(ld=>RESULT_ROWS.filter(r=>r.load===ld).forEach(r=>{gMaxM=Math.max(gMaxM,Math.abs(r.momentY));gMaxV=Math.max(gMaxV,Math.abs(r.shearZ));}));
+    loads.forEach(ld=>RESULT_ROWS.filter(r=>r.load===ld && fEls.has(r.elem)).forEach(r=>{gMaxM=Math.max(gMaxM,Math.abs(r.momentY));gMaxV=Math.max(gMaxV,Math.abs(r.shearZ));}));
     const kM=2.4/gMaxM,kV=2.4/gMaxV;
     for(const ld of loads){
       const base=structureTraces(gg,s).map(t=>{
@@ -2807,6 +3352,36 @@ async function buildReport(){
       <td>${v0[1].toFixed(2)} / ${v1[1].toFixed(2)}</td><td>${w.cnl.toFixed(3)}</td>
       <td>${w.pLower.toFixed(1)}</td><td>${w.pUpper.toFixed(1)}</td></tr>`;
   }).join('');
+  // ---- 3D structure: frame layout and wind along the length ----
+  let frame3DMath='', long3DMath='';
+  if(is3d){
+    const ys=frameYs(s), tribs=frameTribs(s), sp=frameSpans(s), L3=length3D(s);
+    frame3DMath=`
+  <h3>2.1 3D structure — frames along the length</h3>
+  <p>The frame above is repeated at ${ys.length} positions along the canopy length (global Y). The frames are tied together by longitudinal edge and eave beams (${esc(s.longSect)}) along the low roof edge, the high roof edge and over every column line. These beams cantilever past the end frames to the front and back overhangs. Every column base is fixed, and the columns act as cantilevers for wind along the length.</p>
+  \\[ L_Y = L_{OH,F} + \\textstyle\\sum s_k + L_{OH,B} = ${f(s.OH_front,2)} + (${sp.map(b=>f(b,2)).join(' + ')}) + ${f(s.OH_back,2)} = ${f(L3,3)}\\ \\text{ft} \\]
+  <p>Each frame carries roof load from half of each adjacent bay. The end frames also carry the front or back overhang:</p>
+  <table class="rpt"><thead><tr><th>Frame</th><th>y (ft)</th><th>Tributary width B<sub>j</sub> (ft)</th><th>w<sub>D</sub> (lbf/ft)</th><th>w<sub>S</sub> (lbf/ft)</th></tr></thead><tbody>
+  ${ys.map((y,j)=>`<tr><td>F${j+1}</td><td>${f(y,2)}</td><td>${f(tribs[j],2)}</td><td>${f(s.DL*tribs[j],0)}</td><td>${f(s.SL*tribs[j],0)}</td></tr>`).join('')}
+  </tbody></table>
+  <p class="note-sm">\\(\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)}\\) ft \\(= L_Y\\), so the whole roof area is carried. The single-frame derivations in this report use the governing (largest) tributary width B = ${f(s.B_trib,2)} ft. The MCT applies each frame\u2019s own B<sub>j</sub>.</p>`;
+    const lc0=lcases[0], fl=(s.flow==='obstr')?'obstr':'clear';
+    const pEnd=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L).p:s.p_lat;
+    long3DMath=`
+  <h3>4.4 Wind along the length (3D structure, γ = 90° and 270°)</h3>
+  <p>Wind parallel to the frames uses ASCE 7-16 Fig. 27.3-7 (free roofs, θ ≤ 45°, γ = 90°, 270°). C<sub>N</sub> depends on the horizontal distance from the windward edge, measured in multiples of the mean roof height h. Both load cases A and B are applied for wind entering at the front edge (γ = 90°) and at the back edge (γ = 270°), giving four more MIDAS load cases.</p>
+  \\[ h = ${f(lc0.h,2)}\\ \\text{ft},\\qquad p = q_h\\,G\\,C_N = ${f(s.q_h*s.G,2)}\\,C_N \\]
+  <table class="rpt"><thead><tr><th>Distance from windward edge</th><th>C<sub>N</sub> Case A</th><th>C<sub>N</sub> Case B</th></tr></thead><tbody>
+    <tr><td>≤ h (0–${f(lc0.h,1)} ft)</td><td>${f(CN90_ZONES[0][fl].A,2)}</td><td>${f(CN90_ZONES[0][fl].B,2)}</td></tr>
+    <tr><td>h to 2h (${f(lc0.h,1)}–${f(2*lc0.h,1)} ft)</td><td>${f(CN90_ZONES[1][fl].A,2)}</td><td>${f(CN90_ZONES[1][fl].B,2)}</td></tr>
+    <tr><td>&gt; 2h</td><td>${f(CN90_ZONES[2][fl].A,2)}</td><td>${f(CN90_ZONES[2][fl].B,2)}</td></tr></tbody></table>
+  <p>Each frame receives C<sub>N</sub> averaged over the roof strip it carries, weighted by length across the zones. The result is applied as a uniform pressure normal to the roof along that frame\u2019s beam (w = p B<sub>j</sub>):</p>
+  <table class="rpt"><thead><tr><th>Case</th>${frameYs(s).map((y,j)=>`<th>F${j+1} C̄<sub>N</sub> / p (psf)</th>`).join('')}</tr></thead><tbody>
+  ${lcases.map(lc=>`<tr><td>${lc.name}</td>${lc.frames.map(fr=>`<td>${f(fr.cn,3)} / ${f(fr.p,1)}</td>`).join('')}</tr>`).join('')}
+  </tbody></table>
+  <p>Lateral loads along the length: column drag \\(w_{col}=${f(s.p_col*sectProps(s.colSect).d/12,2)}\\) lbf/ft on every column, along Y. The windward end fascia force \\(F = d_f\\,p_{lat,end}\\,L = ${f(s.d_roof,2)}\\cdot${f(pEnd,1)}\\cdot${f(g.L,2)} = ${f(s.d_roof*pEnd*g.L,0)}\\) lbf is shared among the longitudinal beam ends at the windward edge by their tributary width across the frame. The windscreen is edge-on to this wind and carries no load.</p>
+  ${longImgs.map((w,i)=>imgTag(w.img,`Figure 4.${7+i} — ${w.lc.name}: wind along the length, entering at the ${w.lc.gamma===90?'front':'back'} edge. Zone C<sub>N</sub> and each frame\u2019s averaged pressure.`)).join('')}`;
+  }
   const windMath=`
   <p>Roof wind uses the ASCE 7-16 §27.3.2 open-building (monoslope free roof) procedure, Figure 27.3-4. The net pressure on each roof half is</p>
   \\[ p = q_h\\,G\\,C_N \\]
@@ -2892,15 +3467,18 @@ async function buildReport(){
   let midasReactBlock='', imgReactFBD=null;
   if(hasMidas){
     const gov=midasGoverning();
-    const govR=gov.map((gg,ci)=>`<tr><td>Col ${ci+1}</td>
+    const lng3=is3D(s);
+    const govR=gov.map((gg,ci)=>`<tr><td>${gg.label||('Col '+(ci+1))}</td>
       <td>${uForce(gg.N.v)}<br><span class="sm">${esc(gg.N.load)}</span></td>
       <td>${uForce(gg.V.v)}<br><span class="sm">${esc(gg.V.load)}</span></td>
-      <td>${uMom(gg.M.v)}<br><span class="sm">${esc(gg.M.load)}</span></td></tr>`).join('');
+      <td>${uMom(gg.M.v)}<br><span class="sm">${esc(gg.M.load)}</span></td>${lng3?`
+      <td>${uForce(gg.VL.v)}<br><span class="sm">${esc(gg.VL.load)}</span></td>
+      <td>${uMom(gg.ML.v)}<br><span class="sm">${esc(gg.ML.load)}</span></td>`:''}</tr>`).join('');
     // per-case reactions (reaction = equal & opposite of member force)
     const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
     const caseRows=loads.map(ld=>{
       const cf=midasColumnForces(ld);
-      return cf.map(c=>c.reaction?`<tr><td>${esc(ld)}</td><td>Col ${c.ci+1}</td><td>${uForce(c.reaction.N)}</td><td>${uForce(c.reaction.V)}</td><td>${uMom(c.reaction.M)}</td></tr>`:'').join('');
+      return cf.map(c=>c.reaction?`<tr><td>${esc(ld)}</td><td>${c.label}</td><td>${uForce(c.reaction.N)}</td><td>${uForce(c.reaction.V)}</td><td>${uMom(c.reaction.M)}</td>${lng3?`<td>${uForce(c.reaction.VL||0)}</td><td>${uMom(c.reaction.ML||0)}</td>`:''}</tr>`:'').join('');
     }).join('');
     // snapshot the FBD (governing) for the report
     reactShowCase='__gov__';
@@ -2911,10 +3489,11 @@ async function buildReport(){
     <p>Base reactions below are taken directly from the MIDAS analysis (pasted beam-force results), read at each column base element. Axis map: Axial → vertical reaction (N), Shear-z → horizontal (V), Moment-y → base moment (M). MIDAS reports member forces at the base; the reactions shown are equal and opposite (what the foundation resists). These are the design values, shown in ${uForceLbl()} / ${uMomLbl()}.</p>
     ${imgTag(imgReactFBD,'Figure 6.1 — Column base free-body: member forces (red) and equal-and-opposite reactions (blue), governing envelope.')}
     <h3>6.1 Governing base reactions (MIDAS) — all columns</h3>
-    <table class="rpt"><thead><tr><th>Column</th><th>Max |N| reaction (${uForceLbl()})<br>+ = compression</th><th>Max |V| reaction (${uForceLbl()})</th><th>Max |M| base (${uMomLbl()})</th></tr></thead><tbody>${govR}</tbody></table>
+    <table class="rpt"><thead><tr><th>Column</th><th>Max |N| reaction (${uForceLbl()})<br>+ = compression</th><th>Max |V| reaction (${uForceLbl()})</th><th>Max |M| base (${uMomLbl()})</th>${lng3?`<th>Max |V<sub>long</sub>| (${uForceLbl()})<br>Shear-y</th><th>Max |M<sub>long</sub>| (${uMomLbl()})<br>Moment-z</th>`:''}</tr></thead><tbody>${govR}</tbody></table>
+    ${lng3?`<p class="note-sm">3D model: supports are labelled F<i>j</i>-C<i>i</i> (frame <i>j</i>, column <i>i</i>). V and M act in the frame plane; V<sub>long</sub> and M<sub>long</sub> act along the canopy length (column weak axis), from the longitudinal wind cases. The free-body figure shows frame ${Math.min(resFrame,frameYs(s).length-1)+1}.</p>`:''}
     <p class="note-sm">Governing = independent maximum of |N|, |V|, |M| ${gov.noEnvelope?`across all pasted load cases (no Envelope combination was found, so individual unfactored cases are included — paste the Envelope results for correct design reactions)`:`taken from the pasted <b>Envelope</b> strength combination, which already brackets the 14 ASCE 7-16 strength combinations`}; the driving ${gov.noEnvelope?'case':'envelope'} is noted beneath each value. Because the maxima are taken independently, the three values for a column may come from different points in the envelope and need not act concurrently.</p>
     <h3>6.2 Reactions by load case &amp; column (MIDAS)</h3>
-    <table class="rpt"><thead><tr><th>Load / combo</th><th>Column</th><th>N (${uForceLbl()})</th><th>V (${uForceLbl()})</th><th>M (${uMomLbl()})</th></tr></thead><tbody>${caseRows}</tbody></table>`;
+    <table class="rpt"><thead><tr><th>Load / combo</th><th>Column</th><th>N (${uForceLbl()})</th><th>V (${uForceLbl()})</th><th>M (${uMomLbl()})</th>${lng3?`<th>V<sub>long</sub> (${uForceLbl()})</th><th>M<sub>long</sub> (${uMomLbl()})</th>`:''}</tr></thead><tbody>${caseRows}</tbody></table>`;
   }
 
   // ---- wind cases summary table (pressures) ----
@@ -2984,7 +3563,7 @@ async function buildReport(){
   let summaryReactBlock;
   if(hasMidas){
     const mg=midasGoverning();
-    const sumRows=mg.map((gg,ci)=>`<tr><td>Col ${ci+1}</td>
+    const sumRows=mg.map((gg,ci)=>`<tr><td>${gg.label||('Col '+(ci+1))}</td>
       <td>${uForce(gg.N.v)}</td><td>${uForce(gg.V.v)}</td><td>${uMom(gg.M.v)}</td></tr>`).join('');
     summaryReactBlock=`
   ${staleNote}
@@ -2998,7 +3577,7 @@ async function buildReport(){
   const cfgWord=nCols(s)===1?'single-column (cantilever)':(nCols(s)===2?'two-column':`${nCols(s)}-column multi-bay`);
   const summarySection=`
   <h2 id="s0">Executive Summary</h2>
-  <p>This report documents the structural model and loading for a mono-slope ${cfgWord} canopy with ${nCols(s)===1?'cantilever support':s.baseFixity+' column bases'}, generated as a MIDAS Civil MCT import file. The roof spans ${f(g.L,1)} ft in plan at a ${f(thetaDeg,1)}° pitch. Loads follow ASCE 7-16: dead and snow as gravity surface loads, and wind by the open-building monoslope free-roof method (four directional/flow cases) plus fascia, column, and windscreen lateral loads. Fourteen strength load combinations and an envelope are generated.</p>
+  <p>This report documents the structural model and loading for a mono-slope ${cfgWord} canopy with ${nCols(s)===1?'cantilever support':s.baseFixity+' column bases'}, generated as a MIDAS Civil MCT import file. The roof spans ${f(g.L,1)} ft in plan at a ${f(thetaDeg,1)}° pitch. Loads follow ASCE 7-16: dead and snow as gravity surface loads, and wind by the open-building monoslope free-roof method (four directional/flow cases) plus fascia, column, and windscreen lateral loads${is3d?', with four more wind cases for wind along the length':''}. ${nCombo} strength load combinations and an envelope are generated.${is3d?` The model is a 3D structure of ${frameYs(s).length} frames over a ${f(length3D(s),1)} ft length, tied by longitudinal edge and eave beams, with fixed column bases.`:''}</p>
   ${summaryReactBlock}
   `;
 
@@ -3020,6 +3599,7 @@ async function buildReport(){
   <h2 id="s2">2 · Geometry &amp; Derivation</h2>
   <p>This section derives the complete frame geometry from the overhang lengths, roof slope, and column height. The canopy is idealized as a 2D frame in the vertical plane: a sloped roof beam supported on ${nCols(s)===1?'a single column (cantilever action)':nCols(s)+' columns'}. The roof angle controls both the wind pressure coefficients and the true (sloped) member length used for surface loads and meshing.</p>
   ${geomMath}
+  ${frame3DMath}
   ${imgTag(imgGeom,'Figure 2.1 — Structure elevation showing the sloped roof beam, columns, and base supports.')}
 
   <h2 id="s3">3 · Gravity Loading (Dead &amp; Snow)</h2>
@@ -3040,17 +3620,20 @@ async function buildReport(){
   <h3>4.3 Wind loading diagrams — all four cases</h3>
   <p>Each diagram shows the roof net-pressure zones (with the step at mid-span between the windward and leeward halves), the column drag, the fascia point load, and any windscreen load, for that case. Arrows point in the true force direction: into the roof for downward pressure, away from the roof for suction.</p>
   ${windImgs.map((w,i)=>imgTag(w.img,`Figure 4.${3+i} — ${w.wc.name}: ${w.wc.gamma===180?'wind up-slope toward the high side (downward pressure)':'wind toward the low side (suction)'}. C_NW=${w.wc.cnw.toFixed(2)}, C_NL=${w.wc.cnl.toFixed(2)}; p_lower=${w.wc.pLower.toFixed(1)} psf, p_upper=${w.wc.pUpper.toFixed(1)} psf.`)).join('')}
+  ${long3DMath}
 
   <h2 id="s5">5 · MIDAS Model</h2>
   <p>The geometry and loads above are written to a MIDAS Civil text (.mct) file. Each physical member is meshed into multiple beam elements, sections reference the AISC10(US) database (DBUSER database type), and supports are applied at the column bases. The static load cases are combined into ASCE 7-16 strength combinations plus an envelope.</p>
   <table class="kv"><tbody>
     ${fld('Nodes',mesh.nodes.length)}${fld('Elements',mesh.elements.length)}
     ${fld('Beam elements',mesh.elements.filter(e=>e.member==='beam').length)}
-    ${fld('Column elements',mesh.elements.filter(e=>e.member!=='beam').length)}
+    ${fld('Column elements',mesh.elements.filter(e=>/^col\d/.test(e.member)).length)}
+    ${is3d?fld('Edge / eave beam elements',mesh.elements.filter(e=>/^long/.test(e.member)).length+` (${esc(s.longSect)}, section 3)`):''}
+    ${is3d?fld('Frames',`${mesh.frames.length} at y = ${mesh.ys.map(y=>f(y,2)).join(', ')} ft`):''}
     ${fld('Material','A36 / USER steel')}
-    ${fld('Base support',s.baseFixity==='fixed'?'Fixed (111111)':'Pinned (111000)')}
-    ${fld('Static load cases','DL (+ self wt), Snow, Wind A-0/B-0/A-180/B-180')}
-    ${fld('Load combinations','14 strength (ASCE 7-16 §2.3.1) + envelope')}
+    ${fld('Base support',(is3d||s.baseFixity==='fixed')?'Fixed (111111)':'Pinned (111000)')}
+    ${fld('Static load cases','DL (+ self wt), Snow, Wind A-0/B-0/A-180/B-180'+(is3d?', Wind A-90/B-90/A-270/B-270':''))}
+    ${fld('Load combinations',`${nCombo} strength (ASCE 7-16 §2.3.1) + envelope`)}
   </tbody></table>
   ${imgTag(imgMesh,'Figure 5.1 — Meshed model: nodes and elements.')}
   <h3>5.1 Wind case pressures</h3>
@@ -3075,7 +3658,10 @@ async function buildReport(){
     <li>Dead and snow as surface pressures over the tributary width, applied over the horizontal projection (bPROJ=YES); member self-weight added automatically.</li>
     <li>${s.snowMode==='calc'?'Snow per ASCE 7-16 Ch. 7 (balanced), including the §7.3.4 minimum check.':'Snow entered manually as a uniform surface load.'}</li>
     <li>Wind by the ASCE 7-16 §27.3 open-building monoslope free-roof method (Fig. 27.3-4): four net-pressure cases (A/B × γ=0°/180°), ${s.flow==='clear'?'clear':'obstructed'} wind flow, plus fascia, column, and ${s.screen!=='none'?'windscreen':'(no windscreen)'} lateral loads.</li>
-    <li>Fourteen LRFD strength load combinations (ASCE 7-16 §2.3.1) plus an envelope, generated as MIDAS load cases/combinations.</li>
+    <li>${nCombo} LRFD strength load combinations (ASCE 7-16 §2.3.1) plus an envelope, generated as MIDAS load cases/combinations.</li>
+    ${is3d?`<li>3D structure: ${frameYs(s).length} identical frames tied by longitudinal edge and eave beams (${esc(s.longSect)}). Roof gravity and wind loads go to the frame beams by tributary width, and the end frames include the front and back overhangs. The edge and eave beams carry their own self weight and the end fascia force, and they provide continuity between frames. They are not separately loaded by the overhang roof area.</li>
+    <li>Longitudinal stability comes from the columns acting as fixed-base cantilevers (weak-axis bending for W-shapes). No bracing is modeled.</li>
+    <li>Wind along the length per ASCE 7-16 Fig. 27.3-7 (C<sub>N</sub> by distance from the windward edge, cases A/B, γ = 90°/270°), averaged over each frame\u2019s roof strip.</li>`:''}
   </ul>
   <h3>9.2 NOT included — verify separately if applicable</h3>
   <ul class="rpt-list">
@@ -3191,13 +3777,13 @@ function renderMCTPreview(text){
 function renderCombos(){
   const host=document.getElementById('comboView'); if(!host)return;
   const A=computeModel(state);
-  const combos=lrfdCombos(A.loads.wcases);
+  const combos=lrfdCombos(A.loads.wcases.concat(A.loads.lcases||[]));
   // governing combo per reaction component, if results exist
   let govByCol=null;
   if(RESULT_ROWS.length>0){
     try{ govByCol=midasGoverning(); }catch(e){ govByCol=null; }
   }
-  let h=`<p class="hint" style="padding-top:8px">Fourteen LRFD strength combinations are written to the MCT, plus an <b>Envelope</b> that brackets them. Live and roof-live loads are taken as zero for this canopy; S = snow, W = the indicated wind case. Governing design reactions are taken from the Envelope (Section 6 / Results).</p>`;
+  let h=`<p class="hint" style="padding-top:8px">${combos.length} LRFD strength combinations are written to the MCT, plus an <b>Envelope</b> that brackets them. Live and roof-live loads are taken as zero for this canopy; S = snow, W = the indicated wind case. Governing design reactions are taken from the Envelope (Section 6 / Results).</p>`;
   h+=`<table style="width:100%;border-collapse:collapse;font-size:11.5px">
     <thead><tr style="border-bottom:1px solid var(--line);text-align:left">
       <th style="padding:4px 6px">#</th><th style="padding:4px 6px">Combination</th><th style="padding:4px 6px">Factored terms</th></tr></thead><tbody>`;
@@ -3216,7 +3802,7 @@ function renderCombos(){
     h+=`<table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead><tr style="text-align:left;border-bottom:1px solid var(--line)">
       <th style="padding:4px 6px">Column</th><th style="padding:4px 6px">N gov.</th><th style="padding:4px 6px">V gov.</th><th style="padding:4px 6px">M gov.</th></tr></thead><tbody>`;
     govByCol.forEach((gg,ci)=>{
-      h+=`<tr style="border-bottom:1px solid #f0ece2"><td style="padding:4px 6px">${ci+1}</td>
+      h+=`<tr style="border-bottom:1px solid #f0ece2"><td style="padding:4px 6px">${gg.label||(ci+1)}</td>
         <td style="padding:4px 6px">${gg.N.load}</td><td style="padding:4px 6px">${gg.V.load}</td><td style="padding:4px 6px">${gg.M.load}</td></tr>`;
     });
     h+='</tbody></table>';
@@ -3315,6 +3901,7 @@ function dimLine3D(p0,p1, tick, label, color){
 }
 function draw3D(){
   if(typeof Plotly==='undefined')return;
+  if(is3D(state)) return draw3DFull();
   const A=computeModel(state), g=A.geom, s=state;
   const B=s.B_trib, hy=B/2;                       // bay half-depth along y (envelope only)
   const bp=sectProps(s.beamSect), cp=sectProps(s.colSect);
@@ -3612,6 +4199,140 @@ function draw3D(){
   if(animOn && wcSel){ startWindAnim(g, s, wcSel); }
 }
 
+// ---- 3D structure view (modelDim '3d'): every frame, the longitudinal beams, loads ----
+function draw3DFull(){
+  const A=computeModel(state), g=A.geom, s=state;
+  const ys=frameYs(s), L3=length3D(s), tribs=frameTribs(s), strips=frameStrips(s);
+  const bp=sectProps(s.beamSect), cp=sectProps(s.colSect), lp=sectProps(s.longSect);
+  const bd=bp.d/12, bb=bp.b/12, cd=cp.d/12, cb=cp.b/12, ld_=lp.d/12, lb=lp.b/12;
+  const traces=[];
+  const tog=(id,dft)=>{const c=document.getElementById(id);return c?c.checked:dft;};
+  const showLabels=tog('threedLabels',true), showTrib=tog('threedTrib',true),
+        showSect=tog('threedSect',false), showGrade=tog('threedGrade',true), showDims=tog('threedDims',true);
+  const label3D=(x,y,z,text,color,size)=>traces.push({type:'scatter3d',mode:'text',x:[x],y:[y],z:[z],
+      text:[text],textfont:{size:size||11,color:color||COL.ink},hoverinfo:'skip',name:''});
+  const ax=Math.cos(g.theta), az=Math.sin(g.theta), Lb=g.L/g.cos, mx=g.L/2, mz=(g.yStart+g.yEnd)/2;
+  // frames
+  ys.forEach((y,j)=>{
+    traces.push(box3D(mx,y,mz, ax*Lb/2,0,az*Lb/2, 0,bb/2,0, -az*bd/2,0,ax*bd/2, COL.steel, `frame ${j+1} beam ${bp.desig}`));
+    g.colX.forEach((cx,i)=>{
+      const zTop=g.yAt(cx)-bd/2, zBot=g.colBase[i], hz=(zTop-zBot)/2;
+      traces.push(box3D(cx,y,(zTop+zBot)/2, cd/2,0,0, 0,cb/2,0, 0,0,hz, COL.moss, `frame ${j+1} column ${i+1} ${cp.desig}`));
+      const sw=Math.max(cd,cb)*1.3;
+      traces.push(box3D(cx,y,zBot-0.06, sw/2,0,0, 0,sw/2,0, 0,0,0.06, COL.ink, `fixed base F${j+1}-C${i+1}`));
+    });
+    if(showLabels) label3D(-1.2, y, g.yStart+0.8, `F${j+1}`, COL.ink, 11);
+  });
+  // longitudinal edge / eave beams (top of section flush with the frame beam top)
+  const lineXs=[...new Set([0,...g.colX,g.L].map(x=>+x.toFixed(6)))];
+  lineXs.forEach(x=>{
+    const z=g.yAt(x)+bd/2-ld_/2;
+    traces.push(box3D(x,L3/2,z, lb/2,0,0, 0,L3/2,0, 0,0,ld_/2, COL.amber, `edge/eave beam ${lp.desig}`));
+  });
+  if(showSect){ label3D(mx,ys[0],mz+bd+0.6,bp.desig,COL.steel,10); label3D(g.colX[0]+cd,ys[0],g.colBase[0]+2,cp.desig,COL.moss,10); label3D(0,L3/2,g.yStart+0.9,lp.desig,'#8a5e10',10); }
+  // roof surface + windscreen (translucent)
+  if(showTrib){
+    const zt=x=>g.yAt(x)+bd/2+0.05;
+    traces.push({type:'mesh3d',x:[0,g.L,g.L,0],y:[0,0,L3,L3],z:[zt(0),zt(g.L),zt(g.L),zt(0)],i:[0,0],j:[1,2],k:[2,3],
+      color:COL.steel,opacity:0.12,hoverinfo:'name',name:'roof'});
+    if(A.loads.screenH>0){
+      const cx=g.colX[0], zb=A.loads.scr_bot, zt2=A.loads.scr_top;
+      traces.push({type:'mesh3d',x:[cx,cx,cx,cx],y:[0,L3,L3,0],z:[zb,zb,zt2,zt2],i:[0,0],j:[1,2],k:[2,3],
+        color:COL.colwind,opacity:0.15,hoverinfo:'name',name:'windscreen'});
+    }
+  }
+  if(showGrade){
+    const zg=s.El_base;
+    traces.push({type:'mesh3d',x:[-3,g.L+3,g.L+3,-3],y:[-3,-3,L3+3,L3+3],z:[zg,zg,zg,zg],i:[0,0],j:[1,2],k:[2,3],
+      color:COL.grade,opacity:0.18,hoverinfo:'skip',name:'grade'});
+  }
+  if(showDims){
+    const dc='#6a665d', zD=Math.min(s.El_base,...g.colBase)-0.4, xD=-2.2, tickY={x:0,y:0,z:0.5};
+    const yStations=[0,...ys,L3];
+    for(let k=0;k<yStations.length-1;k++){
+      const a=yStations[k], b=yStations[k+1]; if(b-a<1e-6) continue;
+      const lbl=(k===0)?`front OH ${f(b-a,1)}'`:(k===yStations.length-2)?`back OH ${f(b-a,1)}'`:`bay ${f(b-a,1)}'`;
+      dimLine3D({x:xD,y:a,z:zD},{x:xD,y:b,z:zD},tickY,lbl,dc).forEach(t=>traces.push(t));
+    }
+    dimLine3D({x:xD-1.4,y:0,z:zD},{x:xD-1.4,y:L3,z:zD},tickY,`length ${f(L3,1)}'`,dc).forEach(t=>traces.push(t));
+    dimLine3D({x:0,y:-2.2,z:zD},{x:g.L,y:-2.2,z:zD},tickY,`L = ${f(g.L,1)}'`,dc).forEach(t=>traces.push(t));
+  }
+  // ---- loads ----
+  let loadNote='';
+  const modelScale=Math.min(Math.max(g.L,L3),24);
+  const drawDistributed=(pts, dir, mag, ref, color)=>{
+    if(Math.abs(mag)<1e-9) return;
+    const maxLen=modelScale*0.16, minLen=modelScale*0.03;
+    const len=Math.max(minLen, Math.min(maxLen, maxLen*Math.abs(mag)/ref));
+    pts.forEach(p=>arrow3D(p.x-dir.x*len,p.y-dir.y*len,p.z-dir.z*len, dir.x,dir.y,dir.z, len, color).forEach(t=>traces.push(t)));
+  };
+  const nrmX=-az, nrmZ=ax;
+  const roofPts=(x0,x1,y0,y1,nx,ny)=>{const pts=[]; for(let i=1;i<=nx;i++) for(let k=1;k<=ny;k++){const x=x0+(x1-x0)*i/(nx+1), y=y0+(y1-y0)*k/(ny+1); pts.push({x:x+nrmX*bd/2,y,z:g.yAt(x)+nrmZ*bd/2});} return pts;};
+  const wColLine=Math.abs(s.p_col*cd);
+  const colDrag=(dir)=>ys.forEach(y=>g.colX.forEach((cx,i)=>{const zb=g.colBase[i], zt=g.yAt(cx)-bd/2;
+    const pts=[0.2,0.5,0.8].map(t=>({x:cx,y,z:zb+(zt-zb)*t})); drawDistributed(pts,dir,wColLine,Math.max(wColLine,1),COL.colwind);}));
+  if(threedCase==='DL'||threedCase==='Snow'){
+    const press=threedCase==='DL'?s.DL:s.SL, col=threedCase==='DL'?COL.ink:COL.steel;
+    drawDistributed(roofPts(0,g.L,0,L3,4,Math.max(3,ys.length*2)),{x:0,y:0,z:-1},press,Math.max(press,1),col);
+    if(showLabels) label3D(g.L/2,L3/2,Math.max(g.yStart,g.yEnd)+modelScale*0.2,`${threedCase==='DL'?'D':'S'} = ${f(press,1)} psf`,col,12);
+    loadNote=`${threedCase==='DL'?'Dead':'Snow'} = ${f(press,1)} psf over the whole roof; each frame takes its own tributary width (${tribs.map(b=>f(b,1)).join(', ')} ft).`;
+  } else {
+    const wc=A.loads.wcases.find(w=>w.name===threedCase), lc=(A.loads.lcases||[]).find(w=>w.name===threedCase);
+    if(wc){
+      const toHigh=(wc.gamma===180), sg=toHigh?1:-1, ref=Math.max(Math.abs(wc.pLower),Math.abs(wc.pUpper),1);
+      [[0,g.L/2,wc.pLower],[g.L/2,g.L,wc.pUpper]].forEach(([x0,x1,p])=>{
+        const up=p<0; drawDistributed(roofPts(x0,x1,0,L3,2,Math.max(3,ys.length*2)),{x:up?nrmX:-nrmX,y:0,z:up?nrmZ:-nrmZ},p,ref,COL.amber);
+        if(showLabels) label3D((x0+x1)/2,L3/2,g.yAt((x0+x1)/2)+modelScale*0.22,`${f(Math.abs(p),1)} psf ${up?'↑suction':'↓press'}`,'#8a5e10',11);
+      });
+      colDrag({x:sg,y:0,z:0});
+      const fx=toHigh?0:g.L, fz=toHigh?g.yStart:g.yEnd, fl=modelScale*0.14;
+      ys.forEach((y,j)=>arrow3D(fx-sg*fl,y,fz,sg,0,0,fl,COL.rust,`fascia F${j+1} ${f(s.d_roof*s.p_lat*tribs[j]/1000,2)} k`).forEach(t=>traces.push(t)));
+      loadNote=`${wc.name}: roof p_lower=${f(wc.pLower,1)} / p_upper=${f(wc.pUpper,1)} psf on every frame (× its tributary width); column drag ${f(wColLine,1)} lbf/ft on all columns; fascia point load at each frame's windward tip.`;
+    } else if(lc){
+      const ref=Math.max(...lc.frames.map(fr=>Math.abs(fr.p)),1);
+      lc.frames.forEach((fr,j)=>{
+        const up=fr.p<0; drawDistributed(roofPts(0,g.L,fr.y0,fr.y1,4,1),{x:up?nrmX:-nrmX,y:0,z:up?nrmZ:-nrmZ},fr.p,ref,COL.amber);
+        if(showLabels) label3D(g.L/2,ys[j],g.yAt(g.L/2)+modelScale*0.2,`F${j+1} ${f(Math.abs(fr.p),1)} psf`,'#8a5e10',10);
+      });
+      colDrag({x:0,y:lc.ySign,z:0});
+      const yw=(lc.gamma===90)?0:L3, fl=modelScale*0.14;
+      lineXs.forEach(x=>arrow3D(x,yw-lc.ySign*fl,g.yAt(x),0,lc.ySign,0,fl,COL.rust,'end fascia').forEach(t=>traces.push(t)));
+      loadNote=`${lc.name}: wind along the length, entering at the ${lc.gamma===90?'front':'back'} edge. Each frame gets the Fig. 27.3-7 C_N averaged over its roof strip; column drag along Y; end fascia at the windward edge.`;
+    }
+  }
+  // ---- reactions (governing envelope, every frame) ----
+  let reactNote='';
+  if(tog('threedReact',false) && RESULT_ROWS.length>0 && typeof midasGoverningAll==='function'){
+    const rLen=modelScale*0.14;
+    midasGoverningAll().forEach(r=>{
+      const cx=g.colX[r.ci], y=ys[r.fj], zb=g.colBase[r.ci];
+      if(Math.abs(r.N.v)>1){ const up=r.N.v>0?1:-1; arrow3D(cx,y,zb-up*rLen,0,0,up,rLen,COL.steel,`F${r.fj+1}-C${r.ci+1} N ${uForce(r.N.v)} ${uForceLbl()}`).forEach(t=>traces.push(t)); }
+      if(showLabels) label3D(cx+0.8,y,zb-rLen*0.6,`N ${uForce(r.N.v)}`,COL.steel,9);
+    });
+    reactNote=' Governing MIDAS axial base reactions shown for every frame (hover for values).';
+  }
+  const xMin=-5, xMax=g.L+4, yMin=-4, yMax=L3+4;
+  const zMin=Math.min(s.El_base,...g.colBase)-2.0, zMax=Math.max(g.yStart,g.yEnd)+bd/2+5.5;
+  const xR=xMax-xMin, yR=yMax-yMin, zR=zMax-zMin, maxR=Math.max(xR,yR,zR);
+  const cams={iso:{eye:{x:0.95,y:-1.05,z:0.55}}, front:{eye:{x:0,y:-1.6,z:0.2}}, top:{eye:{x:0,y:0,z:1.6}}, end:{eye:{x:1.6,y:0,z:0.2}}};
+  const sceneObj={aspectmode:'manual',aspectratio:{x:xR/maxR,y:yR/maxR,z:zR/maxR},
+    xaxis:{title:'X across frame (ft)',range:[xMin,xMax],autorange:false,backgroundcolor:'#fcfbf8',gridcolor:'#e2ddd0',showspikes:false},
+    yaxis:{title:'Y along length (ft)',range:[yMin,yMax],autorange:false,backgroundcolor:'#fcfbf8',gridcolor:'#e2ddd0',showspikes:false},
+    zaxis:{title:'elev Z (ft)',range:[zMin,zMax],autorange:false,backgroundcolor:'#fcfbf8',gridcolor:'#e2ddd0',showspikes:false},
+    uirevision:_view3dRev};
+  const gdNow=document.getElementById('plot3d');
+  if(_apply3dCam){ sceneObj.camera=cams[threedView]||cams.iso; _apply3dCam=false; }
+  else if(gdNow && gdNow._fullLayout && gdNow._fullLayout.scene && gdNow._fullLayout.scene.camera){ sceneObj.camera=gdNow._fullLayout.scene.camera; }
+  else sceneObj.camera=cams[threedView]||cams.iso;
+  Plotly.react('plot3d',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,scene:sceneObj},{responsive:true,displaylogo:false});
+  const note=document.getElementById('threedNote');
+  if(note) note.innerHTML=`<b>3D structure · ${ys.length} frames × ${nCols(s)} column${nCols(s)>1?'s':''}.</b> Length ${f(L3,1)} ft. Frame beams ${bp.desig}, columns ${cp.desig}, edge/eave beams ${lp.desig}; fixed bases.`+(loadNote?` <span style="color:var(--steel)">${loadNote}</span>`:' Drag to orbit.')+(reactNote?`<span style="color:var(--moss)">${reactNote}</span>`:'');
+  stopWindAnim();
+  const animOn=tog('threedWindAnim',true);
+  const wcSel=A.loads.wcases.concat(A.loads.lcases||[]).find(w=>w.name===threedCase);
+  if(animOn && wcSel) startWindAnim(g, s, wcSel);
+}
+
 // ============ WIND FLOW PARTICLE ANIMATION ============
 // A single scatter3d trace of points drifting in the wind direction. On a gl3d plot,
 // Plotly.restyle re-inits the scene and resets the camera; Plotly.animate(...,{redraw:false})
@@ -3637,17 +4358,20 @@ function startWindAnim(g, s, wc){
   const gd=document.getElementById('plot3d'); if(!gd||!gd.data) return;
   const B=s.B_trib, hy=B/2;
   const bd=sectProps(s.beamSect).d/12;
-  const toHigh=(wc.gamma===180), vx=toHigh?1:-1;
-  const N=70;
-  const xLo=-4, xHi=g.L+4, xSpan=xHi-xLo;
+  // 3D structure: particles span the full length; longitudinal cases blow along Y
+  const full=is3D(s), L3=full?length3D(s):0, isLong=!!wc.long;
+  const toHigh=(wc.gamma===180), vx=isLong?0:(toHigh?1:-1), vy=isLong?wc.ySign:0;
+  const N=full?140:70;
+  const xLo=isLong?0:-4, xHi=isLong?g.L:g.L+4, xSpan=xHi-xLo;
+  const yLo=full?(isLong?-4:0):-hy, yHi=full?(isLong?L3+4:L3):hy, ySpan=yHi-yLo;
   const px=[],py=[],pz=[];
   for(let i=0;i<N;i++){
     const x=xLo+Math.random()*xSpan;
-    const y=-hy + Math.random()*B;
+    const y=yLo + Math.random()*ySpan;
     const zr=g.yAt(Math.max(0,Math.min(g.L,x)))+bd/2;
     px.push(x); py.push(y); pz.push(zr + 1.2 + Math.random()*3.2);
   }
-  const speed=Math.max(0.18, xSpan*0.012);
+  const speed=Math.max(0.18, (isLong?ySpan:xSpan)*0.012);
   const pTrace={type:'scatter3d',mode:'markers',x:px.slice(),y:py.slice(),z:pz.slice(),
     marker:{size:3,color:'#3a7ca5',opacity:0.75,symbol:'circle'},hoverinfo:'skip',name:'wind'};
   // pause while actively dragging (belt-and-suspenders; animate(redraw:false) already
@@ -3677,9 +4401,11 @@ function startWindAnim(g, s, wc){
       if(ts-last < 60) return; last=ts;             // throttle to ~16 fps
       if(_windAnim.paused){ grabCam(); return; }     // keep camera fresh while paused/dragging
       for(let i=0;i<N;i++){
-        px[i]+=vx*speed;
-        if(vx>0 && px[i]>xHi){ px[i]=xLo; py[i]=-hy+Math.random()*B; }
-        if(vx<0 && px[i]<xLo){ px[i]=xHi; py[i]=-hy+Math.random()*B; }
+        px[i]+=vx*speed; py[i]+=vy*speed;
+        if(vx>0 && px[i]>xHi){ px[i]=xLo; py[i]=yLo+Math.random()*ySpan; }
+        if(vx<0 && px[i]<xLo){ px[i]=xHi; py[i]=yLo+Math.random()*ySpan; }
+        if(vy>0 && py[i]>yHi){ py[i]=yLo; px[i]=xLo+Math.random()*xSpan; }
+        if(vy<0 && py[i]<yLo){ py[i]=yHi; px[i]=xLo+Math.random()*xSpan; }
         const zr=g.yAt(Math.max(0,Math.min(g.L,px[i])))+bd/2;
         if(pz[i] < zr+0.8) pz[i]=zr+1.2+Math.random()*2;
       }
@@ -3711,7 +4437,8 @@ function drawGeom(){
   const note=document.getElementById('geomNote');
   note.innerHTML=`<b>${nCols(s)} column${nCols(s)>1?'s':''} · ${nCols(s)===1?'cantilever':s.baseFixity+' base'}.</b> `+
     `Roof spans ${f(g.L,2)} ft (L OH ${s.L_OH}', R OH ${s.R_OH}'), slope ${s.slope} (θ=${(g.theta*180/Math.PI).toFixed(1)}°). `+
-    `Beam ${s.beamSect}, column ${s.colSect}.`;
+    `Beam ${s.beamSect}, column ${s.colSect}.`+
+    (is3D(s)?` <b>3D:</b> ${frameYs(s).length} frames over ${f(length3D(s),1)} ft, edge/eave beams ${s.longSect}. The elevation shows the typical frame; the meshed model below is the full structure.`:'');
   // ---- derived geometry readout (LaTeX) ----
   const bays=baySpans(s), baySum=bays.reduce((a,b)=>a+b,0);
   const thetaDeg=g.theta*180/Math.PI;
@@ -3755,11 +4482,27 @@ function drawGeom(){
     {label:'Column plan positions (from left tip)',
      tex: colX.map((x,i)=>`x_{${i+1}}=${f(x,2)}`).join(',\\ ') + `\\ \\text{ft}`}
   );
+  if(is3D(s)) items.push(...frameLayoutItems(s));
   renderDerivation('geomDerived', items);
+}
+
+// 3D frame layout derivation (shared by the Geometry tab and the report)
+function frameLayoutItems(s){
+  const sp=frameSpans(s), ys=frameYs(s), tribs=frameTribs(s), L3=length3D(s);
+  return [
+    {h:'3D structure — frames along the length'},
+    {label:'Canopy length, front edge to back edge', note:`front overhang + ${sp.length} bay${sp.length>1?'s':''} + back overhang`,
+     tex:`L_Y = L_{OH,F} + \\textstyle\\sum s_k + L_{OH,B} = ${f(s.OH_front,2)} + (${sp.map(b=>f(b,2)).join('+')}) + ${f(s.OH_back,2)} = ${f(L3,3)}\\ \\text{ft}`},
+    {label:'Frame positions (from the front edge)', tex: ys.map((y,j)=>`y_{${j+1}}=${f(y,2)}`).join(',\\ ')+`\\ \\text{ft}`},
+    {label:'Frame tributary widths', note:'half of each adjacent bay; the end frames also take the front / back overhang',
+     tex: tribs.map((b,j)=>`B_{${j+1}}=${f(b,2)}`).join(',\\ ')+`\\ \\text{ft}\\qquad \\textstyle\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)} = L_Y`},
+    {label:'Governing (typical) frame used in the 2D derivations', tex:`B = \\max B_j = ${f(Math.max(...tribs),2)}\\ \\text{ft}`}
+  ];
 }
 
 // ---- Tab 1: meshed model ----
 function drawMeshPlot(mesh){
+  if(mesh.is3D) return drawMeshPlot3D(mesh);
   const g=mesh.geom,s=state;
   const traces=[];
   // elements colored by section
@@ -3778,6 +4521,29 @@ function drawMeshPlot(mesh){
   traces.push({x:baseIds.map(i=>mesh.nodes[i-1].x),y:baseIds.map(i=>mesh.nodes[i-1].z),
     mode:'markers',marker:{symbol:'triangle-up',size:14,color:COL.ink},hoverinfo:'skip'});
   Plotly.react('plotMesh',traces,BASE_LAYOUT({shapes:[gradeShape(g,s,-3,g.L+3)]}),PLOT_CFG);
+}
+
+// 3D: isometric line drawing of the whole meshed model (nodes hover with id and xyz)
+function drawMeshPlot3D(mesh){
+  const traces=[];
+  const bySec={1:{c:COL.moss,w:4,n:'columns'},2:{c:COL.steel,w:3,n:'frame beams'},3:{c:COL.amber,w:3,n:'edge / eave beams'}};
+  Object.keys(bySec).forEach(k=>{
+    const xs=[],ys=[],zs=[];
+    mesh.elements.filter(e=>e.sec==k).forEach(e=>{const a=mesh.nodes[e.n1-1],b=mesh.nodes[e.n2-1];
+      xs.push(a.x,b.x,null); ys.push(a.y,b.y,null); zs.push(a.z,b.z,null);});
+    traces.push({type:'scatter3d',mode:'lines',x:xs,y:ys,z:zs,line:{color:bySec[k].c,width:bySec[k].w},name:bySec[k].n,hoverinfo:'skip'});
+  });
+  traces.push({type:'scatter3d',mode:'markers',x:mesh.nodes.map(n=>n.x),y:mesh.nodes.map(n=>n.y),z:mesh.nodes.map(n=>n.z),
+    marker:{size:2,color:COL.rust},name:'nodes',hoverinfo:'text',
+    text:mesh.nodes.map(n=>`Node ${n.id}<br>(${n.x.toFixed(2)}, ${n.y.toFixed(2)}, ${n.z.toFixed(2)})`)});
+  const bases=[]; mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
+  traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),
+    marker:{size:5,color:COL.ink,symbol:'square'},name:'fixed supports',hoverinfo:'skip'});
+  const xr=mesh.geom.L+2, yr=mesh.L3+2, zr=Math.max(...mesh.nodes.map(n=>n.z))-Math.min(...mesh.nodes.map(n=>n.z))+2, mr=Math.max(xr,yr,zr);
+  Plotly.react('plotMesh',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:true,
+    legend:{orientation:'h',x:0,y:1,font:{size:10}},
+    scene:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr},camera:{eye:{x:1.5,y:-1.6,z:0.9}},
+      xaxis:{title:'X (ft)'},yaxis:{title:'Y (ft)'},zaxis:{title:'Z (ft)'}}},PLOT_CFG);
 }
 
 // ---- Tab 2: gravity loading ----
@@ -3849,6 +4615,14 @@ function renderGravDerived(s,g,ld){
     tex: stepped
       ? `W_{sw} = \\gamma\\,(A_{beam}L_{beam} + A_{col}\\textstyle\\sum H_i) = ${s.density_pcf}\\,(${f(Abeam,4)}\\cdot${f(Lbeam,2)} + ${f(Acol,4)}\\cdot${f(Lcols,2)}) = ${f(Wsw,2)}\\ \\text{kip}`
       : `W_{sw} = \\gamma\\,(A_{beam}L_{beam} + ${nCols(s)}\\,A_{col}H) = ${s.density_pcf}\\,(${f(Abeam,4)}\\cdot${f(Lbeam,2)} + ${nCols(s)}\\cdot${f(Acol,4)}\\cdot${f(s.H_col,2)}) = ${f(Wsw,2)}\\ \\text{kip}`});
+  if(is3D(s)){
+    const tribs=frameTribs(s);
+    items.push({h:'3D structure — load on each frame'});
+    items.push({label:'Dead and snow line loads by frame', note:'each frame\u2019s own tributary width; this is what the MCT applies',
+      tex: tribs.map((b,j)=>`w_{D,${j+1}}=${f(s.DL*b,0)},\\ w_{S,${j+1}}=${f(s.SL*b,0)}`).join(';\\ ')+`\\ \\text{lbf/ft}`});
+    items.push({label:'Edge / eave beams', note:'carry their own self weight only (roof loads go to the frames by tributary width)',
+      tex:`${sectProps(s.longSect).desig}:\\ ${f(consistentPlf(s.longSect,s.density_pcf),2)}\\ \\text{plf}`});
+  }
   items.push({h:'Shared'});
   items.push({label:'Tributary width and span used above',
     tex:`B = ${f(B,1)}\\ \\text{ft},\\qquad L = ${f(L,2)}\\ \\text{ft},\\qquad L_{beam} = ${f(Lbeam,2)}\\ \\text{ft}`});
@@ -3859,11 +4633,12 @@ function renderGravDerived(s,g,ld){
 // (used by the live tab and by the report to render all 4 cases). ----
 function drawWind(){
   const A=computeModel(state),ld=A.loads;
-  const wc=ld.wcases.find(w=>w.name==='Wind '+windShowCase)||ld.wcases[0];
+  const wc=ld.wcases.concat(ld.lcases||[]).find(w=>w.name==='Wind '+windShowCase)||ld.wcases[0];
   drawWindInto('plotWind', wc);
   renderWindDerived(state, A.geom, ld);
 }
 function drawWindInto(plotId, wc){
+  if(wc && wc.long) return drawLongWindInto(plotId, wc);
   const A=computeModel(state),g=A.geom,s=state,ld=A.loads;
   const traces=structureTraces(g,s);
   const shapes=[gradeShape(g,s,-3,g.L+3)];
@@ -3998,6 +4773,94 @@ function drawWindInto(plotId, wc){
   Plotly.react(plotId,traces,BASE_LAYOUT({shapes,annotations}),PLOT_CFG);
 }
 
+// derivation items for the 3D-only parts of the wind loading
+function longWindItems(s,g,ld){
+  const items=[], tribs=frameTribs(s), L3=length3D(s), qhG=s.q_h*s.G;
+  const wCol=s.p_col*sectProps(s.colSect).d/12;
+  items.push({h:'3D structure — wind across the frames (γ = 0°, 180°)'});
+  items.push({label:'Each frame carries its own tributary width', note:'the derivation above uses the governing (largest) value B; the MCT applies each frame\u2019s own width to its roof pressure, fascia and windscreen loads',
+    tex: tribs.map((b,j)=>`B_{${j+1}}=${f(b,2)}`).join(',\\ ')+`\\ \\text{ft}\\quad(\\textstyle\\sum B_j = ${f(L3,2)}\\ \\text{ft})`});
+  if(!(ld.lcases||[]).length) return items;
+  const lc0=ld.lcases[0], h=lc0.h;
+  items.push({h:'3D structure — wind along the length (γ = 90°, 270°)'});
+  items.push({label:'Mean roof height (zone reference)', note:'average of the low and high roof-tip heights above the datum',
+    tex:`h = ${f(h,2)}\\ \\text{ft}\\quad\\Rightarrow\\quad h=${f(h,1)},\\ 2h=${f(2*h,1)}\\ \\text{ft from the windward edge}`});
+  const fl=(s.flow==='obstr')?'obstr':'clear';
+  items.push({label:`Net pressure coefficients, ASCE 7-16 Fig. 27.3-7 (free roofs, θ ≤ 45°, ${fl==='clear'?'clear':'obstructed'} flow)`,
+    note:'C_N by horizontal distance from the windward edge; Load Cases A and B',
+    tex:`\\begin{array}{lcc} \\text{distance} & A & B\\\\ \\le h & ${f(CN90_ZONES[0][fl].A,1)} & ${f(CN90_ZONES[0][fl].B,1)}\\\\ h\\text{–}2h & ${f(CN90_ZONES[1][fl].A,1)} & ${f(CN90_ZONES[1][fl].B,1)}\\\\ >2h & ${f(CN90_ZONES[2][fl].A,1)} & ${f(CN90_ZONES[2][fl].B,1)} \\end{array}`});
+  items.push({label:'Roof pressure on each frame', note:'C_N averaged over the roof strip the frame carries (length-weighted across the zones), then p = q_h G C_N and w = p B_j along the frame beam, normal to the roof',
+    tex:`p_j = q_h G\\,\\bar C_{N,j} = ${f(qhG,2)}\\,\\bar C_{N,j}`});
+  ld.lcases.forEach(lc=>{
+    items.push({label:lc.name, note:`wind enters at the ${lc.gamma===90?'front (y = 0)':'back (y = '+f(L3,1)+' ft)'} edge`,
+      tex: lc.frames.map((fr,j)=>`\\bar C_{N,${j+1}}=${f(fr.cn,3)}\\,(${f(fr.p,1)})`).join(',\\ ')+`\\ \\text{psf}`});
+  });
+  const pEnd=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L):null;
+  if(pEnd) items.push({label:'End fascia pressure (front/back edge)', note:`fascia length = plan span \\(L=${f(g.L,2)}\\) ft; ${pEnd.method==='sign'?'Fig. 29.3-1 solid sign':'Fig. 29.4-1 flat-sided member'}`,
+    tex:`p_{lat,end} = q_h\\,G\\,C_f = ${f(pEnd.qh,1)}\\cdot${f(s.G,2)}\\cdot${f(pEnd.cf,2)} = ${f(pEnd.p,1)}\\ \\text{psf}`});
+  const pe=pEnd?pEnd.p:s.p_lat;
+  items.push({label:'Windward end fascia', note:'shared among the longitudinal beam ends (low edge, column lines, high edge) by their tributary width across the frame, applied along Y at the windward edge',
+    tex:`F_{fascia,end} = d_f\\,p_{lat,end}\\,L = ${f(s.d_roof,2)}\\cdot${f(pe,1)}\\cdot${f(g.L,2)} = ${f(s.d_roof*pe*g.L,0)}\\ \\text{lbf}`});
+  items.push({label:'Column drag along the length', note:'same line load on every column, along Y; the windscreen is edge-on to this wind and carries no load',
+    tex:`w_{col} = ${f(wCol,2)}\\ \\text{lbf/ft on all } ${frameYs(s).length*nCols(s)}\\ \\text{columns}`});
+  return items;
+}
+
+// Longitudinal wind (3D, gamma 90/270): side elevation along the canopy length (Y).
+// Shows the Fig. 27.3-7 zones measured from the windward edge, the uniform pressure each
+// frame receives (C_N averaged over its strip), column drag and the windward end fascia.
+function drawLongWindInto(plotId, lc){
+  const A=computeModel(state),g=A.geom,s=state;
+  const ys=frameYs(s), L3=length3D(s), tribs=frameTribs(s);
+  const zRoof=s.El_base+roofMeanHeight(s), zBase=Math.min(...g.colBase);
+  const traces=[], shapes=[], annotations=[];
+  // roof (mean height) and frames (columns overlap in this view)
+  traces.push({x:[0,L3],y:[zRoof,zRoof],mode:'lines',line:{color:COL.steel,width:5},hoverinfo:'skip'});
+  ys.forEach((y,j)=>{
+    traces.push({x:[y,y],y:[zBase,zRoof],mode:'lines',line:{color:COL.moss,width:5},hoverinfo:'text',text:[`Frame ${j+1}`,`Frame ${j+1}`]});
+    traces.push({x:[y],y:[zBase],mode:'markers',marker:{symbol:'square',size:9,color:COL.ink},hoverinfo:'skip'});
+    annotations.push({x:y,y:zBase-0.9,text:`F${j+1}`,showarrow:false,font:{size:10,color:COL.ink}});
+  });
+  shapes.push({type:'line',x0:-3,x1:L3+3,y0:s.El_base,y1:s.El_base,line:{color:COL.grade,width:1.5,dash:'dot'}});
+  // zone boundaries along the roof, measured from the windward edge
+  const yAtD=d=>(lc.gamma===90)?d:L3-d;
+  lc.zones.forEach((z,i)=>{
+    if(z.d0>=L3) return;
+    const ya=yAtD(z.d0), yb=yAtD(Math.min(z.d1,L3));
+    shapes.push({type:'rect',x0:Math.min(ya,yb),x1:Math.max(ya,yb),y0:zRoof+0.15,y1:zRoof+0.65,
+      fillcolor:i===0?'rgba(201,138,26,0.30)':(i===1?'rgba(201,138,26,0.18)':'rgba(201,138,26,0.08)'),line:{width:0}});
+    annotations.push({x:(ya+yb)/2,y:zRoof+0.4,text:`${i===0?'0–h':(i===1?'h–2h':'>2h')}: C<sub>N</sub>=${f(z.cn,2)}`,
+      showarrow:false,font:{size:9,color:'#8a5e10'}});
+  });
+  // per-frame uniform pressure (strip-averaged), magnitude-scaled standoff
+  const pMax=Math.max(...lc.frames.map(fr=>Math.abs(fr.p)),1e-6), sc=2.6/pMax;
+  lc.frames.forEach((fr,j)=>{
+    const p=fr.p, up=p<0, st=Math.max(0.4,Math.abs(p)*sc), z0=zRoof+0.8, zt=z0+st;
+    traces.push({x:[fr.y0,fr.y1],y:[zt,zt],mode:'lines',line:{color:COL.amber,width:1.6},hoverinfo:'skip'});
+    const n=Math.max(2,Math.round((fr.y1-fr.y0)/2.5));
+    for(let i=0;i<=n;i++){ const y=fr.y0+(fr.y1-fr.y0)*i/n;
+      annotations.push(up?{x:y,y:zt,ax:y,ay:z0,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:2,arrowwidth:1.1,arrowsize:0.9,arrowcolor:COL.amber,text:''}
+                         :{x:y,y:z0,ax:y,ay:zt,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:2,arrowwidth:1.1,arrowsize:0.9,arrowcolor:COL.amber,text:''}); }
+    annotations.push({x:(fr.y0+fr.y1)/2,y:zt+0.7,text:`F${j+1}: ${f(Math.abs(p),1)} psf ${up?'suction':'press'}<br>w = ${f(Math.abs(p*tribs[j]),0)} lbf/ft`,
+      showarrow:false,font:{size:9,color:'#8a5e10'}});
+  });
+  // column drag along Y and the windward end fascia
+  const sg=lc.ySign, dl=1.6;
+  ys.forEach(y=>{ for(let i=0;i<=5;i++){ const z=zBase+(zRoof-zBase)*i/5;
+    shapes.push({type:'line',x0:y-sg*dl,x1:y,y0:z,y1:z,line:{color:COL.colwind,width:1}}); } });
+  const yWin=(lc.gamma===90)?0:L3;
+  const pEnd=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L).p:s.p_lat;
+  annotations.push({x:yWin,y:zRoof,ax:yWin-sg*3.2,ay:zRoof,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:3,arrowwidth:2.4,arrowcolor:'#3f7d99',
+    text:`end fascia ${f(s.d_roof*pEnd*g.L/1000,2)} k`,font:{size:9,color:'#2c5666'},xanchor:sg>0?'right':'left'});
+  const az=zRoof+4.6, am=L3/2, ah=L3*0.22;
+  annotations.push({x:am+sg*ah,y:az,ax:am-sg*ah,ay:az,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:3,arrowwidth:3.5,arrowsize:1.3,arrowcolor:'#2c5666',text:''});
+  annotations.push({x:am,y:az+0.9,text:`WIND ${lc.gamma}° — along the length, entering at the ${lc.gamma===90?'front':'back'} edge (h = ${f(lc.h,1)} ft)`,
+    showarrow:false,font:{size:10,color:'#2c5666'}});
+  const layout=BASE_LAYOUT({shapes,annotations});
+  layout.xaxis=Object.assign({},layout.xaxis||{},{title:{text:'Y along length (ft)',font:{size:10}},range:[-10,L3+10]});
+  Plotly.react(plotId,traces,layout,PLOT_CFG);
+}
+
 function renderWindDerived(s,g,ld){
   const B=s.B_trib, thetaDeg=g.theta*180/Math.PI, qhG=s.q_h*s.G;
   const colDepthFt=sectProps(s.colSect).d/12;
@@ -4085,13 +4948,14 @@ function renderWindDerived(s,g,ld){
     items.push({h:'Lateral wind — windscreen'});
     items.push({label:'No windscreen', tex:`\\text{none}`});
   }
+  if(is3D(s)) items.push(...longWindItems(s,g,ld));
   renderDerivation('windDerived', items);
 }
 
 // ---- Tab 5: member/node key diagram ----
 function drawKeyDiagram(){
   if(!RESULT_ROWS.length){return;}
-  const {mesh}=buildMCT(state); const g=mesh.geom,s=state;
+  const mesh=resultsMesh(); const g=mesh.geom,s=state;
   const traces=structureTraces(g,s).map(t=>{
     if(!t.line) return Object.assign({},t,{opacity:0.4});
     return Object.assign({},t,{line:Object.assign({},t.line,{width:2,color:'#b9c6cf'}),opacity:0.7});
@@ -4116,7 +4980,7 @@ function drawKeyDiagram(){
 // ---- Tab 5: per-combination moment+shear overlay diagrams (all combos) ----
 // per-member min/max of M, V, N for one load combo. Groups: Beam, Col 1, Col 2, ...
 function memberStats(load){
-  const {mesh}=buildMCT(state);
+  const mesh=resultsMesh();
   const elemMember={}; mesh.elements.forEach(e=>{ elemMember[e.id]=e.member; });
   // group key -> {M:{min,max}, V:{min,max}, N:{min,max}}
   const groups={};
@@ -4162,7 +5026,7 @@ function statsTableHTML(load){
 }
 // Strictly pasted MIDAS node values, straight segments node-to-node (no analytic infill).
 function comboPoints(load, field){
-  const {mesh}=buildMCT(state);
+  const mesh=resultsMesh();
   const nodePos={}; mesh.nodes.forEach(n=>nodePos[n.id]={x:n.x,z:n.z});
   const beamElIds=new Set(mesh.elements.filter(e=>e.member==='beam').map(e=>e.id));
   const beamPts=[],colPts=[];
@@ -4205,12 +5069,13 @@ function drawResultsPlot(){
   const grid=document.getElementById('resDiagramGrid'); if(!grid) return;
   const showM=(()=>{const c=document.getElementById('resShowM');return c?c.checked:true;})();
   const showV=(()=>{const c=document.getElementById('resShowV');return c?c.checked:true;})();
-  const {mesh}=buildMCT(state); const g=mesh.geom,s=state;
+  const mesh=resultsMesh(); const g=mesh.geom,s=state;
   const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
+  const frameEls=new Set(mesh.elements.map(e=>e.id));
   // common scale: base on the largest |M| and |V| across ALL combos so diagrams are comparable
   let gMaxM=1e-9,gMaxV=1e-9;
   loads.forEach(ld=>{
-    RESULT_ROWS.filter(r=>r.load===ld).forEach(r=>{gMaxM=Math.max(gMaxM,Math.abs(r.momentY));gMaxV=Math.max(gMaxV,Math.abs(r.shearZ));});
+    RESULT_ROWS.filter(r=>r.load===ld && frameEls.has(r.elem)).forEach(r=>{gMaxM=Math.max(gMaxM,Math.abs(r.momentY));gMaxV=Math.max(gMaxV,Math.abs(r.shearZ));});
   });
   const kM=2.4/gMaxM, kV=2.4/gMaxV;
   // build a plot div per combo
@@ -4257,30 +5122,39 @@ function buildResultsTable(){
 // ---- column base reactions: MIDAS (from pasted beam-force results) ----
 let reactShowCase='__gov__';      // MIDAS panel selected case
 
+// the results-tab reaction panel shows one frame at a time in 3D (resFrame)
 function midasData(){
+  const full=buildMCT(state).mesh, fj=full.is3D?Math.min(resFrame,full.frames.length-1):undefined;
   if(reactShowCase==='__gov__'){
-    const gov=midasGoverning();
-    const {mesh}=buildMCT(state);
+    const gov=midasGoverning(fj);
+    const mesh=resultsMesh();
     return gov.map((g,ci)=>{
       const c=mesh.keyNodes.cols[ci];
-      return {ci,x:c.x,reaction:{N:g.N.v,V:g.V.v,M:g.M.v},member:{N:-g.N.v,V:-g.V.v,M:-g.M.v},
-        gov:{N:g.N.load,V:g.V.load,M:g.M.load}};
+      const lng=full.is3D;
+      return {ci,label:g.label,x:c.x,reaction:Object.assign({N:g.N.v,V:g.V.v,M:g.M.v},lng?{VL:g.VL.v,ML:g.ML.v}:{}),
+        member:Object.assign({N:-g.N.v,V:-g.V.v,M:-g.M.v},lng?{VL:-g.VL.v,ML:-g.ML.v}:{}),
+        gov:Object.assign({N:g.N.load,V:g.V.load,M:g.M.load},lng?{VL:g.VL.load,ML:g.ML.load}:{})};
     });
   }
-  return midasColumnForces(reactShowCase);
+  return midasColumnForces(reactShowCase, fj);
 }
 
 function buildReactTableInto(divId,data,isGov){
   const fl=uForceLbl(), ml=uMomLbl();
+  const lng=data.some(d=>d.reaction && d.reaction.VL!=null);
   let h='<table class="rpt"><thead><tr><th>Column</th>'+
     `<th>Member N (${fl})</th><th>Member V (${fl})</th><th>Member M (${ml})</th>`+
-    `<th>React N (${fl})</th><th>React V (${fl})</th><th>React M (${ml})</th></tr></thead><tbody>`;
+    `<th>React N (${fl})</th><th>React V (${fl})</th><th>React M (${ml})</th>`+
+    (lng?`<th>React V<sub>long</sub> (${fl})<br><span class="sm">Shear-y</span></th><th>React M<sub>long</sub> (${ml})<br><span class="sm">Moment-z</span></th>`:'')+
+    `</tr></thead><tbody>`;
   data.forEach(d=>{
-    if(!d.reaction){h+=`<tr><td>Col ${d.ci+1}</td><td colspan="6" style="color:var(--rust)">no base-element row found for this case</td></tr>`;return;}
-    const govNote=(isGov&&d.gov)?`<br><span class="sm">N:${d.gov.N} · V:${d.gov.V} · M:${d.gov.M}</span>`:'';
-    h+=`<tr><td>Col ${d.ci+1} (x=${f(d.x,1)}′)${govNote}</td>`+
+    const lbl=d.label||`Col ${d.ci+1}`;
+    if(!d.reaction){h+=`<tr><td>${lbl}</td><td colspan="${lng?8:6}" style="color:var(--rust)">no base-element row found for this case</td></tr>`;return;}
+    const govNote=(isGov&&d.gov)?`<br><span class="sm">N:${d.gov.N} · V:${d.gov.V} · M:${d.gov.M}${lng?` · V<sub>long</sub>:${d.gov.VL} · M<sub>long</sub>:${d.gov.ML}`:''}</span>`:'';
+    h+=`<tr><td>${lbl} (x=${f(d.x,1)}′)${govNote}</td>`+
        `<td>${uForce(d.member.N)}</td><td>${uForce(d.member.V)}</td><td>${uMom(d.member.M)}</td>`+
-       `<td style="color:#1d4e6b">${uForce(d.reaction.N)}</td><td style="color:#1d4e6b">${uForce(d.reaction.V)}</td><td style="color:#1d4e6b">${uMom(d.reaction.M)}</td></tr>`;
+       `<td style="color:#1d4e6b">${uForce(d.reaction.N)}</td><td style="color:#1d4e6b">${uForce(d.reaction.V)}</td><td style="color:#1d4e6b">${uMom(d.reaction.M)}</td>`+
+       (lng?`<td style="color:#1d4e6b">${uForce(d.reaction.VL||0)}</td><td style="color:#1d4e6b">${uMom(d.reaction.ML||0)}</td>`:'')+`</tr>`;
   });
   document.getElementById(divId).innerHTML=h+'</tbody></table>';
 }
@@ -4334,7 +5208,7 @@ function drawFBDInto(plotId,data){
       font:{size:9,color:'#c0392b'},xanchor:'left'});
     annotations.push({x:cx+slot*0.12,y:-aLen*1.25,text:`${reactArc} M=${uMom(R.M)}`,showarrow:false,
       font:{size:9,color:'#1d4e6b'},xanchor:'left'});
-    annotations.push({x:cx,y:Hstub+aLen*1.15,text:`Col ${d.ci+1}${d.x!=null?` (x=${f(d.x,1)}′)`:''}`,showarrow:false,
+    annotations.push({x:cx,y:Hstub+aLen*1.15,text:`${d.label||('Col '+(d.ci+1))}${d.x!=null?` (x=${f(d.x,1)}′)`:''}`,showarrow:false,
       font:{size:10,color:COL.ink},yanchor:'bottom'});
   });
   const layout=BASE_LAYOUT({shapes,annotations});
@@ -4344,7 +5218,31 @@ function drawFBDInto(plotId,data){
   Plotly.react(plotId,traces,layout,PLOT_CFG);
 }
 
+// 3D: frame picker for the results tab + all-frames governing table
+function refreshResFrameSel(){
+  const wrap=document.getElementById('resFrameWrap'), hint=document.getElementById('resFrameHint'), sel=document.getElementById('resFrameSel');
+  if(!wrap) return;
+  const on=is3D(state);
+  wrap.style.display=on?'inline-flex':'none'; if(hint) hint.style.display=on?'block':'none';
+  if(!on){ resFrame=0; return; }
+  const n=frameYs(state).length; resFrame=Math.min(resFrame,n-1);
+  const ys=frameYs(state);
+  sel.innerHTML=ys.map((y,j)=>`<option value="${j}">Frame ${j+1} (y = ${f(y,1)} ft)</option>`).join('');
+  sel.value=String(resFrame);
+}
+function buildReactAllTable(){
+  const wrap=document.getElementById('reactAllWrap'); if(!wrap) return;
+  if(!is3D(state) || !RESULT_ROWS.length){ wrap.style.display='none'; return; }
+  wrap.style.display='block';
+  const fl=uForceLbl(), ml=uMomLbl();
+  const cell=(o,fn)=>`${fn(o.v)}<br><span class="sm">${o.load}</span>`;
+  let h=`<table class="rpt"><thead><tr><th>Support</th><th>N (${fl})</th><th>V (${fl})</th><th>M (${ml})</th><th>V<sub>long</sub> (${fl})</th><th>M<sub>long</sub> (${ml})</th></tr></thead><tbody>`;
+  midasGoverningAll().forEach(g=>{ h+=`<tr><td>${g.label}</td><td>${cell(g.N,uForce)}</td><td>${cell(g.V,uForce)}</td><td>${cell(g.M,uMom)}</td><td>${cell(g.VL,uForce)}</td><td>${cell(g.ML,uMom)}</td></tr>`; });
+  document.getElementById('reactAllTable').innerHTML=h+'</tbody></table>';
+}
 function refreshReactionPanel(){
+  refreshResFrameSel();
+  buildReactAllTable();
   const hasMidas=RESULT_ROWS.length>0;
   document.getElementById('reactSrcTag').textContent=hasMidas?'MIDAS design values':'awaiting MIDAS results';
   document.getElementById('reactEmpty').style.display=hasMidas?'none':'block';
@@ -4378,6 +5276,14 @@ function validateInputs(){
   if(totalLength(s)<=0) msgs.push('Total roof length is zero or negative — check overhangs and bay spacing.');
   if(!sectProps(s.beamSect).found) msgs.push(`Beam section "${s.beamSect}" not in the AISC database.`);
   if(!sectProps(s.colSect).found) msgs.push(`Column section "${s.colSect}" not in the AISC database.`);
+  if(is3D(s)){
+    if(frameSpans(s).some(b=>!(b>0))) msgs.push('Every frame spacing must be greater than zero.');
+    if((+s.OH_front||0)<0||(+s.OH_back||0)<0) msgs.push('Front and back overhangs cannot be negative.');
+    if(!sectProps(s.longSect).found) msgs.push(`Edge/eave beam section "${s.longSect}" not in the AISC database.`);
+    // ASCE 7-16 Figs. 27.3-4 to 27.3-7 are stated for 0.25 <= h/L <= 1.0, L measured along the wind
+    const h=roofMeanHeight(s), L3=length3D(s);
+    if(L3>0 && (h/L3<0.25 || h/L3>1.0)) msgs.push(`For wind along the length, h/L = ${f(h,1)}/${f(L3,1)} = ${(h/L3).toFixed(2)} is outside 0.25–1.0, the range stated for ASCE 7-16 Fig. 27.3-7. Confirm the free-roof C_N values apply to this canopy.`);
+  }
   const el=document.getElementById('globalWarn');
   if(el){
     if(msgs.length){ el.style.display='block'; el.innerHTML='<b>⚠ Check inputs:</b> '+msgs.join(' '); }
@@ -4386,6 +5292,7 @@ function validateInputs(){
   return msgs.length===0;
 }
 function recompute(){
+  sync3DTrib();
   updateCfgTag();
   validateInputs();
   if(state.windMode==='calc') applyWindCalc();   // keep qh + meanH drift check current
@@ -4403,7 +5310,7 @@ function recompute(){
     `<span class="stat">elements <b style="color:var(--steel)">${mesh.elements.length}</b></span>`+
     `<span class="stat">beam <b>${beamN}</b></span><span class="stat">columns <b>${colN}</b></span>`;
   const ms=document.getElementById('meshStats'); if(ms)ms.innerHTML=statHtml;
-  const mctS=document.getElementById('mctStats'); if(mctS)mctS.innerHTML=statHtml+`<span class="stat">load cases <b>6</b></span><span class="stat">combos <b>14 + env</b></span>`;
+  const mctS=document.getElementById('mctStats'); if(mctS)mctS.innerHTML=statHtml+`<span class="stat">load cases <b>${2+computeModel(state).loads.wcases.length+(computeModel(state).loads.lcases||[]).length}</b></span><span class="stat">combos <b>${lrfdCombos(computeModel(state).loads.wcases.concat(computeModel(state).loads.lcases||[])).length} + env</b></span>`;
   document.getElementById('meshTag').textContent=`${mesh.nodes.length} nodes · ${mesh.elements.length} elements`;
   // redraw whichever tab is active
   const active=document.querySelector('.tabpage.active');
@@ -4439,6 +5346,7 @@ document.getElementById('segUnit').addEventListener('click',e=>{
     try{ buildResultsTable(); }catch(_){}
     buildReactTableInto('reactTable', midasData(), reactShowCase==='__gov__');
     drawFBDInto('plotReact', midasData());
+    buildReactAllTable();
   }
 });
 document.getElementById('threedCaseSel').addEventListener('change',e=>{threedCase=e.target.value;draw3D();});
@@ -4453,6 +5361,7 @@ document.getElementById('threedReact').addEventListener('change',()=>draw3D());
     b.classList.add('on'); threedView=b.dataset.v; _view3dRev++; _apply3dCam=true; draw3D();
   }));
 })();
+document.getElementById('resFrameSel').addEventListener('change',e=>{resFrame=+e.target.value; if(RESULT_ROWS.length) drawResultsPlot(); refreshReactionPanel();});
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
@@ -4464,7 +5373,7 @@ document.getElementById('downloadReportBtn').onclick=downloadReport;
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','longSect','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
@@ -4478,11 +5387,12 @@ function refreshProjList(sel){
 function refreshAllInputs(){
   document.querySelectorAll('input[data-k]').forEach(inp=>{const k=inp.dataset.k;if(k in state)inp.value=state[k];});
   // segment buttons
-  const segMap=[['segConnect','beamConnect'],['segFix','baseFixity'],['segFlow','flow'],['segScreen','screen'],['segSnow','snowMode'],['segWind','windMode'],['segScreenWind','screenWindMode'],['segColWind','colWindMode'],['segFasciaWind','fasciaWindMode']];
+  const segMap=[['segDim','modelDim'],['segConnect','beamConnect'],['segFix','baseFixity'],['segFlow','flow'],['segScreen','screen'],['segSnow','snowMode'],['segWind','windMode'],['segScreenWind','screenWindMode'],['segColWind','colWindMode'],['segFasciaWind','fasciaWindMode']];
   segMap.forEach(([id,prop])=>{const seg=document.getElementById(id);if(!seg)return;seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===state[prop]));});
   // column count + bay table
   document.getElementById('nColInput').value=nCols(state);
   buildBayTable(); buildColBaseTable();
+  apply3DVis(); refreshWindCaseOptions();
   document.getElementById('segConnect').style.display=nCols(state)>1?'block':'none';
   // dependent visibilities
   document.getElementById('segFix').style.display='flex';
@@ -4511,6 +5421,7 @@ function refreshAllInputs(){
 function applyProject(obj){
   STATE_KEYS.forEach(k=>{if(k in obj)state[k]=obj[k];});
   if(!('colBases' in obj)) state.colBases=[];   // older projects: every base at the datum
+  if(!('modelDim' in obj)) state.modelDim='2d'; // older projects are 2D frames
   refreshAllInputs(); updateCfgTag(); recompute();
   // restore pasted MIDAS results (if any) and re-derive reactions/comparison
   const pasteEl=document.getElementById('resPaste');
@@ -4717,6 +5628,7 @@ refreshProjList();
 })();
 
 updateColCount(state.nCol);   // builds bay table, sets visibilities
+apply3DVis(); refreshWindCaseOptions();
 updateCfgTag();
 // Defer first draw until Plotly (CDN) is available. The script tags above load
 // asynchronously, so initializing immediately can hit "Plotly is not defined".
