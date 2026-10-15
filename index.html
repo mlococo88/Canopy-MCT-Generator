@@ -295,9 +295,10 @@
             <div id="bayTable" class="bay-table"></div>
             <div class="field-desc">Center-to-center spacing of each bay between adjacent columns. The first column sits at the left overhang; the right overhang extends past the last column.</div>
           </div>
-          <div class="subhead-lbl">Column base elevations (ft)</div>
+          <div class="subhead-lbl" id="colBaseLbl">Column base elevations (ft)</div>
           <div id="colBaseTable" class="bay-table"></div>
-          <div class="field-desc">Elevation of each column base (support), numbered left to right. Columns default to the datum (Base elevation in Geometry); enter a different value where a base steps up or down, e.g. a left column at -5 ft beside a right column at 0 ft. The roof stays where the datum and column height put it, so a lower base makes that column longer. Clear a box to return it to the datum.</div>
+          <div class="field-desc" id="colBaseDesc2D">Elevation of each column base (support), numbered left to right. Columns default to the datum (Base elevation in Geometry); enter a different value where a base steps up or down, e.g. a left column at -5 ft beside a right column at 0 ft. The roof stays where the datum and column height put it, so a lower base makes that column longer. Clear a box to return it to the datum.</div>
+          <div class="field-desc" id="colBaseDesc3D" style="display:none">Base elevation of every individual column: one row per frame (F1 at the front), one box per column line (A at the low side). Blank = the datum (Base elevation in Geometry). The roof stays where the datum and column height put it, so a lower base makes that column longer. A new frame copies the row before it.</div>
           <div class="subhead-lbl">Project information</div>
           <div class="field"><label>Project</label><input type="text" class="inp" data-k="projTitle" placeholder="Project name" style="grid-column:2/4;width:100%"></div>
           <div class="field"><label>Project no.</label><input type="text" class="inp" data-k="projNo" placeholder="Project number" style="grid-column:2/4;width:100%"></div>
@@ -806,6 +807,7 @@ const state = Object.assign({}, DEFAULTS, {
   nCol: 2,                       // integer column count (>=1)
   baySpacings: [8],              // length nCol-1; per-bay center-to-center (ft)
   colBases: [],                  // per-column base elevation (ft); null/missing entry = datum El_base
+  frameColBases: null,           // 3D: base elevation of every column [frame][column line]; null cell = datum
   modelDim: '2d',                // '2d' single frame | '3d' repeated frames tied by longitudinal beams
   nFrameBays: 3,                 // 3D: bays along the length (frames = bays + 1)
   frameSpacings: [20,20,20],     // 3D: per-bay frame spacing along Y (ft)
@@ -911,6 +913,41 @@ function colBaseEls(s){
 function colHeights(s){
   const xs=columnXs(s), zb=colBaseEls(s), datum=+s.El_base||0;
   return xs.map((x,i)=>datum+s.H_col+(x-s.L_OH)*s.slope-zb[i]);
+}
+// Base elevation of every individual column, [frame][column line] (ft). In 3D each cell
+// is its own input (blank = datum); in 2D there is one frame, the per-column values.
+function frameColBases(s){
+  if(!is3D(s)) return [colBaseEls(s)];
+  const n=nCols(s), datum=+s.El_base||0, nF=frameYs(s).length, G=Array.isArray(s.frameColBases)?s.frameColBases:null;
+  // no grid yet (an older 3D project): every frame uses the per-column values, as before
+  if(!G || !G.length) return Array.from({length:nF},()=>colBaseEls(s));
+  return Array.from({length:nF},(_,j)=>Array.from({length:n},(_,i)=>{
+    const row=G[Math.min(j,G.length-1)]||[], v=row[i];
+    return (v==null||v===''||isNaN(+v))?datum:+v;
+  }));
+}
+// clear height of every individual column, base to roof beam (ft), [frame][column line]
+function frameColHeights(s){
+  const xs=columnXs(s), datum=+s.El_base||0;
+  return frameColBases(s).map(row=>row.map((zb,i)=>datum+s.H_col+(xs[i]-s.L_OH)*s.slope-zb));
+}
+// windscreen band [bottom, top] on column line A of frame j (ft): a full-height screen
+// runs from that frame's own column base to the beam; a partial screen keeps its elevations
+function screenBand(s, g, ld, j){
+  if(s.screen==='full') return [g.colBaseF[j][0], ld.scr_top];
+  return [ld.scr_bot, ld.scr_top];
+}
+// keep the 3D grid nF x nC; a new grid starts from the per-column (2D) values, a new frame
+// copies the frame before it, a new column line starts at the datum
+function syncFrameColBases(){
+  if(!is3D(state)) return;
+  const nF=frameYs(state).length, n=nCols(state);
+  let G=Array.isArray(state.frameColBases)?state.frameColBases.map(r=>Array.isArray(r)?r.slice():[]):[];
+  if(!G.length) G=[Array.from({length:n},(_,i)=>{ const v=state.colBases&&state.colBases[i]; return (v==null||v===''||isNaN(+v))?null:+v; })];
+  while(G.length<nF) G.push(G[G.length-1].slice());
+  G.length=nF;
+  G.forEach(r=>{ while(r.length<n) r.push(null); r.length=n; });
+  state.frameColBases=G;
 }
 // ---------------------------------------------------------------------------
 // 3D LAYOUT — frames repeat along global Y. y = 0 at the front roof edge; the
@@ -1116,7 +1153,7 @@ function calcColWind(s){
   const qh=0.00256*Kz*s.Kzt*s.Kd*s.Ke*s.V*s.V;
   const G=s.G;
   const D=sectProps(s.colSect).d/12;       // projected column width (ft)
-  const h=Math.max(...colHeights(s));      // tallest column height (ft) — governs h/D
+  const h=Math.max(...frameColHeights(s).flat());   // tallest column height (ft) — governs h/D
   const hD=h/Math.max(D,0.01);
   const {cf,clamped}=memberCfFlat(hD);
   const p=qh*G*cf;                          // psf on projected area
@@ -1169,7 +1206,7 @@ function calcScreenWind(s){
   const G=s.G;
   // geometry: width B = tributary (2D) or full canopy length (3D); height s = screen band; h = top elevation above grade
   const B=is3D(s)?length3D(s):s.B_trib;
-  const h0=colHeights(s)[0], z0=colBaseEls(s)[0];   // screen hangs on the first column line
+  const h0=frameColHeights(s)[0][0], z0=frameColBases(s)[0][0];   // screen hangs on the first column line (frame 1)
   const sH=(s.screen==='full') ? h0 : Math.max(0.01,(s.scr_top - s.scr_bot));
   const hTop=(s.screen==='full') ? h0 : (s.scr_top - z0);
   const bs=B/Math.max(sH,0.01);
@@ -1366,7 +1403,7 @@ function buildFrameBayTable(){
 }
 document.getElementById('nFrameBayInput').addEventListener('input',e=>{
   const n=parseInt(e.target.value); if(isNaN(n))return;
-  state.nFrameBays=Math.max(1,Math.min(30,n)); buildFrameBayTable(); recompute();
+  state.nFrameBays=Math.max(1,Math.min(30,n)); buildFrameBayTable(); buildColBaseTable(); recompute();
 });
 document.getElementById('frameBayTable').addEventListener('input',e=>{
   const inp=e.target.closest('input[data-fbay]'); if(!inp)return;
@@ -1394,6 +1431,7 @@ function apply3DVis(){
   document.getElementById('nFrameBayInput').value=nFrameBays(state);
   buildFrameBayTable();
   buildPurlinTable();
+  buildColBaseTable();
   document.getElementById('longSect').value=state.longSect;
   document.getElementById('purlinSect').value=state.purlinSect;
   sync3DTrib();
@@ -1560,6 +1598,11 @@ function buildBayTable(){
   ).join('');
 }
 function buildColBaseTable(){
+  const three=is3D(state);
+  document.getElementById('colBaseLbl').textContent=three?'Column base elevations by frame (ft)':'Column base elevations (ft)';
+  document.getElementById('colBaseDesc2D').style.display=three?'none':'block';
+  document.getElementById('colBaseDesc3D').style.display=three?'block':'none';
+  if(three){ buildFrameColBaseGrid(); return; }
   const n=nCols(state), zb=colBaseEls(state);
   if(!Array.isArray(state.colBases))state.colBases=[];
   state.colBases.length=Math.min(state.colBases.length,n);
@@ -1568,6 +1611,18 @@ function buildColBaseTable(){
     const set=state.colBases[i]!=null&&state.colBases[i]!=='';
     return `<div class="bay-row"><label>${tag(i)}</label><input type="number" step="any" data-colbase="${i}" value="${set?z:''}" placeholder="${z}"><span class="u">ft</span></div>`;
   }).join('');
+}
+// 3D: a frame x column-line grid of base elevations, one input per individual column
+function buildFrameColBaseGrid(){
+  syncFrameColBases();
+  const n=nCols(state), G=state.frameColBases, datum=+state.El_base||0;
+  const cell='width:100%;min-width:0;padding:2px 3px;font-size:11px';
+  let h=`<div style="display:grid;grid-template-columns:34px repeat(${n},minmax(0,1fr));gap:3px 4px;align-items:center;max-height:320px;overflow-y:auto">`;
+  h+='<span></span>'+Array.from({length:n},(_,i)=>`<span style="font-size:10px;color:var(--muted);text-align:center">${dxfLetter(i)}</span>`).join('');
+  G.forEach((row,j)=>{ h+=`<span style="font-size:10.5px;color:var(--muted)">F${j+1}</span>`+row.map((v,i)=>
+    `<input type="number" step="any" data-fcb="${j},${i}" value="${v==null?'':v}" placeholder="${datum}" title="Frame ${j+1}, column ${dxfLetter(i)}" style="${cell}">`).join(''); });
+  h+='</div>';
+  document.getElementById('colBaseTable').innerHTML=h;
 }
 function updateColCount(n){
   state.nCol=Math.max(1,Math.min(10,Math.round(n||1)));
@@ -1589,6 +1644,11 @@ document.getElementById('bayTable').addEventListener('input',e=>{
 });
 // per-column base elevations: blank = follow the datum
 document.getElementById('colBaseTable').addEventListener('input',e=>{
+  const g=e.target.closest('input[data-fcb]');
+  if(g){ syncFrameColBases(); const [j,i]=g.dataset.fcb.split(',').map(Number), v=parseFloat(g.value);
+    if(g.value.trim()===''){ state.frameColBases[j][i]=null; recomputeDebounced(); }
+    else if(!isNaN(v)){ state.frameColBases[j][i]=v; recomputeDebounced(); }
+    return; }
   const inp=e.target.closest('input[data-colbase]'); if(!inp)return;
   const i=+inp.dataset.colbase, v=parseFloat(inp.value);
   if(!Array.isArray(state.colBases))state.colBases=[];
@@ -1780,7 +1840,7 @@ function computeModel(s){
   // last result keyed on a signature of the inputs that affect geometry/loads.
   const key=JSON.stringify([s.L_OH,s.R_OH,s.slope,s.H_col,s.El_base,s.colBases,s.B_trib,s.nCol,s.baySpacings,
     s.DL,s.SL,s.q_h,s.G,s.flow,s.d_roof,s.p_lat,s.p_col,s.colWindMode,s.fasciaWindMode,s.fasciaCfMethod,s.screen,s.p_screen,s.scr_bot,s.scr_top,s.scrPctOpen,s.screenWindMode,s.colSect,
-    s.modelDim,s.nFrameBays,s.frameSpacings,s.OH_front,s.OH_back,s.longSect,s.purlins,s.purlinSect]);
+    s.modelDim,s.nFrameBays,s.frameSpacings,s.frameColBases,s.OH_front,s.OH_back,s.longSect,s.purlins,s.purlinSect]);
   if(_cmCache.key===key) return _cmCache.val;
   const val=_computeModel(s);
   _cmCache={key,val};
@@ -1789,7 +1849,9 @@ function computeModel(s){
 function _computeModel(s){
   const theta=Math.atan(s.slope),cos=Math.cos(theta),sin=Math.sin(theta);
   const L=totalLength(s), xCol=s.L_OH, yCol=s.El_base+s.H_col;
-  const colX=columnXs(s), colBase=colBaseEls(s), colH=colHeights(s);
+  // every individual column [frame][line]; the single-frame views and derivations use frame 1
+  const colBaseF=frameColBases(s), colHF=frameColHeights(s);
+  const colX=columnXs(s), colBase=colBaseF[0], colH=colHF[0];
   const yStart=yCol-s.L_OH*s.slope, yEnd=yStart+L*s.slope, yAt=x=>yStart+x*s.slope;
   const C1x=L/4,C1y=yAt(C1x),C2x=3*L/4,C2y=yAt(C2x),C3x=L/2,C3y=yAt(C3x);
 
@@ -1821,7 +1883,7 @@ function _computeModel(s){
     z_screen_cent=(scrTop+scrBot)/2;               // elevation of centroid
   }
 
-  const geom={theta,cos,sin,L,xCol,yCol,yStart,yEnd,yAt,colX,C1x,C1y,C2x,C2y,C3x,C3y,El_base:s.El_base,H_col:s.H_col,colBase,colH};
+  const geom={theta,cos,sin,L,xCol,yCol,yStart,yEnd,yAt,colX,C1x,C1y,C2x,C2y,C3x,C3y,El_base:s.El_base,H_col:s.H_col,colBase,colH,colBaseF,colHF};
   const lcases=longWindCases(s);   // [] in 2D
   const loads={F_dead,F_snow,F_wLn,F_wRn,P1x,P1y,P2x,P2y,F_fascia,F_colwind,z_colcent,Wlower,Wupper,wcases,lcases,
                screenH:scrH,F_screen,z_screen_cent,scr_bot:scrBot,scr_top:scrTop};
@@ -2258,10 +2320,11 @@ function buildMesh3D(s){
     }
     const cols=[];
     colX.forEach((cx,i)=>{
-      const z0=g.colBase[i], z1=g.yAt(cx);
+      const z0=g.colBaseF[j][i], z1=g.yAt(cx);
       let forcedZ=null;
       if(screenOn && i===0){
-        forcedZ=[Math.max(z0,Math.min(z1,_scr.scr_bot)), Math.max(z0,Math.min(z1,_scr.scr_top))];
+        const [sb,st]=screenBand(s,g,_scr,j);
+        forcedZ=[Math.max(z0,Math.min(z1,sb)), Math.max(z0,Math.min(z1,st))];
       }
       meshMember([cx,y,z0],[cx,y,z1],1,'col'+i,j,forcedZ);
       cols.push({i,x:cx,y,base:addNode(cx,y,z0),top:addNode(cx,y,z1)});
@@ -2398,16 +2461,17 @@ function buildMCT3D(s){
 
   // ---- element sets per frame ----
   const zOf=nid=>mesh.nodes[nid-1].z;
-  const scrBot=A.loads.scr_bot, scrTop=A.loads.scr_top, scrH=A.loads.screenH;
+  const scrH=A.loads.screenH;
   const screenActive=(s.screen!=='none' && scrH>1e-6 && Math.abs(s.p_screen)>0);
   const F=mesh.frames.map(fr=>{
     const els=mesh.elements.filter(e=>e.frame===fr.j);
     const beam=els.filter(e=>e.member==='beam');
     const cols=els.filter(e=>/^col\d/.test(e.member));
+    const [sb,st]=screenBand(s,g,A.loads,fr.j);
     const screen=screenActive ? cols.filter(e=>{
       if(e.member!=='col0') return false;
       const za=zOf(e.n1), zb=zOf(e.n2);
-      return Math.min(za,zb)>=scrBot-1e-6 && Math.max(za,zb)<=scrTop+1e-6;
+      return Math.min(za,zb)>=sb-1e-6 && Math.max(za,zb)<=st+1e-6;
     }) : [];
     const scrSet=new Set(screen.map(e=>e.id));
     return {fr, B:tribs[fr.j],
@@ -3131,6 +3195,9 @@ async function buildCalcWorkbook(s, A, meta, H){
     row('Canopy length','L_Y',length3D(s),FT,'out');
     ys3.forEach((y,j)=>row(`Frame ${j+1} tributary width (at y = ${f(y,2)} ft)`,`B_${j+1}`,tr3[j],FT,'out'));
     row('Edge / eave beam section','\u2014',s.longSect,'@','in');
+    { const Bz=A.geom.colBaseF, Hc=A.geom.colHF;
+      if(Bz.some(r=>r.some((z,i)=>Math.abs(z-Bz[0][i])>1e-9))){ sub('Column bases by frame (they vary)');
+        Bz.forEach((r,j)=>r.forEach((z,i)=>{ row(`Frame ${j+1}, column ${dxfLetter(i)}: base elevation`,`z_${j+1}${dxfLetter(i)}`,z,FT,'in'); row(`Frame ${j+1}, column ${dxfLetter(i)}: length`,`H_${j+1}${dxfLetter(i)}`,Hc[j][i],FT,'out'); })); } }
     if(loadViaPurlins(s)){
       row('Purlin section','\u2014',s.purlinSect,'@','in');
       sub('Longitudinal lines carrying the roof (purlins and eaves)');
@@ -3649,6 +3716,10 @@ async function buildReport(){
   ${ys.map((y,j)=>`<tr><td>F${j+1}</td><td>${f(y,2)}</td><td>${f(tribs[j],2)}</td><td>${f(s.DL*tribs[j],0)}</td><td>${f(s.SL*tribs[j],0)}</td></tr>`).join('')}
   </tbody></table>
   <p class="note-sm">\\(\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)}\\) ft \\(= L_Y\\), so the whole roof area is carried. The single-frame derivations in this report use the governing (largest) tributary width B = ${f(s.B_trib,2)} ft. The MCT applies each frame\u2019s own B<sub>j</sub>.</p>`
+    + (()=>{ const Bz=g.colBaseF, Hc=g.colHF; if(!Bz.some(r=>r.some((z,i)=>Math.abs(z-Bz[0][i])>1e-9))) return '';
+      return `<p>Column base elevations differ between frames. Each column runs from its own base to the roof beam. The single-frame figures and derivations above show frame 1:</p>
+  <table class="rpt"><thead><tr><th>Frame</th>${g.colX.map((x,i)=>`<th>Col. ${dxfLetter(i)} base / length (ft)</th>`).join('')}</tr></thead><tbody>
+  ${Bz.map((r,j)=>`<tr><td>F${j+1}</td>${r.map((z,i)=>`<td>${f(z,2)} / ${f(Hc[j][i],2)}</td>`).join('')}</tr>`).join('')}</tbody></table>`; })()
     + (loadViaPurlins(s) ? (()=>{ const lay=longLineLayout(s), tanT=Math.tan(g.theta); return `
   <h3>2.2 Purlins and load path</h3>
   <p>${purlinXs(s).length} purlins (${esc(s.purlinSect)}) run the full length on top of the frame beams, alongside the two eave beams (${esc(s.longSect)}). The roof dead, snow and wind loads are applied to these longitudinal lines, each carrying the roof strip halfway to its neighbours. MIDAS then delivers the load to the frames, and the overhang strips are carried as cantilevers. Wind pressure acts normal to the roof, so a line carrying plan width w receives \\(w_Z=-p\\,w\\) and \\(w_X=+p\\,w\\tan\\theta\\) (\\(\\tan\\theta=${f(tanT,4)}\\)) per foot along the length.</p>
@@ -4509,7 +4580,7 @@ function draw3DFull(){
   ys.forEach((y,j)=>{
     traces.push(box3D(mx,y,mz, ax*Lb/2,0,az*Lb/2, 0,bb/2,0, -az*bd/2,0,ax*bd/2, COL.steel, `frame ${j+1} beam ${bp.desig}`));
     g.colX.forEach((cx,i)=>{
-      const zTop=g.yAt(cx)-bd/2, zBot=g.colBase[i], hz=(zTop-zBot)/2;
+      const zTop=g.yAt(cx)-bd/2, zBot=g.colBaseF[j][i], hz=(zTop-zBot)/2;
       traces.push(box3D(cx,y,(zTop+zBot)/2, cd/2,0,0, 0,cb/2,0, 0,0,hz, COL.moss, `frame ${j+1} column ${i+1} ${cp.desig}`));
       const sw=Math.max(cd,cb)*1.3;
       traces.push(box3D(cx,y,zBot-0.06, sw/2,0,0, 0,sw/2,0, 0,0,0.06, COL.ink, `fixed base F${j+1}-C${i+1}`));
@@ -4542,7 +4613,7 @@ function draw3DFull(){
       color:COL.grade,opacity:0.18,hoverinfo:'skip',name:'grade'});
   }
   if(showDims){
-    const dc='#6a665d', zD=Math.min(s.El_base,...g.colBase)-0.4, xD=-2.2, tickY={x:0,y:0,z:0.5};
+    const dc='#6a665d', zD=Math.min(s.El_base,...g.colBaseF.flat())-0.4, xD=-2.2, tickY={x:0,y:0,z:0.5};
     const yStations=[0,...ys,L3];
     for(let k=0;k<yStations.length-1;k++){
       const a=yStations[k], b=yStations[k+1]; if(b-a<1e-6) continue;
@@ -4564,7 +4635,7 @@ function draw3DFull(){
   const nrmX=-az, nrmZ=ax;
   const roofPts=(x0,x1,y0,y1,nx,ny)=>{const pts=[]; for(let i=1;i<=nx;i++) for(let k=1;k<=ny;k++){const x=x0+(x1-x0)*i/(nx+1), y=y0+(y1-y0)*k/(ny+1); pts.push({x:x+nrmX*bd/2,y,z:g.yAt(x)+nrmZ*bd/2});} return pts;};
   const wColLine=Math.abs(s.p_col*cd);
-  const colDrag=(dir)=>ys.forEach(y=>g.colX.forEach((cx,i)=>{const zb=g.colBase[i], zt=g.yAt(cx)-bd/2;
+  const colDrag=(dir)=>ys.forEach((y,j)=>g.colX.forEach((cx,i)=>{const zb=g.colBaseF[j][i], zt=g.yAt(cx)-bd/2;
     const pts=[0.2,0.5,0.8].map(t=>({x:cx,y,z:zb+(zt-zb)*t})); drawDistributed(pts,dir,wColLine,Math.max(wColLine,1),COL.colwind);}));
   if(threedCase==='DL'||threedCase==='Snow'){
     const press=threedCase==='DL'?s.DL:s.SL, col=threedCase==='DL'?COL.ink:COL.steel;
@@ -4602,14 +4673,14 @@ function draw3DFull(){
   if(tog('threedReact',false) && RESULT_ROWS.length>0 && typeof midasGoverningAll==='function'){
     const rLen=modelScale*0.14;
     midasGoverningAll().forEach(r=>{
-      const cx=g.colX[r.ci], y=ys[r.fj], zb=g.colBase[r.ci];
+      const cx=g.colX[r.ci], y=ys[r.fj], zb=g.colBaseF[r.fj][r.ci];
       if(Math.abs(r.N.v)>1){ const up=r.N.v>0?1:-1; arrow3D(cx,y,zb-up*rLen,0,0,up,rLen,COL.steel,`F${r.fj+1}-C${r.ci+1} N ${uForce(r.N.v)} ${uForceLbl()}`).forEach(t=>traces.push(t)); }
       if(showLabels) label3D(cx+0.8,y,zb-rLen*0.6,`N ${uForce(r.N.v)}`,COL.steel,9);
     });
     reactNote=' Governing MIDAS axial base reactions shown for every frame (hover for values).';
   }
   const xMin=-5, xMax=g.L+4, yMin=-4, yMax=L3+4;
-  const zMin=Math.min(s.El_base,...g.colBase)-2.0, zMax=Math.max(g.yStart,g.yEnd)+bd/2+5.5;
+  const zMin=Math.min(s.El_base,...g.colBaseF.flat())-2.0, zMax=Math.max(g.yStart,g.yEnd)+bd/2+5.5;
   const xR=xMax-xMin, yR=yMax-yMin, zR=zMax-zMin, maxR=Math.max(xR,yR,zR);
   const cams={iso:{eye:{x:0.95,y:-1.05,z:0.55}}, front:{eye:{x:0,y:-1.6,z:0.2}}, top:{eye:{x:0,y:0,z:1.6}}, end:{eye:{x:1.6,y:0,z:0.2}}};
   const sceneObj={aspectmode:'manual',aspectratio:{x:xR/maxR,y:yR/maxR,z:zR/maxR},
@@ -4735,7 +4806,7 @@ function drawGeom(){
   note.innerHTML=`<b>${nCols(s)} column${nCols(s)>1?'s':''} · ${nCols(s)===1?'cantilever':s.baseFixity+' base'}.</b> `+
     `Roof spans ${f(g.L,2)} ft (L OH ${s.L_OH}', R OH ${s.R_OH}'), slope ${s.slope} (θ=${(g.theta*180/Math.PI).toFixed(1)}°). `+
     `Beam ${s.beamSect}, column ${s.colSect}.`+
-    (is3D(s)?` <b>3D:</b> ${frameYs(s).length} frames over ${f(length3D(s),1)} ft, edge/eave beams ${s.longSect}. The elevation shows the typical frame; the meshed model below is the full structure.`:'');
+    (is3D(s)?` <b>3D:</b> ${frameYs(s).length} frames over ${f(length3D(s),1)} ft, edge/eave beams ${s.longSect}. The elevation shows the typical frame${g.colBaseF.some(r=>r.some((z,i)=>Math.abs(z-g.colBase[i])>1e-9))?' (frame 1; column bases vary by frame, see Derived geometry)':''}; the meshed model below is the full structure.`:'');
   // ---- derived geometry readout (LaTeX) ----
   const bays=baySpans(s), baySum=bays.reduce((a,b)=>a+b,0);
   const thetaDeg=g.theta*180/Math.PI;
@@ -4794,8 +4865,16 @@ function frameLayoutItems(s){
     {label:'Frame tributary widths', note:'half of each adjacent bay; the end frames also take the front / back overhang',
      tex: tribs.map((b,j)=>`B_{${j+1}}=${f(b,2)}`).join(',\\ ')+`\\ \\text{ft}\\qquad \\textstyle\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)} = L_Y`},
     {label:'Governing (typical) frame used in the 2D derivations', tex:`B = \\max B_j = ${f(Math.max(...tribs),2)}\\ \\text{ft}`},
+    ...colGridItems(s),
     ...longLineItems(s)
   ];
+}
+// 3D: base elevation and length of every column, when they differ from frame to frame
+function colGridItems(s){
+  const B=frameColBases(s), H=frameColHeights(s);
+  if(!B.some(r=>r.some((z,i)=>Math.abs(z-B[0][i])>1e-9))) return [];
+  return [{label:'Column bases vary by frame (base elevation / length, ft)', note:'the single-frame views and derivations show frame 1',
+    tex: B.map((r,j)=>`F_{${j+1}}:\\ `+r.map((z,i)=>`${dxfLetter(i)}\\,${f(z,2)}/${f(H[j][i],2)}`).join(',\\ ')).join(';\\quad ')}];
 }
 // longitudinal lines and (with purlins) their roof tributary widths across the frame
 function longLineItems(s){
@@ -4845,7 +4924,7 @@ function drawPlan(){
     g.colX.forEach((cx,i)=>shapes.push({type:'rect',x0:y-cby/2,x1:y+cby/2,y0:cx-cdx/2,y1:cx+cdx/2,fillcolor:COL.moss,line:{color:COL.moss,width:1}}));
   });
   traces.push({x:ys.flatMap(y=>g.colX.map(()=>y)),y:ys.flatMap(()=>g.colX),mode:'markers',marker:{size:10,color:'rgba(0,0,0,0)'},
-    hoverinfo:'text',text:ys.flatMap((y,j)=>g.colX.map((cx,i)=>`F${j+1}-C${i+1}: ${s.colSect}, base el. ${f(g.colBase[i],2)} ft`)),name:''});
+    hoverinfo:'text',text:ys.flatMap((y,j)=>g.colX.map((cx,i)=>`F${j+1}-C${i+1}: ${s.colSect}, base el. ${f(g.colBaseF[j][i],2)} ft, length ${f(g.colHF[j][i],2)} ft`)),name:''});
   // ---- scale: work in screen pixels so labels and margins fit at any canopy size ----
   const el=document.getElementById('plotPlan');
   const W=Math.max(480,el.clientWidth||900), padL=120, padR=130, padB=92, padT=28;
@@ -5218,7 +5297,7 @@ function longWindItems(s,g,ld){
 function drawLongWindInto(plotId, lc){
   const A=computeModel(state),g=A.geom,s=state;
   const ys=frameYs(s), L3=length3D(s), tribs=frameTribs(s);
-  const zRoof=s.El_base+roofMeanHeight(s), zBase=Math.min(...g.colBase);
+  const zRoof=s.El_base+roofMeanHeight(s), zBase=Math.min(...g.colBaseF.flat());
   const traces=[], shapes=[], annotations=[];
   // roof (mean height) and frames (columns overlap in this view)
   traces.push({x:[0,L3],y:[zRoof,zRoof],mode:'lines',line:{color:COL.steel,width:5},hoverinfo:'skip'});
@@ -5672,7 +5751,7 @@ let _plotsInit={};
 function validateInputs(){
   const s=state, msgs=[];
   if(s.H_col<=0) msgs.push('Column height must be positive.');
-  else colHeights(s).forEach((h,i)=>{ if(h<=0) msgs.push(`Column ${i+1} base is at or above the roof beam — lower its base elevation.`); });
+  else frameColHeights(s).forEach((row,j)=>row.forEach((h,i)=>{ if(h<=0) msgs.push(`${is3D(s)?`Frame ${j+1}, column ${dxfLetter(i)}`:`Column ${i+1}`} base is at or above the roof beam — lower its base elevation.`); }));
   if(s.B_trib<=0) msgs.push('Tributary width is zero or negative — all surface loads will be zero.');
   if(s.L_OH<0||s.R_OH<0) msgs.push('Overhang lengths cannot be negative.');
   if(s.slope<0) msgs.push('Roof slope is negative.');
@@ -5990,15 +6069,18 @@ function dxfFrame(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L = 
   D.text(ly.t, -6 * h, top + 2 * h, 1.6 * h, C.three ? 'TYPICAL FRAME ELEVATION' : 'FRAME ELEVATION');
   D.text(ly.t, -6 * h, top, 0.9 * h, `${C.three ? 'SECTION A, ' : ''}LOOKING ALONG +Y. W.P. = WORK POINT AT ROOF BEAM CENTERLINE. ${s.beamConnect === 'pinned' && C.nC > 1 ? 'CIRCLE = PINNED COLUMN-TO-BEAM CONNECTION.' : 'COLUMN-TO-BEAM CONNECTIONS ARE MOMENT CONNECTIONS.'}`);
   // column schedule for the frame
-  dxfTable(D, ly.tb, X(L) + 14 * h, zMin + (C.nC + 3) * 1.5 * h + 1.7 * h, ['GRID', 'X FROM LOW TIP', 'BASE EL.', 'W.P. EL.', 'LENGTH'], g.colX.map((cx, i) => [dxfLetter(i), dxfFI(X(cx)), dxfEl(g.colBase[i]).slice(4), dxfEl(g.yAt(cx)).slice(4), dxfFI(g.colH[i] * 12)]), 'COLUMNS');
+  const varies = C.three && g.colBaseF.some(r => r.some((z, i) => Math.abs(z - g.colBase[i]) > 1e-9));
+  if (varies) D.text(ly.t, -6 * h, top - 1.5 * h, 0.9 * h, 'COLUMN BASE ELEVATIONS VARY BY FRAME: FRAME 1 SHOWN. SEE THE COLUMN SCHEDULE ON THE COLUMN AND BASE LAYOUT SHEET.');
+  dxfTable(D, ly.tb, X(L) + 14 * h, zMin + (C.nC + 3) * 1.5 * h + 1.7 * h, ['GRID', 'X FROM LOW TIP', 'BASE EL.', 'W.P. EL.', 'LENGTH'], g.colX.map((cx, i) => [dxfLetter(i), dxfFI(X(cx)), dxfEl(g.colBase[i]).slice(4), dxfEl(g.yAt(cx)).slice(4), dxfFI(g.colH[i] * 12)]), varies ? 'COLUMNS (FRAME 1)' : 'COLUMNS');
 }
 /* ---------- 4: longitudinal elevation (3D). Drawing x = Y, y = Z; seen from the low eave side ---------- */
 function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = C.L3, c = Math.cos(g.theta);
   const ly = { bm: D.layer('STL-BEAM', 5), co: D.layer('STL-COLS', 3), lg: D.layer('STL-LONG', 30), pu: D.layer('STL-PURL', 6), gr: D.layer('GRID', 8), gd: D.layer('GRADE', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7) }, cl = D.ltype('CENTER'), hid = D.ltype('HIDDEN');
-  const bd = C.bp.d, bb = C.bp.b, cb = C.cp.b, zA = x => X(g.yAt(x)), zb0 = g.colBase[0] * 12, ztc = zA(g.colX[0]) - (bd / 2) / c;
+  const bd = C.bp.d, bb = C.bp.b, cb = C.cp.b, zA = x => X(g.yAt(x)), zbA = j => g.colBaseF[j][0] * 12, zb0 = Math.min(...C.ys.map((_, j) => zbA(j))), ztc = zA(g.colX[0]) - (bd / 2) / c;
   const zLo = zA(0) - (bd / 2) / c, zHi = zA(g.L) + (bd / 2) / c;
   C.ys.forEach((y, j) => { D.rect(ly.bm, X(y) - bb / 2, zLo, X(y) + bb / 2, zHi);                                 // frame beam seen end-on
-    D.rect(ly.co, X(y) - cb / 2, zb0, X(y) + cb / 2, ztc); dxfFixedBase(D, ly.co, X(y), zb0, cb / 2 + 3);         // column on grid A
+    D.rect(ly.co, X(y) - cb / 2, zbA(j), X(y) + cb / 2, ztc); dxfFixedBase(D, ly.co, X(y), zbA(j), cb / 2 + 3);   // column on grid A, its own base
+    if (Math.abs(zbA(j) - zbA(0)) > 1e-6 || j === 0) D.text(ly.t, X(y) + cb / 2 + 0.5 * h, zbA(j) + 0.4 * h, 0.9 * h, `BASE ${dxfEl(g.colBaseF[j][0])}`);
     D.line(ly.gr, X(y), zb0 - 3 * h, X(y), zHi + 8 * h, cl); dxfBubble(D, ly.gr, X(y), zHi + 9.3 * h, String(j + 1)); });
   C.lay.forEach(ln => { const pur = ln.kind === 'purlin', P = pur ? C.pp : C.lp, top = zA(ln.x) + (bd / 2) / c, z0 = pur ? top : top - P.d;
     const l = pur ? ly.pu : ly.lg; D.line(l, 0, z0, X(L3), z0, ln.x > g.colX[0] + 1e-6 && !pur ? hid : undefined); D.line(l, 0, z0 + P.d, X(L3), z0 + P.d, ln.x > g.colX[0] + 1e-6 && !pur ? hid : undefined);
@@ -6006,9 +6088,8 @@ function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   const gz = s.El_base * 12; D.line(ly.gd, -6 * h, gz, X(L3) + 6 * h, gz, hid);
   const zMin = Math.min(zb0, gz);
   D.chainH(ly.d, [0, ...C.ys, L3].map(X), zMin - 6 * h, zMin); D.dimH(ly.d, 0, X(L3), zMin - 10 * h, zMin, 'OVERALL <>');
-  D.dimV(ly.d, zb0, zA(g.colX[0]), X(C.ys[0]) - cb / 2 - 3 * h, X(C.ys[0]) - cb / 2, 'H = <>');
+  D.dimV(ly.d, zbA(0), zA(g.colX[0]), X(C.ys[0]) - cb / 2 - 3 * h, X(C.ys[0]) - cb / 2, 'H = <>');
   D.text(ly.t, X(L3) + 1 * h, zHi - 0.3 * h, 0.9 * h, `HIGH EAVE ${dxfEl(g.yEnd)} (CL)`); D.text(ly.t, X(L3) + 1 * h, zLo - 0.3 * h, 0.9 * h, `LOW EAVE ${dxfEl(g.yStart)} (CL)`);
-  D.text(ly.t, X(C.ys[0]) + cb / 2 + 0.5 * h, zb0 + 0.4 * h, 0.9 * h, `BASE ${dxfEl(g.colBase[0])}`);
   D.text(ly.t, -6 * h, zHi + 15 * h, 1.6 * h, 'LONGITUDINAL ELEVATION');
   D.text(ly.t, -6 * h, zHi + 13 * h, 0.9 * h, `SECTION B: LOOKING FROM THE LOW EAVE SIDE (+X). COLUMN LINE A SHOWN; MEMBERS BEHIND IT HIDDEN. FRONT OVERHANG ${dxfFI(X(s.OH_front))}, BACK OVERHANG ${dxfFI(X(s.OH_back))}.`);
 }
@@ -6027,7 +6108,7 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 7 * h, 1.6 * h, 'COLUMN AND BASE LAYOUT');
   D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 5 * h, 0.9 * h, `PLAN. MARK = FRAME GRID + COLUMN GRID. DASHED = ROOF OUTLINE AND BASE PLATE ZONE (BASE PLATES NOT DESIGNED HERE). BASES ${C.three ? 'FIXED' : s.baseFixity.toUpperCase()}.`);
   // column schedule
-  const rows = []; C.ys.forEach((y, j) => g.colX.forEach((cx, i) => rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(X(cx)), C.three ? dxfFI(X(y)) : '-', s.colSect, dxfEl(g.colBase[i]).slice(4), dxfFI(g.colH[i] * 12)])));
+  const rows = []; C.ys.forEach((y, j) => g.colX.forEach((cx, i) => rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(X(cx)), C.three ? dxfFI(X(y)) : '-', s.colSect, dxfEl(g.colBaseF[j][i]).slice(4), dxfFI(g.colHF[j][i] * 12)])));
   let yT = -ext - 10 * h; const T = dxfTable(D, ly.tb, 0, yT, ['MARK', 'GRID', 'X', 'Y', 'SECTION', 'BASE EL.', 'COL. LENGTH'], rows, 'COLUMN SCHEDULE (X FROM THE LOW ROOF TIP, Y FROM THE FRONT EDGE)');
   // reactions from MIDAS, when pasted
   if (typeof RESULT_ROWS !== 'undefined' && RESULT_ROWS.length) { let gov = null; try { gov = midasGoverning(); } catch (e) {}
@@ -6047,7 +6128,7 @@ function dxfLoads(D, C) { const h = D.h, s = C.s, g = C.g, l = D.layer('ANNO-TEX
     ['WINDSCREEN', s.screen === 'none' ? 'NONE' : `${s.screen.toUpperCase()}, ${f(s.p_screen, 1)} PSF`],
     ['ROOF LOAD PATH', C.three ? (loadViaPurlins(s) ? 'PURLINS AND EAVE BEAMS TO FRAMES' : 'FRAMES BY TRIBUTARY WIDTH') : `FRAME, TRIBUTARY WIDTH ${f(s.B_trib, 2)} FT`]];
   const nF = C.ys.length, rows = [], add = (m, sec, qty, len) => { const plf = consistentPlf(sec, s.density_pcf); rows.push([m, sec, String(qty), f(len, 1), f(plf, 2), f(plf * len, 0)]); };
-  add('ROOF BEAM', s.beamSect, nF, nF * g.L / g.cos); add('COLUMN', s.colSect, nF * C.nC, nF * g.colH.reduce((a, b) => a + b, 0));
+  add('ROOF BEAM', s.beamSect, nF, nF * g.L / g.cos); add('COLUMN', s.colSect, nF * C.nC, g.colHF.flat().reduce((a, b) => a + b, 0));
   if (C.three) { const nl = C.lay.filter(q => q.kind !== 'purlin').length, np = C.lay.length - nl; add('EAVE BEAM', s.longSect, nl, nl * C.L3); if (np) add('PURLIN', s.purlinSect, np, np * C.L3); }
   rows.push(['TOTAL', '', '', '', '', f(rows.reduce((a, r) => a + (+r[5]), 0), 0)]);
   const combos = lrfdCombos(A.loads.wcases.concat(A.loads.lcases || [])), half = Math.ceil(combos.length / 2);
@@ -6145,7 +6226,7 @@ document.getElementById('dxfGo').addEventListener('click', () => { const o = dxf
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
@@ -6195,6 +6276,7 @@ function applyProject(obj){
   if(!('colBases' in obj)) state.colBases=[];   // older projects: every base at the datum
   if(!('modelDim' in obj)) state.modelDim='2d'; // older projects are 2D frames
   if(!('purlins' in obj)) state.purlins=[];     // older projects have no purlins
+  if(!('frameColBases' in obj)) state.frameColBases=null;   // older 3D projects: seeded from the per-column bases
   refreshAllInputs(); updateCfgTag(); recompute();
   // restore pasted MIDAS results (if any) and re-derive reactions/comparison
   const pasteEl=document.getElementById('resPaste');
