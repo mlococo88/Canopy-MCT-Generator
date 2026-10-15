@@ -300,6 +300,7 @@
           <div class="field-desc">Elevation of each column base (support), numbered left to right. Columns default to the datum (Base elevation in Geometry); enter a different value where a base steps up or down, e.g. a left column at -5 ft beside a right column at 0 ft. The roof stays where the datum and column height put it, so a lower base makes that column longer. Clear a box to return it to the datum.</div>
           <div class="subhead-lbl">Project information</div>
           <div class="field"><label>Project</label><input type="text" class="inp" data-k="projTitle" placeholder="Project name" style="grid-column:2/4;width:100%"></div>
+          <div class="field"><label>Project no.</label><input type="text" class="inp" data-k="projNo" placeholder="Project number" style="grid-column:2/4;width:100%"></div>
           <div class="field"><label>Subject</label><input type="text" class="inp" data-k="projSubject" placeholder="Subject" style="grid-column:2/4;width:100%"></div>
           <div class="field"><label>Task</label><input type="text" class="inp" data-k="projTask" placeholder="Task" style="grid-column:2/4;width:100%"></div>
           <div class="field"><label>Computed by</label><input type="text" class="inp" data-k="projComputedBy" placeholder="Initials or name" style="grid-column:2/4;width:100%"></div>
@@ -618,6 +619,7 @@
       <button class="btn primary" id="reportBtn">↻ Refresh report</button>
       <button class="btn primary" id="printReportBtn">⬇ Download Report (PDF)</button>
       <button class="btn primary" id="xlsxBtn" title="Formal submittal workbook with live Excel formulas">⬇ Excel calc (.xlsx)</button>
+      <button class="btn primary" id="dxfBtn" title="Plan set for AutoCAD: framing plan, elevations, base layout, loads">⬇ DXF drawings</button>
       <button class="btn" id="downloadReportBtn">Download as HTML</button>
       <span class="hint" style="margin-left:auto">The report refreshes automatically when you open this tab. "Download Report (PDF)" opens your browser's print dialog — choose "Save as PDF" as the destination.</span>
     </div>
@@ -628,6 +630,139 @@
 </section>
 <!-- offscreen scratch plot used to render each wind case for the report snapshots -->
 <div id="plotScratch" style="position:absolute;left:-9999px;top:0;width:760px;height:440px"></div>
+
+<dialog id="dxfDlg" style="max-width:560px;border:1px solid var(--line-strong);border-radius:6px;padding:18px 20px;font-family:var(--sans);font-size:12.5px">
+  <h3 style="margin:0 0 6px;font-size:15px">Export DXF drawings (AutoCAD)</h3>
+  <p class="hint" style="margin:0 0 10px">Full-size geometry in inches in model space. With paper space layouts, every sheet is its own layout tab: a true 34 x 22 (or 17 x 11) page with border and title block, and a locked viewport at the smallest standard scale that fits. Plot each layout at 1:1. The R12 option instead draws each sheet's border around the drawings in model space and works offline. Dimensions are AutoCAD dimensions with a style per scale. The title block uses the Project, Project no., Computed by and Checked by fields under Geometry → Project information.</p>
+  <div id="dxfItems"></div>
+  <div style="display:grid;grid-template-columns:150px 1fr;gap:6px 10px;align-items:center;margin-top:10px">
+    <label for="dx_fm">Format</label><select id="dx_fm"><option value="layouts">AutoCAD 2018, paper space layouts (first use needs internet)</option><option value="r12">R12, sheets in model space (offline)</option></select>
+    <label for="dx_pp">Sheet size</label><select id="dx_pp"><option value="D">34 x 22 (ANSI D)</option><option value="B">17 x 11 (ANSI B)</option></select>
+    <label for="dx_tx">Plotted text height (in)</label><input id="dx_tx" type="number" step="0.01" min="0.05">
+    <label for="dx_px">Layer prefix</label><input id="dx_px" type="text">
+  </div>
+  <p id="dxfMsg" class="hint" style="min-height:1.2em;margin:10px 0 0;color:var(--steel)"></p>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="btn" id="dxfClose" type="button">Close</button><button class="btn primary" id="dxfGo" type="button">Export DXF</button></div>
+</dialog>
+<script type="text/plain" id="cnDxfPy">
+"""Canopy DXF writer: spec (JSON from the app) -> AutoCAD 2018 DXF with model space
+drawings at full size (inches) and one paper space layout per sheet (border, title block,
+locked viewport at the sheet scale). Runs in the browser through Pyodide, or locally:
+python cn_dxf.py spec.json out.dxf. Adapted from the GirderDetail DXF writer."""
+import io, json, re
+import ezdxf
+from ezdxf import units
+from ezdxf.enums import TextEntityAlignment
+
+AL = {0: TextEntityAlignment.LEFT, 1: TextEntityAlignment.BOTTOM_CENTER, 2: TextEntityAlignment.BOTTOM_RIGHT}
+
+
+def _dimstyle(doc, k, txt):
+    name = f'CN{k}'
+    if name in doc.dimstyles:
+        return name
+    ds = doc.dimstyles.new(name)
+    for a, v in dict(dimscale=k, dimtxt=txt, dimasz=0.07, dimtsz=0.07, dimexo=0.06, dimexe=0.12, dimgap=0.05,
+                     dimtad=1, dimtih=0, dimtoh=0, dimlunit=4, dimdec=3, dimfrac=2, dimzin=3, dimtxsty='CN',
+                     dimclrd=0, dimclre=0, dimclrt=0, dimtix=0, dimtofl=1, dimdsep=46).items():
+        ds.dxf.set(a, v)
+    return name
+
+
+def _title_block(lay, sh, W, H, lyr):
+    B, T = lyr['BRDR'], lyr['TBLK']
+    lay.add_lwpolyline([(0, 0), (W, 0), (W, H), (0, H)], close=True, dxfattribs={'layer': B})
+    lay.add_lwpolyline([(0.75, 0.5), (W - 0.5, 0.5), (W - 0.5, H - 0.5), (0.75, H - 0.5)], close=True, dxfattribs={'layer': B, 'lineweight': 70})
+    ty, th = 0.5, 2.6 if W > 20 else 1.6
+    lay.add_line((0.75, ty + th), (W - 0.5, ty + th), dxfattribs={'layer': T})
+    sx = (W - 1.25) / (34.0 - 1.25)   # cell positions are given on a 34 in sheet; map them inside this border
+    for i, (cx, lab, val) in enumerate(sh['cells']):
+        x = 0.75 + (cx - 0.75) * sx
+        if i:
+            lay.add_line((x, ty), (x, ty + th), dxfattribs={'layer': T})
+        lay.add_text(lab, height=0.1 if W > 20 else 0.07, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th - 0.35 * th / 2.6))
+        lay.add_text(str(val).upper(), height=0.18 if W > 20 else 0.11, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th * 0.38))
+    lay.add_text(sh['foot'], height=0.08 if W > 20 else 0.06, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((0.9, ty + 0.1 * th))
+
+
+def _mono(lay):
+    # always plot black and white: color-dependent plot style table monochrome.ctb, plot with plot styles on
+    dl = lay.dxf_layout
+    dl.dxf.current_style_sheet = 'monochrome.ctb'
+    dl.dxf.plot_layout_flags = dl.dxf.plot_layout_flags | 32
+
+
+def build(spec_json):
+    S = json.loads(spec_json)
+    doc = ezdxf.new('R2018', setup=True)
+    doc.units = units.IN
+    for k, v in {'$PSTYLEMODE': 1, '$LUNITS': 4, '$LUPREC': 3, '$INSUNITS': 1, '$MEASUREMENT': 0, '$PSLTSCALE': 1, '$LTSCALE': 1.0}.items():
+        doc.header[k] = v
+    if 'CN' not in doc.styles:
+        doc.styles.add('CN', font='romans.shx')
+    for name, o in S['layers'].items():
+        if name not in doc.layers:
+            lt = o.get('lt', 'CONTINUOUS')
+            L = doc.layers.add(name, color=o.get('color', 7), linetype=lt if lt in doc.linetypes else 'CONTINUOUS')
+            if o.get('lw'):
+                L.dxf.lineweight = o['lw']
+    msp = doc.modelspace()
+    for e in S['entities']:
+        t, a = e['t'], {'layer': e['l']}
+        if e.get('lt') and e['lt'] in doc.linetypes:
+            a['linetype'] = e['lt']
+        p = e['pts']
+        if t == 'LINE':
+            msp.add_line(p[0], p[1], dxfattribs=a)
+        elif t == 'PL':
+            msp.add_lwpolyline(p, close=bool(e.get('closed')), dxfattribs=a)
+        elif t == 'CIRCLE':
+            msp.add_circle(p[0], e['r'], dxfattribs=a)
+        elif t == 'TEXT':
+            a.update(style='CN', rotation=e.get('rot', 0) or 0)
+            msp.add_text(e['s'], height=e['hh'], dxfattribs=a).set_placement(p[0], align=AL.get(e.get('j', 0), TextEntityAlignment.LEFT))
+        elif t == 'DIM':
+            ds = _dimstyle(doc, e['k'], S.get('txt', 0.1))
+            d = msp.add_linear_dim(base=p[2], p1=p[0], p2=p[1], angle=e.get('ang', 0), dimstyle=ds, text=e.get('txt') or '<>', dxfattribs=a)
+            d.render()
+    # paper space: one layout per sheet
+    lyr = {}
+    for n, c in (('BRDR', 7), ('TBLK', 7), ('VPRT', 8)):
+        nm = S['prefix'] + n
+        if nm not in doc.layers:
+            L = doc.layers.add(nm, color=c)
+            if n == 'VPRT':
+                L.dxf.plot = 0
+        lyr[n] = nm
+    for i, sh in enumerate(S['sheets']):
+        W, H, k = sh['W'], sh['H'], sh['k']
+        name = re.sub(r'[<>/\\":;?*|,=`]', '', f"{i + 1:02d} {sh['title']}")[:60].strip()
+        lay = doc.layouts.new(name)
+        media = 'ANSI_full_bleed_D' if W > 20 else 'ANSI_full_bleed_B'
+        lay.page_setup(size=(W, H), margins=(0, 0, 0, 0), units='inch', scale=(1, 1), name=media, device='DWG To PDF.pc3')   # ready for PUBLISH
+        _mono(lay)
+        _title_block(lay, sh, W, H, lyr)
+        # viewport over the drawing area; model point m maps to paper p = p0 + (m - m0) / k
+        x0, y0, x1, y1 = sh['vp']
+        cxp, cyp = (x0 + x1) / 2, (y0 + y1) / 2
+        (m0x, m0y), (p0x, p0y) = sh['m0'], sh['p0']
+        vp = lay.add_viewport(center=(cxp, cyp), size=(x1 - x0, y1 - y0),
+                              view_center_point=(m0x + (cxp - p0x) * k, m0y + (cyp - p0y) * k), view_height=(y1 - y0) * k,
+                              dxfattribs={'layer': lyr['VPRT']})
+        vp.dxf.flags = vp.dxf.flags | 16384   # display locked
+    _mono(doc.layouts.get('Model'))
+    if 'Layout1' in doc.layouts and len(S['sheets']):
+        doc.layouts.delete('Layout1')
+    s = io.StringIO()
+    doc.write(s)
+    return s.getvalue()
+
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 2:   # command line only; in the browser the app calls build() directly
+        open(sys.argv[2], 'w').write(build(open(sys.argv[1]).read()))
+</script>
 
 <footer>Generates a MIDAS Civil .mct import file. Review the model in MIDAS and verify before use. No data leaves the browser.</footer>
 
@@ -5645,11 +5780,374 @@ document.getElementById('xlsxBtn').onclick=function(){ exportCalcXlsx(this); };
 document.getElementById('downloadReportBtn').onclick=downloadReport;
 
 // ============================================================================
+// DXF DRAWINGS — a plan set exported as AutoCAD DXF. Adapted from the GirderDetail
+// DXF export (All-Structural repo): full-size geometry in inches in model space, real
+// DIMENSION entities with a dimension style per scale, each sheet drawn at the smallest
+// standard scale that fits the page. Two formats: AutoCAD 2018 with one paper space
+// layout per sheet (written by ezdxf running in the browser through Pyodide; first use
+// needs internet), or R12 with each sheet's border and title block in model space (offline).
+// ============================================================================
+const DXF_DEF = { prefix: 'S-', txt: 0.10, paper: 'D', fmt: 'layouts',
+  draw: { cover: true, plan: true, frame: true, long: true, base: true, loads: true } };
+const DXF_PAPER = { D: [34, 22], B: [17, 11] }, DXF_SC = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 120, 240, 360, 480, 600, 720, 960, 1200];
+// drawing area inside the border, above the title block (paper inches): [x0, y0, x1, y1]
+const DXF_VP = { D: [1.0, 3.3, 33.25, 21.25], B: [0.95, 2.25, 16.4, 10.4] };
+function dxfOpts() { state.dxf = Object.assign(JSON.parse(JSON.stringify(DXF_DEF)), state.dxf || {}); state.dxf.draw = Object.assign({}, DXF_DEF.draw, state.dxf.draw || {}); return state.dxf; }
+function dxfFrac(x, den = 8) { const s8 = Math.round(x * den); let w = Math.floor(s8 / den), n = s8 - w * den, d = den; while (n && n % 2 === 0) { n /= 2; d /= 2; } return n ? (w ? w + ' ' : '') + n + '/' + d : String(w); }
+function dxfStr(s) { return String(s).replace(/<[^>]+>/g, '').replace(/[°º]/g, '%%d').replace(/[⌀Ø]/g, '%%c').replace(/[×]/g, 'x').replace(/[−–—]/g, '-').replace(/℄/g, 'CL').replace(/[′]/g, "'").replace(/[″]/g, '"').replace(/θ/g, 'THETA').replace(/[^\x20-\x7e%]/g, ''); }
+// inches -> feet-inches to the nearest 1/8"
+function dxfFI(inch) { const s = inch < 0 ? '-' : ''; let a = Math.round(Math.abs(inch) * 8) / 8; if (a < 12 - 1e-9) return `${s}${dxfFrac(a)}"`; let ft = Math.floor(a / 12 + 1e-9), r = a - ft * 12; if (r >= 12 - 1e-9) { ft++; r = 0; } return `${s}${ft}'-${dxfFrac(r)}"`; }
+const dxfEl = ft => `EL. ${ft < -1e-9 ? '-' : ft > 1e-9 ? '+' : ''}${dxfFI(Math.abs(ft) * 12)}`;
+const dxfLetter = i => String.fromCharCode(65 + i);
+/* ---------- writer: entities as objects, placed per sheet ---------- */
+class DxfW {
+  constructor(prefix) { this.sheets = []; this.E = []; this.L = {}; this.lt = { CONTINUOUS: null }; this.ds = {}; this.px = prefix || ''; this.k = 1; this.h = 1; }
+  layer(n, color, lt = 'CONTINUOUS', lw) { const nm = (this.px + n).toUpperCase(); if (!this.L[nm]) this.L[nm] = { color, lt, lw }; return nm; }
+  ltype(base) { const P0 = { CENTER: [1.25, -0.25, 0.25, -0.25], HIDDEN: [0.25, -0.125], PHANTOM: [1.25, -0.25, 0.25, -0.25, 0.25, -0.25] }[base], nm = `${base}_${this.k}`; if (!(nm in this.lt)) this.lt[nm] = P0.map(v => v * this.k * 0.4); return nm; }
+  dstyle() { const nm = `CN${this.k}`; if (!this.ds[nm]) this.ds[nm] = { k: this.k, t: this.h / this.k }; return nm; }
+  mark() { return this.E.length; }
+  bbox(i0 = 0) { const b = [Infinity, Infinity, -Infinity, -Infinity], a = (x, y) => { if (x < b[0]) b[0] = x; if (y < b[1]) b[1] = y; if (x > b[2]) b[2] = x; if (y > b[3]) b[3] = y; };
+    for (let i = i0; i < this.E.length; i++) { const e = this.E[i]; (e.pts || []).forEach(p => a(p[0], p[1])); if (e.r) { a(e.pts[0][0] - e.r, e.pts[0][1] - e.r); a(e.pts[0][0] + e.r, e.pts[0][1] + e.r); }
+      if (e.t === 'TEXT') { const w = e.s.length * e.hh * 1.0, r = (e.rot || 0) * Math.PI / 180, sh = (e.j === 2 ? -w : e.j === 1 ? -w / 2 : 0), x0 = e.pts[0][0] + sh * Math.cos(r), y0 = e.pts[0][1] + sh * Math.sin(r);
+        a(x0, y0); a(x0 + w * Math.cos(r), y0 + w * Math.sin(r)); a(x0 - e.hh * Math.sin(r), y0 + e.hh * Math.cos(r)); a(x0 + w * Math.cos(r) - e.hh * Math.sin(r), y0 + w * Math.sin(r) + e.hh * Math.cos(r)); }
+      if (e.t === 'DIM') { const pad = 1.6 * e.k * 0.1 + 0.2 * e.k, tl = ((e.txt || '<>').replace('<>', dxfFI(e.meas)).length) * 0.1 * e.k / 2; [e.pts[2], e.pts[3]].forEach(p => { a(p[0] - pad - tl, p[1] - pad - tl); a(p[0] + pad + tl, p[1] + pad + tl); }); } }
+    return b; }
+  move(i0, dx, dy) { for (let i = i0; i < this.E.length; i++) this.E[i].pts.forEach(p => { p[0] += dx; p[1] += dy; }); }
+  line(l, x1, y1, x2, y2, lt) { this.E.push({ t: 'LINE', l, lt, pts: [[x1, y1], [x2, y2]] }); }
+  pline(l, pts, closed, lt) { this.E.push({ t: 'PL', l, lt, closed, pts: pts.map(p => [p[0], p[1]]) }); }
+  rect(l, x1, y1, x2, y2, lt) { this.pline(l, [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], true, lt); }
+  circle(l, x, y, r) { this.E.push({ t: 'CIRCLE', l, r, pts: [[x, y]] }); }
+  text(l, x, y, hh, s, j = 0, rot = 0) { this.E.push({ t: 'TEXT', l, hh, s: dxfStr(s), j, rot, pts: [[x, y]] }); }
+  /* linear dimension between p1 and p2, dimension line through b, direction ang (deg); txt may contain <> for the measured value */
+  dim(l, p1, p2, b, ang = 0, txt = '') { const u = [Math.cos(ang * Math.PI / 180), Math.sin(ang * Math.PI / 180)], pr = p => { const d = (p[0] - b[0]) * u[0] + (p[1] - b[1]) * u[1]; return [b[0] + u[0] * d, b[1] + u[1] * d]; };
+    const d1 = pr(p1), d2 = pr(p2), meas = Math.hypot(d2[0] - d1[0], d2[1] - d1[1]); if (meas < 1e-6) return;
+    this.E.push({ t: 'DIM', l, ang, txt, meas, ds: this.dstyle(), k: this.k, pts: [[...p1], [...p2], d1, d2] }); }
+  dimH(l, x1, x2, y, yref, txt) { this.dim(l, [x1, yref ?? y], [x2, yref ?? y], [x1, y], 0, txt); }
+  dimV(l, y1, y2, x, xref, txt) { this.dim(l, [xref ?? x, y1], [xref ?? x, y2], [x, y1], 90, txt); }
+  _runs(v) { const s = [...new Set(v.map(q => +q.toFixed(4)))].sort((a, b) => a - b), out = []; let i = 0;
+    while (i < s.length - 1) { const d = s[i + 1] - s[i]; let j = i + 1; while (j < s.length - 1 && Math.abs((s[j + 1] - s[j]) - d) < 1e-3) j++; out.push([s[i], s[j], j - i, d]); i = j; } return out; }
+  chainH(l, xs, y, yref) { this._runs(xs).forEach(([a, b, n, d]) => this.dimH(l, a, b, y, yref, n > 1 ? `${n}@${dxfFI(d)} = <>` : '')); }
+  chainV(l, ys, x, xref) { this._runs(ys).forEach(([a, b, n, d]) => this.dimV(l, a, b, x, xref, n > 1 ? `${n}@${dxfFI(d)} = <>` : '')); }
+  _n(v) { return (Math.abs(v) < 1e-9 ? 0 : v).toFixed(4); }
+  _ent(e, lay) { const n = this._n, L = lay || e.l, lt = e.lt ? `6\n${e.lt}\n` : '';
+    if (e.t === 'LINE') return `0\nLINE\n8\n${L}\n${lt}10\n${n(e.pts[0][0])}\n20\n${n(e.pts[0][1])}\n30\n0.0\n11\n${n(e.pts[1][0])}\n21\n${n(e.pts[1][1])}\n31\n0.0`;
+    if (e.t === 'CIRCLE') return `0\nCIRCLE\n8\n${L}\n10\n${n(e.pts[0][0])}\n20\n${n(e.pts[0][1])}\n30\n0.0\n40\n${n(e.r)}`;
+    if (e.t === 'PL') return `0\nPOLYLINE\n8\n${L}\n${lt}66\n1\n70\n${e.closed ? 1 : 0}\n10\n0.0\n20\n0.0\n30\n0.0\n` + e.pts.map(p => `0\nVERTEX\n8\n${L}\n10\n${n(p[0])}\n20\n${n(p[1])}\n30\n0.0`).join('\n') + `\n0\nSEQEND\n8\n${L}`;
+    if (e.t === 'TEXT') { const [x, y] = e.pts[0]; return `0\nTEXT\n8\n${L}\n10\n${n(x)}\n20\n${n(y)}\n30\n0.0\n40\n${n(e.hh)}\n1\n${e.s}\n7\nCN${e.rot ? `\n50\n${n(e.rot)}` : ''}${e.j ? `\n72\n${e.j}\n11\n${n(x)}\n21\n${n(y)}\n31\n0.0` : ''}`; }
+    return ''; }
+  /* geometry of a dimension, in world coordinates (its anonymous block) */
+  _dimGeo(e) { const [p1, p2, d1, d2] = e.pts, k = e.k, t = this.ds[e.ds].t * k, a = e.ang * Math.PI / 180, u = [Math.cos(a), Math.sin(a)], nv = [-u[1], u[0]], g = [];
+    const ext = (p, d) => { const v = [d[0] - p[0], d[1] - p[1]], L = Math.hypot(v[0], v[1]); if (L < 1e-9) return; const w = [v[0] / L, v[1] / L]; g.push({ t: 'LINE', pts: [[p[0] + w[0] * 0.06 * k, p[1] + w[1] * 0.06 * k], [d[0] + w[0] * 0.12 * k, d[1] + w[1] * 0.12 * k]] }); };
+    ext(p1, d1); ext(p2, d2); g.push({ t: 'LINE', pts: [d1, d2] });
+    const tk = 0.07 * k; [d1, d2].forEach(d => g.push({ t: 'LINE', pts: [[d[0] - (u[0] + nv[0]) * tk, d[1] - (u[1] + nv[1]) * tk], [d[0] + (u[0] + nv[0]) * tk, d[1] + (u[1] + nv[1]) * tk]] }));
+    let rot = e.ang; if (rot > 90.001 && rot <= 270) rot -= 180; const s = (e.txt || '<>').replace('<>', dxfFI(e.meas)), m = [(d1[0] + d2[0]) / 2 + nv[0] * 0.05 * k, (d1[1] + d2[1]) / 2 + nv[1] * 0.05 * k];
+    const ra = rot * Math.PI / 180, off = [-Math.sin(ra), Math.cos(ra)]; g.push({ t: 'TEXT', hh: t, s: dxfStr(s), j: 1, rot, pts: [[m[0] + off[0] * 0.02 * k, m[1] + off[1] * 0.02 * k]] }); return { g, m, s }; }
+  toString() {
+    const n = this._n, blocks = [], ents = []; let di = 0;
+    this.E.forEach(e => { if (e.t !== 'DIM') { ents.push(this._ent(e)); return; } const G = this._dimGeo(e), nm = `*D${++di}`;
+      blocks.push(`0\nBLOCK\n8\n0\n2\n${nm}\n70\n1\n10\n0.0\n20\n0.0\n30\n0.0\n3\n${nm}\n` + G.g.map(x => this._ent(x, '0')).join('\n') + `\n0\nENDBLK\n8\n0`);
+      ents.push(`0\nDIMENSION\n8\n${e.l}\n2\n${nm}\n3\n${e.ds}\n10\n${n(e.pts[3][0])}\n20\n${n(e.pts[3][1])}\n30\n0.0\n11\n${n(G.m[0])}\n21\n${n(G.m[1])}\n31\n0.0\n70\n0\n1\n${e.txt ? dxfStr(e.txt) : ''}\n13\n${n(e.pts[0][0])}\n23\n${n(e.pts[0][1])}\n33\n0.0\n14\n${n(e.pts[1][0])}\n24\n${n(e.pts[1][1])}\n34\n0.0\n50\n${n(e.ang)}`); });
+    // keep only the dimension styles and linetypes that are used (the scale search tries several)
+    const usedDS = new Set(this.E.filter(e => e.t === 'DIM').map(e => e.ds)), usedLT = new Set(this.E.map(e => e.lt).filter(Boolean)); Object.values(this.L).forEach(o => usedLT.add(o.lt));
+    Object.keys(this.ds).forEach(k => { if (!usedDS.has(k)) delete this.ds[k]; }); Object.keys(this.lt).forEach(k => { if (k !== 'CONTINUOUS' && !usedLT.has(k)) delete this.lt[k]; });
+    const b = this.bbox(), lts = Object.entries(this.lt);
+    const ltT = lts.map(([nm, p]) => p ? `0\nLTYPE\n2\n${nm}\n70\n0\n3\n${nm}\n72\n65\n73\n${p.length}\n40\n${n(p.reduce((a, v) => a + Math.abs(v), 0))}\n` + p.map(v => `49\n${n(v)}`).join('\n') : `0\nLTYPE\n2\nCONTINUOUS\n70\n0\n3\nSolid line\n72\n65\n73\n0\n40\n0.0`).join('\n');
+    const laT = [['0', { color: 7, lt: 'CONTINUOUS' }], ...Object.entries(this.L)].map(([nm, o]) => `0\nLAYER\n2\n${nm}\n70\n0\n62\n${o.color}\n6\n${o.lt}`).join('\n');
+    const dsT = Object.entries(this.ds).map(([nm, o]) => `0\nDIMSTYLE\n2\n${nm}\n70\n0\n3\n\n4\n\n5\n\n6\n\n7\n\n40\n${n(o.k)}\n41\n0.07\n42\n0.06\n43\n0.38\n44\n0.12\n45\n0.0\n46\n0.0\n47\n0.0\n48\n0.0\n140\n${n(o.t)}\n141\n0.09\n142\n0.07\n143\n25.4\n144\n1.0\n145\n0.0\n146\n1.0\n147\n0.05\n71\n0\n72\n0\n73\n0\n74\n0\n75\n0\n76\n0\n77\n1\n78\n3\n170\n0\n171\n2\n172\n1\n173\n0\n174\n0\n175\n0\n176\n0\n177\n0\n178\n0`).join('\n');
+    return ['0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n9\n$INSBASE\n10\n0.0\n20\n0.0\n30\n0.0',
+      `9\n$EXTMIN\n10\n${n(b[0])}\n20\n${n(b[1])}\n30\n0.0\n9\n$EXTMAX\n10\n${n(b[2])}\n20\n${n(b[3])}\n30\n0.0\n9\n$LUNITS\n70\n4\n9\n$LUPREC\n70\n3\n9\n$LTSCALE\n40\n1.0\n9\n$TEXTSTYLE\n7\nCN\n9\n$DIMSTYLE\n2\n${Object.keys(this.ds)[0] || 'STANDARD'}\n0\nENDSEC`,
+      `0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n${lts.length}\n${ltT}\n0\nENDTAB`, `0\nTABLE\n2\nLAYER\n70\n${Object.keys(this.L).length + 1}\n${laT}\n0\nENDTAB`,
+      '0\nTABLE\n2\nSTYLE\n70\n2\n0\nSTYLE\n2\nSTANDARD\n70\n0\n40\n0.0\n41\n1.0\n50\n0.0\n71\n0\n42\n0.2\n3\ntxt\n4\n\n0\nSTYLE\n2\nCN\n70\n0\n40\n0.0\n41\n0.9\n50\n0.0\n71\n0\n42\n0.1\n3\nromans.shx\n4\n\n0\nENDTAB',
+      `0\nTABLE\n2\nDIMSTYLE\n70\n${Object.keys(this.ds).length}\n${dsT}\n0\nENDTAB\n0\nENDSEC`,
+      '0\nSECTION\n2\nBLOCKS', ...blocks, '0\nENDSEC', '0\nSECTION\n2\nENTITIES', ...ents, '0\nENDSEC\n0\nEOF'].join('\n') + '\n';
+  }
+}
+/* ---------- helpers ---------- */
+function dxfTable(D, l, x, y, cols, rows, title) { const h = D.h, ch = h * 0.9, rh = 1.6 * h; let yy = y;
+  if (title) { D.text(l, x, yy, h, title); yy -= 1.7 * h; }
+  const w = cols.map((c, i) => Math.max(String(c).length, ...rows.map(r => String(r[i] ?? '').length)) * ch * 0.95 + 2 * ch), W = w.reduce((a, b) => a + b, 0), xs = [x]; w.forEach(v => xs.push(xs[xs.length - 1] + v));
+  const top = yy + 0.2 * h; D.line(l, x, top, x + W, top); const hy = yy - rh; cols.forEach((c, i) => D.text(l, xs[i] + ch * 0.6, yy - 1.05 * h, ch, c)); D.line(l, x, hy, x + W, hy);
+  rows.forEach((r, j) => { const ry = hy - (j + 1) * rh; r.forEach((c, i) => D.text(l, xs[i] + ch * 0.6, ry + 0.45 * h, ch, c ?? '')); D.line(l, x, ry, x + W, ry); });
+  const bot = hy - rows.length * rh; xs.forEach(xv => D.line(l, xv, top, xv, bot)); return { w: Math.max(W, title ? dxfStr(title).length * h * 0.95 : 0), y: bot - 1.2 * h }; }
+function dxfNotes(D, l, x, y, title, lines, wchars = 70) { const h = D.h; if (title) D.text(l, x, y, h, title); let yy = y - 1.8 * h;
+  lines.forEach((s, i) => { const words = dxfStr(s).split(' '), out = []; let cur = ''; words.forEach(w => { if ((cur + ' ' + w).trim().length > wchars) { out.push(cur.trim()); cur = w; } else cur += ' ' + w; }); out.push(cur.trim());
+    out.forEach((ln, j) => { D.text(l, x + (j ? 2.2 * h : 0), yy, h * 0.9, j ? ln : `${i + 1}. ${ln}`); yy -= 1.45 * h; }); yy -= 0.3 * h; }); return yy; }
+// lay out drawn blocks (tables, notes) top-down in columns that fit the drawing area C.area
+function dxfFlow(D, C, blocks) { const gap = 2.5 * D.h, maxH = C.area.h * D.k; let x = 0, y = 0, colW = 0;
+  blocks.forEach(fn => { const i0 = D.mark(); fn(); if (D.E.length === i0) return; const b = D.bbox(i0), w = b[2] - b[0], hh = b[3] - b[1];
+    if (y < 0 && -y + hh > maxH) { x += colW + 3 * gap; y = 0; colW = 0; }
+    D.move(i0, x - b[0], y - b[3]); y -= hh + gap; colW = Math.max(colW, w); }); }
+// grid bubble: circle with the grid label
+function dxfBubble(D, l, x, y, label) { const r = 1.3 * D.h; D.circle(l, x, y, r); D.text(l, x, y - 0.5 * D.h, D.h, label, 1); return r; }
+// section cut / view tag: circle, letter, leader, note
+function dxfTag(D, l, x, y, tag, note, dx = 1, dy = 1) { const h = D.h, r = 1.1 * h, cx = x + dx * 4 * h, cy = y + dy * 4 * h;
+  D.line(l, x, y, cx - dx * r * 0.7, cy - dy * r * 0.7); D.circle(l, cx, cy, r); D.text(l, cx, cy - 0.45 * h, h, tag, 1);
+  if (note) D.text(l, cx + (dx >= 0 ? r + 0.5 * h : -(r + 0.5 * h)), cy - 0.4 * h, h * 0.9, note, dx >= 0 ? 0 : 2); }
+// arrow head at (x,y) pointing along (ux,uy)
+function dxfArrow(D, l, x, y, ux, uy) { const s = 0.9 * D.h, n = Math.hypot(ux, uy) || 1, a = ux / n, b = uy / n; D.pline(l, [[x, y], [x - a * s - b * s * 0.35, y - b * s + a * s * 0.35], [x - a * s + b * s * 0.35, y - b * s - a * s * 0.35]], true); }
+// fixed-base symbol: base plate and ground hatch below (x centre, z top of base plate)
+function dxfFixedBase(D, l, x, z, half) { const h = D.h, t = 0.6 * h; D.rect(l, x - half, z - t, x + half, z); const w = half + 0.8 * h;
+  D.line(l, x - w, z - t, x + w, z - t); for (let q = -w; q < w - 1e-9; q += 0.7 * h) D.line(l, q + x, z - t, q + x - 0.6 * h, z - t - 0.6 * h); }
+function dxfScaleName(k) { const A = { 1: 'FULL SIZE', 2: '6" = 1\'-0"', 3: '4" = 1\'-0"', 4: '3" = 1\'-0"', 6: '2" = 1\'-0"', 8: '1 1/2" = 1\'-0"', 12: '1" = 1\'-0"', 16: '3/4" = 1\'-0"', 24: '1/2" = 1\'-0"', 32: '3/8" = 1\'-0"', 48: '1/4" = 1\'-0"', 64: '3/16" = 1\'-0"', 96: '1/8" = 1\'-0"' };
+  return A[k] || (k % 120 === 0 ? `1" = ${k / 12}'-0"` : `1:${k}`); }
+function dxfMeta() { const s = state; return { name: s.projTitle || '', no: s.projNo || '', by: s.projComputedBy || '', chk: s.projCheckedBy || '', date: s.projDate || new Date().toISOString().slice(0, 10) }; }
+// shared drawing context
+function dxfCtx() {
+  const s = state, A = computeModel(s), g = A.geom, three = is3D(s);
+  const ys = three ? frameYs(s) : [0], L3 = three ? length3D(s) : 0, lay = three ? longLineLayout(s) : [];
+  const bp = sectProps(s.beamSect), cp = sectProps(s.colSect), lp = sectProps(s.longSect), pp = sectProps(s.purlinSect);
+  return { s, A, g, three, ys, L3, lay, bp, cp, lp, pp, nC: nCols(s), tribs: three ? frameTribs(s) : [s.B_trib], purl: three ? purlinXs(s) : [] };
+}
+const dxfMarkOf = (j, i) => `${j + 1}${dxfLetter(i)}`;
+/* ---------- 1: cover, sheet index, general notes ---------- */
+function dxfCover(D, C) { const h = D.h, l = D.layer('ANNO-TEXT', 7), tb = D.layer('TABL', 7), s = C.s, mt = dxfMeta();
+  const notes = [
+    'DESIGN PER ASCE 7-16 (LOADS) AND AISC 360 (STEEL). THE STRUCTURE WAS ANALYZED IN MIDAS CIVIL FROM THE MODEL GENERATED BY THIS TOOL; SEE THE DESIGN LOADS SHEET.',
+    `STRUCTURAL STEEL: SECTIONS PER AISC 15TH ED. SHAPES DATABASE. E = ${s.E_ksi} KSI, DENSITY ${s.density_pcf} PCF. SPECIFY ASTM GRADES ON THE CONTRACT DRAWINGS.`,
+    C.three ? 'COLUMN BASES ARE FIXED. THE COLUMNS ACT AS CANTILEVERS FOR WIND ALONG THE LENGTH; NO BRACING IS PROVIDED.'
+      : `COLUMN BASES ARE ${s.baseFixity.toUpperCase()}. COLUMN-TO-BEAM CONNECTIONS ARE ${s.beamConnect === 'pinned' ? 'PINNED' : 'MOMENT (FIXED)'}.`,
+    'WORK POINTS (W.P.) ARE AT THE ROOF BEAM CENTERLINE OVER EACH COLUMN. ELEVATIONS ARE RELATIVE TO THE PROJECT DATUM.',
+    'CONTRACTOR TO VERIFY ALL DIMENSIONS AND ELEVATIONS IN THE FIELD BEFORE FABRICATION.',
+    'CONNECTIONS, BASE PLATES, ANCHOR RODS AND FOUNDATIONS ARE NOT SHOWN AND SHALL BE DESIGNED FOR THE REACTIONS ON THE COLUMN AND BASE LAYOUT SHEET.'];
+  dxfFlow(D, C, [
+    () => { D.text(l, 0, 0, 3 * h, (mt.name || 'CANOPY').toUpperCase()); D.text(l, 0, -4 * h, 1.6 * h, 'MONO-SLOPE STEEL CANOPY');
+      D.text(l, 0, -6.5 * h, h, C.three
+        ? `${C.ys.length} FRAMES x ${C.nC} COLUMN${C.nC > 1 ? 'S' : ''}, ${dxfFI(C.g.L * 12)} x ${dxfFI(C.L3 * 12)} IN PLAN, ROOF SLOPE ${s.slope} (${f(C.g.theta * 180 / Math.PI, 1)} DEG.), FIXED COLUMN BASES`
+        : `SINGLE FRAME, ${C.nC} COLUMN${C.nC > 1 ? 'S' : ''}, ${dxfFI(C.g.L * 12)} ROOF, SLOPE ${s.slope} (${f(C.g.theta * 180 / Math.PI, 1)} DEG.), ${s.baseFixity.toUpperCase()} COLUMN BASES`); },
+    () => dxfTable(D, tb, 0, 0, ['SHEET', 'TITLE'], C.list.map((x, i) => [String(i + 1), x]), 'SHEET INDEX'),
+    () => dxfTable(D, tb, 0, 0, ['REV.', 'DATE', 'DESCRIPTION', 'BY'], [['0', mt.date, 'ISSUED FROM CANOPY MCT GENERATOR', dxfStr(mt.by)], ['', '', '', ''], ['', '', '', '']], 'REVISIONS'),
+    () => dxfNotes(D, l, 0, 0, 'GENERAL NOTES', notes, C.paper === 'B' ? 60 : 80)]);
+}
+/* ---------- 2: roof framing plan (3D). Drawing x = Y along the length, drawing y = X across the frame ---------- */
+function dxfPlan(D, C) { const h = D.h, g = C.g, X = v => v * 12, L = g.L, L3 = C.L3, s = C.s;
+  const ly = { roof: D.layer('ROOF', 8), bm: D.layer('STL-BEAM', 5), lg: D.layer('STL-LONG', 30), pu: D.layer('STL-PURL', 6), co: D.layer('STL-COLS', 3), gr: D.layer('GRID', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7) }, cl = D.ltype('CENTER');
+  const bb = C.bp.b, lb = C.lp.b, pb = C.pp.b, cd = C.cp.d, cb = C.cp.b, ext = 6 * h;
+  D.rect(ly.roof, 0, 0, X(L3), X(L));
+  C.ys.forEach(y => { D.line(ly.bm, X(y) - bb / 2, 0, X(y) - bb / 2, X(L)); D.line(ly.bm, X(y) + bb / 2, 0, X(y) + bb / 2, X(L)); });
+  C.lay.forEach(ln => { const w = (ln.kind === 'purlin' ? pb : lb) / 2, l = ln.kind === 'purlin' ? ly.pu : ly.lg; D.line(l, 0, X(ln.x) - w, X(L3), X(ln.x) - w); D.line(l, 0, X(ln.x) + w, X(L3), X(ln.x) + w); });
+  C.ys.forEach(y => g.colX.forEach(cx => D.rect(ly.co, X(y) - cb / 2, X(cx) - cd / 2, X(y) + cb / 2, X(cx) + cd / 2)));
+  // grids: frames numbered 1..n, column lines lettered A..
+  C.ys.forEach((y, j) => { D.line(ly.gr, X(y), -ext, X(y), X(L) + ext, cl); dxfBubble(D, ly.gr, X(y), X(L) + ext + 1.3 * h, String(j + 1)); dxfBubble(D, ly.gr, X(y), -ext - 1.3 * h, String(j + 1)); });
+  g.colX.forEach((cx, i) => { D.line(ly.gr, -ext, X(cx), X(L3) + ext, X(cx), cl); dxfBubble(D, ly.gr, -ext - 1.3 * h, X(cx), dxfLetter(i)); dxfBubble(D, ly.gr, X(L3) + ext + 1.3 * h, X(cx), dxfLetter(i)); });
+  // dimensions
+  D.chainH(ly.d, [0, ...C.ys, L3].map(X), -ext - 6 * h, 0); D.dimH(ly.d, 0, X(L3), -ext - 10 * h, 0, 'OVERALL <>');
+  D.chainV(ly.d, [0, ...g.colX, L].map(X), -ext - 6 * h, 0); D.dimV(ly.d, 0, X(L), -ext - 10 * h, 0, 'OVERALL <>');
+  if (C.purl.length) D.chainV(ly.d, C.lay.map(l => X(l.x)), X(L3) + ext + 7 * h, X(L3));
+  // labels
+  const y1 = C.ys[0], xm = C.ys.length > 1 ? (C.ys[0] + C.ys[1]) / 2 : C.ys[0] + 1;
+  C.lay.forEach((ln, i) => { const nm = ln.kind === 'purlin' ? `PURLIN ${C.s.purlinSect}` : ln.kind === 'column line' ? `COL. LINE BEAM ${s.longSect}` : `${ln.kind.toUpperCase()} BEAM ${s.longSect}`;
+    D.text(ly.t, X(xm), X(ln.x) + (ln.kind === 'purlin' ? pb : lb) / 2 + 0.4 * h, 0.9 * h, nm, 1); });
+  // slope arrow (no text inside the plan; see the legend)
+  const ax = X((C.ys[C.ys.length - 2] ?? 0) + (C.ys[C.ys.length - 1] - (C.ys[C.ys.length - 2] ?? 0)) / 2), a0 = X(L) * 0.15, a1 = X(L) * 0.85; D.line(ly.t, ax, a0, ax, a1); dxfArrow(D, ly.t, ax, a1, 0, 1);
+  // legend below the plan
+  dxfNotes(D, ly.t, 0, -ext - 14 * h, 'LEGEND AND NOTES', [
+    `FRAME BEAMS ${s.beamSect} AT GRIDS 1 TO ${C.ys.length}; COLUMNS ${s.colSect} AT EVERY FRAME AND COLUMN GRID (${C.ys.length * C.nC} TOTAL).`,
+    `EAVE AND COLUMN-LINE BEAMS ${s.longSect}${C.purl.length ? `; PURLINS ${s.purlinSect} AT ${C.purl.map(x => dxfFI(X(x))).join(', ')} FROM THE LOW EAVE` : ''}. ALL RUN THE FULL LENGTH, CANTILEVERING ${dxfFI(X(s.OH_front))} / ${dxfFI(X(s.OH_back))} PAST THE END FRAMES.`,
+    `ARROW: ROOF SLOPES UP ${dxfFrac(12 * s.slope, 16)}:12 (${f(g.theta * 180 / Math.PI, 2)} DEG.) FROM THE LOW EAVE TO THE HIGH EAVE.`], 110);
+  D.text(ly.t, X(L3) + 0.5 * h, X(L) + 0.4 * h, 0.9 * h, 'HIGH EAVE'); D.text(ly.t, X(L3) + 0.5 * h, -1.1 * h, 0.9 * h, 'LOW EAVE');
+  // section tags
+  const nF = C.nums && C.nums['TYPICAL FRAME ELEVATION'], nL = C.nums && C.nums['LONGITUDINAL ELEVATION'];
+  dxfTag(D, ly.t, X(y1), X(L) + ext * 0.4, 'A', `TYPICAL FRAME${nF ? ', SHEET ' + nF : ''}`, 1, 1);
+  dxfTag(D, ly.t, X(L3) * 0.5, X(g.colX[0]), 'B', `LONGITUDINAL ELEVATION${nL ? ', SHEET ' + nL : ''}`, 1, -1);
+  D.text(ly.t, -ext - 10 * h, X(L) + ext + 7 * h, 1.6 * h, 'ROOF FRAMING PLAN');
+  D.text(ly.t, -ext - 10 * h, X(L) + ext + 5 * h, 0.9 * h, `LENGTH (Y) LEFT TO RIGHT FROM THE FRONT EDGE; LOW EAVE AT BOTTOM. MEMBERS SHOWN AT FLANGE WIDTH. ${C.purl.length ? 'PURLINS BEAR ON THE FRAME BEAMS.' : ''}`);
+}
+/* ---------- 3: typical frame elevation (drawing x = X, y = Z) ---------- */
+function dxfFrame(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L = g.L, th = g.theta, c = Math.cos(th), sn = Math.sin(th);
+  const ly = { bm: D.layer('STL-BEAM', 5), co: D.layer('STL-COLS', 3), lg: D.layer('STL-LONG', 30), pu: D.layer('STL-PURL', 6), gr: D.layer('GRID', 8), gd: D.layer('GRADE', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7), sc: D.layer('SCRN', 4), tb: D.layer('TABL', 7) }, cl = D.ltype('CENTER'), hid = D.ltype('HIDDEN');
+  const bd = C.bp.d, cd = C.cp.d, zA = x => X(g.yAt(x));   // work line (beam centerline) elevation, inches
+  const nx = -sn * bd / 2, nz = c * bd / 2;              // half-depth normal to the roof
+  D.pline(ly.bm, [[nx, zA(0) + nz], [X(L) + nx, zA(L) + nz], [X(L) - nx, zA(L) - nz], [-nx, zA(0) - nz]], true);
+  D.line(ly.bm, 0, zA(0), X(L), zA(L), cl);
+  const zMin = Math.min(...g.colBase) * 12;
+  g.colX.forEach((cx, i) => { const zb = g.colBase[i] * 12, zt = zA(cx) - (bd / 2) / c;
+    D.rect(ly.co, X(cx) - cd / 2, zb, X(cx) + cd / 2, zt);
+    if (s.baseFixity === 'fixed' || C.three) dxfFixedBase(D, ly.co, X(cx), zb, cd / 2 + 3); else { D.pline(ly.co, [[X(cx), zb], [X(cx) - 1.2 * h, zb - 1.6 * h], [X(cx) + 1.2 * h, zb - 1.6 * h]], true); }
+    if (s.beamConnect === 'pinned' && C.nC > 1) D.circle(ly.co, X(cx), zt, 0.5 * h);
+    D.line(ly.gr, X(cx), zMin - 3 * h, X(cx), Math.max(g.yStart, g.yEnd) * 12 + bd + 8 * h, cl);
+    dxfBubble(D, ly.gr, X(cx), Math.max(g.yStart, g.yEnd) * 12 + bd + 9.3 * h, dxfLetter(i));
+    D.text(ly.t, X(cx) + cd / 2 + 0.5 * h, zb + 0.4 * h, 0.9 * h, `BASE ${dxfEl(g.colBase[i])}`);
+    D.text(ly.t, X(cx) + cd / 2 + 0.5 * h, zA(cx) - (bd / 2) / c - 1.4 * h, 0.9 * h, `W.P. ${dxfEl(g.yAt(cx))}`);
+    D.dimV(ly.d, zb, zA(cx), X(cx) - cd / 2 - 3 * h, X(cx) - cd / 2, 'H = <>'); });
+  // longitudinal members in section on the roof (3D): eave / column-line beams flush top, purlins on top
+  C.lay.forEach(ln => { const pur = ln.kind === 'purlin', P = pur ? C.pp : C.lp, top = zA(ln.x) + (bd / 2) / c, z0 = pur ? top : top - P.d;
+    D.rect(pur ? ly.pu : ly.lg, X(ln.x) - P.b / 2, z0, X(ln.x) + P.b / 2, z0 + P.d); });
+  // grade
+  const gz = s.El_base * 12; D.line(ly.gd, -6 * h, gz, X(L) + 6 * h, gz, hid); D.text(ly.t, X(L) + 6.5 * h, gz - 0.35 * h, 0.9 * h, `DATUM ${dxfEl(s.El_base)}`);
+  // windscreen (edge-on in this view, on column line A)
+  const ld = C.A.loads; if (s.screen !== 'none' && ld.screenH > 0) { const xs = X(g.colX[0]) - cd / 2 - 1.2 * h;
+    D.rect(ly.sc, xs - 0.35 * h, ld.scr_bot * 12, xs, ld.scr_top * 12); D.text(ly.t, xs - 0.9 * h, (ld.scr_bot + ld.scr_top) * 6, 0.9 * h, `WINDSCREEN ${dxfEl(ld.scr_bot)} TO ${dxfEl(ld.scr_top)}`, 1, 90); }
+  // dimensions along the bottom, slope symbol, tip elevations, labels
+  D.chainH(ly.d, [0, ...g.colX, L].map(X), zMin - 6 * h, zMin); D.dimH(ly.d, 0, X(L), zMin - 10 * h, zMin, 'OVERALL <>');
+  D.text(ly.t, -nx - 0.4 * h, zA(0) - nz - 1.4 * h, 0.9 * h, `CL BEAM ${dxfEl(g.yStart)}`, 2); D.text(ly.t, X(L) + 0.6 * h, zA(L) + 0.2 * h, 0.9 * h, `CL BEAM ${dxfEl(g.yEnd)}`);
+  if (s.slope > 1e-6) { const st = [0, ...g.colX, L]; let bi = 0; for (let i = 1; i < st.length - 1; i++) if (st[i + 1] - st[i] > st[bi + 1] - st[bi]) bi = i;
+    const run = 12 * h, x0 = X((st[bi] + st[bi + 1]) / 2) - run / 2, z0 = zA((st[bi] + st[bi + 1]) / 2) + (bd / 2) / c + (C.purl.length ? C.pp.d : 0) + 3 * h, rise = run * s.slope;
+    D.line(ly.t, x0, z0, x0 + run, z0); D.line(ly.t, x0 + run, z0, x0 + run, z0 + rise); D.line(ly.t, x0, z0, x0 + run, z0 + rise);
+    D.text(ly.t, x0 + run / 2, z0 - 1.2 * h, 0.9 * h, '12', 1); D.text(ly.t, x0 + run + 0.4 * h, z0 + rise / 2 - 0.45 * h, 0.9 * h, dxfFrac(12 * s.slope, 16)); }
+  D.text(ly.t, X(L) * 0.3 - sn * (bd / 2 + 1.2 * h), zA(L * 0.3) + c * (bd / 2) + 0.6 * h, 0.9 * h, `ROOF BEAM ${s.beamSect}`, 1, th * 180 / Math.PI);
+  D.text(ly.t, X(g.colX[0]) - cd / 2 - 0.5 * h, (g.colBase[0] * 12 + zA(g.colX[0])) / 2, 0.9 * h, `COLUMN ${s.colSect}${C.nC > 1 ? ' (TYP.)' : ''}`, 1, 90);
+  if (C.lay.length) { const pl = C.lay.find(l => l.kind === 'purlin'); if (pl) D.text(ly.t, X(pl.x), zA(pl.x) + (bd / 2) / c + C.pp.d + 0.6 * h, 0.9 * h, `PURLIN ${s.purlinSect}`, 1);
+    D.text(ly.t, X(0), zA(0) + (bd / 2) / c + 0.6 * h, 0.9 * h, `EAVE ${s.longSect}`, 0); }
+  const top = Math.max(g.yStart, g.yEnd) * 12 + bd + 13 * h;
+  D.text(ly.t, -6 * h, top + 2 * h, 1.6 * h, C.three ? 'TYPICAL FRAME ELEVATION' : 'FRAME ELEVATION');
+  D.text(ly.t, -6 * h, top, 0.9 * h, `${C.three ? 'SECTION A, ' : ''}LOOKING ALONG +Y. W.P. = WORK POINT AT ROOF BEAM CENTERLINE. ${s.beamConnect === 'pinned' && C.nC > 1 ? 'CIRCLE = PINNED COLUMN-TO-BEAM CONNECTION.' : 'COLUMN-TO-BEAM CONNECTIONS ARE MOMENT CONNECTIONS.'}`);
+  // column schedule for the frame
+  dxfTable(D, ly.tb, X(L) + 14 * h, zMin + (C.nC + 3) * 1.5 * h + 1.7 * h, ['GRID', 'X FROM LOW TIP', 'BASE EL.', 'W.P. EL.', 'LENGTH'], g.colX.map((cx, i) => [dxfLetter(i), dxfFI(X(cx)), dxfEl(g.colBase[i]).slice(4), dxfEl(g.yAt(cx)).slice(4), dxfFI(g.colH[i] * 12)]), 'COLUMNS');
+}
+/* ---------- 4: longitudinal elevation (3D). Drawing x = Y, y = Z; seen from the low eave side ---------- */
+function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = C.L3, c = Math.cos(g.theta);
+  const ly = { bm: D.layer('STL-BEAM', 5), co: D.layer('STL-COLS', 3), lg: D.layer('STL-LONG', 30), pu: D.layer('STL-PURL', 6), gr: D.layer('GRID', 8), gd: D.layer('GRADE', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7) }, cl = D.ltype('CENTER'), hid = D.ltype('HIDDEN');
+  const bd = C.bp.d, bb = C.bp.b, cb = C.cp.b, zA = x => X(g.yAt(x)), zb0 = g.colBase[0] * 12, ztc = zA(g.colX[0]) - (bd / 2) / c;
+  const zLo = zA(0) - (bd / 2) / c, zHi = zA(g.L) + (bd / 2) / c;
+  C.ys.forEach((y, j) => { D.rect(ly.bm, X(y) - bb / 2, zLo, X(y) + bb / 2, zHi);                                 // frame beam seen end-on
+    D.rect(ly.co, X(y) - cb / 2, zb0, X(y) + cb / 2, ztc); dxfFixedBase(D, ly.co, X(y), zb0, cb / 2 + 3);         // column on grid A
+    D.line(ly.gr, X(y), zb0 - 3 * h, X(y), zHi + 8 * h, cl); dxfBubble(D, ly.gr, X(y), zHi + 9.3 * h, String(j + 1)); });
+  C.lay.forEach(ln => { const pur = ln.kind === 'purlin', P = pur ? C.pp : C.lp, top = zA(ln.x) + (bd / 2) / c, z0 = pur ? top : top - P.d;
+    const l = pur ? ly.pu : ly.lg; D.line(l, 0, z0, X(L3), z0, ln.x > g.colX[0] + 1e-6 && !pur ? hid : undefined); D.line(l, 0, z0 + P.d, X(L3), z0 + P.d, ln.x > g.colX[0] + 1e-6 && !pur ? hid : undefined);
+    D.line(l, 0, z0, 0, z0 + P.d); D.line(l, X(L3), z0, X(L3), z0 + P.d); });
+  const gz = s.El_base * 12; D.line(ly.gd, -6 * h, gz, X(L3) + 6 * h, gz, hid);
+  const zMin = Math.min(zb0, gz);
+  D.chainH(ly.d, [0, ...C.ys, L3].map(X), zMin - 6 * h, zMin); D.dimH(ly.d, 0, X(L3), zMin - 10 * h, zMin, 'OVERALL <>');
+  D.dimV(ly.d, zb0, zA(g.colX[0]), X(C.ys[0]) - cb / 2 - 3 * h, X(C.ys[0]) - cb / 2, 'H = <>');
+  D.text(ly.t, X(L3) + 1 * h, zHi - 0.3 * h, 0.9 * h, `HIGH EAVE ${dxfEl(g.yEnd)} (CL)`); D.text(ly.t, X(L3) + 1 * h, zLo - 0.3 * h, 0.9 * h, `LOW EAVE ${dxfEl(g.yStart)} (CL)`);
+  D.text(ly.t, X(C.ys[0]) + cb / 2 + 0.5 * h, zb0 + 0.4 * h, 0.9 * h, `BASE ${dxfEl(g.colBase[0])}`);
+  D.text(ly.t, -6 * h, zHi + 15 * h, 1.6 * h, 'LONGITUDINAL ELEVATION');
+  D.text(ly.t, -6 * h, zHi + 13 * h, 0.9 * h, `SECTION B: LOOKING FROM THE LOW EAVE SIDE (+X). COLUMN LINE A SHOWN; MEMBERS BEHIND IT HIDDEN. FRONT OVERHANG ${dxfFI(X(s.OH_front))}, BACK OVERHANG ${dxfFI(X(s.OH_back))}.`);
+}
+/* ---------- 5: column and base layout with reactions ---------- */
+function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = C.L3;
+  const ly = { co: D.layer('STL-COLS', 3), gr: D.layer('GRID', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7), tb: D.layer('TABL', 7), ro: D.layer('ROOF', 8) }, cl = D.ltype('CENTER'), hid = D.ltype('HIDDEN');
+  const cd = C.cp.d, cb = C.cp.b, ext = 6 * h, len = C.three ? L3 : Math.max(C.s.B_trib, 4);
+  const yOf = y => C.three ? X(y) : X(len / 2);
+  D.rect(ly.ro, 0, 0, X(len), X(g.L), hid);
+  C.ys.forEach((y, j) => { D.line(ly.gr, yOf(y), -ext, yOf(y), X(g.L) + ext, cl); dxfBubble(D, ly.gr, yOf(y), X(g.L) + ext + 1.3 * h, String(j + 1));
+    g.colX.forEach((cx, i) => { D.rect(ly.co, yOf(y) - cb / 2, X(cx) - cd / 2, yOf(y) + cb / 2, X(cx) + cd / 2); D.rect(ly.co, yOf(y) - cb / 2 - 3, X(cx) - cd / 2 - 3, yOf(y) + cb / 2 + 3, X(cx) + cd / 2 + 3, hid);
+      D.text(ly.t, yOf(y) + cb / 2 + 0.6 * h, X(cx) + cd / 2 + 0.5 * h, 0.9 * h, dxfMarkOf(j, i)); }); });
+  g.colX.forEach((cx, i) => { D.line(ly.gr, -ext, X(cx), X(len) + ext, X(cx), cl); dxfBubble(D, ly.gr, -ext - 1.3 * h, X(cx), dxfLetter(i)); });
+  if (C.three) { D.chainH(ly.d, C.ys.map(X), -ext - 5 * h, 0); }
+  D.chainV(ly.d, g.colX.map(X), -ext - 5 * h, 0);
+  D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 7 * h, 1.6 * h, 'COLUMN AND BASE LAYOUT');
+  D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 5 * h, 0.9 * h, `PLAN. MARK = FRAME GRID + COLUMN GRID. DASHED = ROOF OUTLINE AND BASE PLATE ZONE (BASE PLATES NOT DESIGNED HERE). BASES ${C.three ? 'FIXED' : s.baseFixity.toUpperCase()}.`);
+  // column schedule
+  const rows = []; C.ys.forEach((y, j) => g.colX.forEach((cx, i) => rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(X(cx)), C.three ? dxfFI(X(y)) : '-', s.colSect, dxfEl(g.colBase[i]).slice(4), dxfFI(g.colH[i] * 12)])));
+  let yT = -ext - 10 * h; const T = dxfTable(D, ly.tb, 0, yT, ['MARK', 'GRID', 'X', 'Y', 'SECTION', 'BASE EL.', 'COL. LENGTH'], rows, 'COLUMN SCHEDULE (X FROM THE LOW ROOF TIP, Y FROM THE FRONT EDGE)');
+  // reactions from MIDAS, when pasted
+  if (typeof RESULT_ROWS !== 'undefined' && RESULT_ROWS.length) { let gov = null; try { gov = midasGoverning(); } catch (e) {}
+    if (gov && gov.length) { const kf = v => f((v || 0) / 1000, 2), lbl = (gg, k) => { const m = /F(\d+)-C(\d+)/.exec(gg.label || ''); return m ? dxfMarkOf(+m[1] - 1, +m[2] - 1) : dxfMarkOf(0, k); };
+      const rr = gov.map((gg, k) => [lbl(gg, k), kf(gg.N.v), kf(gg.V.v), kf(gg.M.v)].concat(C.three ? [kf(gg.VL.v), kf(gg.ML.v)] : []).concat([dxfStr(gg.N.load).toUpperCase()]));
+      dxfTable(D, ly.tb, 0, T.y - 2 * h, ['MARK', 'N (KIP)', 'V (KIP)', 'M (KIP-FT)'].concat(C.three ? ['V LONG (KIP)', 'M LONG (KIP-FT)'] : []).concat(['FROM']), rr,
+        `GOVERNING BASE REACTIONS FROM MIDAS (${gov.noEnvelope ? 'MAX OVER ALL PASTED CASES' : 'STRENGTH ENVELOPE'}; INDEPENDENT MAXIMA, NOT CONCURRENT). + N = COMPRESSION.${typeof resultsStale === 'function' && resultsStale() ? ' WARNING: RESULTS ARE OUT OF DATE WITH THE MODEL.' : ''}`); } }
+  else D.text(ly.t, 0, T.y - 2 * h, 0.9 * h, 'BASE REACTIONS: RUN THE MCT IN MIDAS AND PASTE THE BEAM FORCES IN THE RESULTS TAB TO ADD THE REACTION TABLE TO THIS SHEET.');
+}
+/* ---------- 6: design loads, wind cases, combinations, member schedule ---------- */
+function dxfLoads(D, C) { const h = D.h, s = C.s, g = C.g, l = D.layer('ANNO-TEXT', 7), tb = D.layer('TABL', 7), A = C.A, part = C.part || 0;
+  const crit = [['CODE', 'ASCE 7-16 (LOADS), AISC 360 (STEEL)'], ['RISK CATEGORY', s.riskCat],
+    ['DEAD LOAD D (SUPERIMPOSED)', `${f(s.DL, 1)} PSF + SELF WEIGHT`], ['ROOF SNOW S', `${f(s.SL, 1)} PSF${s.snowMode === 'calc' ? ` (PG ${s.pg} PSF, CE ${s.Ce}, CT ${s.Ct}, IS ${calcSnow(s).Is})` : ''}`],
+    ['WIND VELOCITY PRESSURE QH', `${f(s.q_h, 2)} PSF${s.windMode === 'calc' ? ` (V ${s.V} MPH, EXP. ${s.exposure}, KZT ${s.Kzt}, KD ${s.Kd}, KE ${s.Ke})` : ''}`],
+    ['GUST FACTOR G / FLOW', `${s.G} / ${s.flow === 'clear' ? 'CLEAR' : 'OBSTRUCTED'}`], ['ROOF WIND', 'ASCE 7-16 FIG. 27.3-4 MONOSLOPE FREE ROOF' + (C.three ? '; FIG. 27.3-7 ALONG THE LENGTH' : '')],
+    ['FASCIA / COLUMN WIND', `${f(s.p_lat, 1)} PSF ON ${f(s.d_roof, 2)} FT FASCIA / ${f(s.p_col, 1)} PSF ON COLUMN FACE`],
+    ['WINDSCREEN', s.screen === 'none' ? 'NONE' : `${s.screen.toUpperCase()}, ${f(s.p_screen, 1)} PSF`],
+    ['ROOF LOAD PATH', C.three ? (loadViaPurlins(s) ? 'PURLINS, EAVE AND COLUMN-LINE BEAMS TO FRAMES' : 'FRAMES BY TRIBUTARY WIDTH') : `FRAME, TRIBUTARY WIDTH ${f(s.B_trib, 2)} FT`]];
+  const nF = C.ys.length, rows = [], add = (m, sec, qty, len) => { const plf = consistentPlf(sec, s.density_pcf); rows.push([m, sec, String(qty), f(len, 1), f(plf, 2), f(plf * len, 0)]); };
+  add('ROOF BEAM', s.beamSect, nF, nF * g.L / g.cos); add('COLUMN', s.colSect, nF * C.nC, nF * g.colH.reduce((a, b) => a + b, 0));
+  if (C.three) { const nl = C.lay.filter(q => q.kind !== 'purlin').length, np = C.lay.length - nl; add('EAVE / COL. LINE BEAM', s.longSect, nl, nl * C.L3); if (np) add('PURLIN', s.purlinSect, np, np * C.L3); }
+  rows.push(['TOTAL', '', '', '', '', f(rows.reduce((a, r) => a + (+r[5]), 0), 0)]);
+  const combos = lrfdCombos(A.loads.wcases.concat(A.loads.lcases || [])), half = Math.ceil(combos.length / 2);
+  const b1 = [
+    () => D.text(l, 0, 0, 1.6 * h, part === 2 ? 'MEMBER SCHEDULE AND LOAD COMBINATIONS' : 'DESIGN LOADS'),
+    () => dxfTable(D, tb, 0, 0, ['ITEM', 'VALUE'], crit, 'DESIGN CRITERIA'),
+    () => dxfTable(D, tb, 0, 0, ['CASE', 'CNW', 'CNL', 'P LOWER HALF (PSF)', 'P UPPER HALF (PSF)'], A.loads.wcases.map(w => [w.name.toUpperCase(), f(w.cnw, 3), f(w.cnl, 3), f(w.pLower, 1), f(w.pUpper, 1)]), 'WIND ACROSS THE FRAMES (+ = TOWARD THE ROOF)'),
+    () => { if (C.three && (A.loads.lcases || []).length) { const lc = A.loads.lcases; dxfTable(D, tb, 0, 0, ['CASE', ...C.ys.map((_, j) => `F${j + 1} CN / P (PSF)`)], lc.map(c => [c.name.toUpperCase(), ...c.frames.map(fr => `${f(fr.cn, 2)} / ${f(fr.p, 1)}`)]), `WIND ALONG THE LENGTH, STRIP-AVERAGED (H = ${f(lc[0].h, 1)} FT)`); } }];
+  const b2 = [
+    () => dxfTable(D, tb, 0, 0, ['MEMBER', 'SECTION', 'QTY', 'TOTAL LENGTH (FT)', 'WEIGHT (PLF)', 'WEIGHT (LB)'], rows, 'MEMBER SCHEDULE (WEIGHT = DENSITY x AREA, NO CONNECTIONS)'),
+    () => dxfTable(D, tb, 0, 0, ['NAME', 'COMBINATION'], combos.slice(0, half).map(c => [c.name, c.desc]), `ASCE 7-16 2.3.1 STRENGTH COMBINATIONS (${combos.length} + ENVELOPE)`),
+    () => dxfTable(D, tb, 0, 0, ['NAME', 'COMBINATION'], combos.slice(half).map(c => [c.name, c.desc]), 'STRENGTH COMBINATIONS (CONTINUED)')];
+  dxfFlow(D, C, part === 1 ? b1 : part === 2 ? [b1[0], ...b2] : [...b1, ...b2]);
+}
+/* ---------- sheets ---------- */
+function dxfSheet(D, S, drawFn, ctx, ox) {
+  const [pw, ph] = DXF_PAPER[S.paper] || DXF_PAPER.D, vp = DXF_VP[S.paper] || DXF_VP.D, aw = vp[2] - vp[0] - 0.25, ah = vp[3] - vp[1] - 0.25; let k = null, i0 = D.mark(), b;
+  ctx.area = { w: aw, h: ah }; ctx.paper = S.paper; ctx.part = S.part || 0;
+  for (const kk of DXF_SC) { if (kk < (S.kmin || 1)) continue; if (S.kmax && kk > S.kmax) break; D.E.length = i0; D.k = kk; D.h = S.txt * kk; drawFn(D, ctx); b = D.bbox(i0); if ((b[2] - b[0]) / kk <= aw && (b[3] - b[1]) / kk <= ah) { k = kk; break; } }
+  if (!k) { k = D.k; D.over = (D.over || []).concat(S.title); }   // did not fit even at the largest allowed scale
+  // place the content in the drawing area (top left), then the border and title block around it
+  const W = pw * k, H = ph * k, mx = (vp[0] + 0.125) * k, my = (vp[3] - 0.125) * k; D.move(i0, ox + mx - b[0], my - b[3]);
+  const mt = dxfMeta(), cells = [[0.75, 'PROJECT', mt.name], [9, 'PROJECT NO.', mt.no], [13, 'SHEET TITLE', S.title], [24, 'SCALE', dxfScaleName(k)], [28, 'DESIGNED / CHECKED', `${mt.by || '-'} / ${mt.chk || '-'}`], [31, 'SHEET', `${S.n} OF ${S.of}`]];
+  const foot = `GENERATED BY CANOPY MCT GENERATOR ${new Date().toISOString().slice(0, 10)}. VIEWPORT SCALE ${k === 1 ? 'FULL SIZE' : '1:' + k}; MODEL SPACE IS FULL SIZE IN INCHES.`;
+  if (S.lay) { D.sheets.push({ title: S.title, k, W: pw, H: ph, vp, cells: cells.map(c => [c[0], c[1], dxfStr(c[2])]), foot, m0: [ox + mx, my], p0: [vp[0] + 0.125, vp[3] - 0.125] }); return { k, W }; }
+  const tb = D.layer('TBLK', 7), bd = D.layer('BRDR', 7), big = pw > 20, th = (big ? 2.6 : 1.6) * k, ty = 0.5 * k;
+  D.rect(bd, ox, 0, ox + W, H); D.rect(bd, ox + 0.75 * k, 0.5 * k, ox + W - 0.5 * k, H - 0.5 * k);
+  const x1 = ox + W - 0.5 * k; D.line(tb, ox + 0.75 * k, ty + th, x1, ty + th);
+  const sx = (pw - 1.25) / (34 - 1.25); cells.forEach(([cx, lab, val], i) => { const xx = ox + (0.75 + (cx - 0.75) * sx) * k; if (i) D.line(tb, xx, ty, xx, ty + th); D.text(tb, xx + 0.15 * k * sx, ty + th - 0.35 * th / 2.6, (big ? 0.1 : 0.07) * k, lab); D.text(tb, xx + 0.15 * k * sx, ty + th * 0.38, (big ? 0.18 : 0.11) * k, String(val).toUpperCase()); });
+  D.text(tb, ox + 0.9 * k, ty + 0.1 * th, (big ? 0.08 : 0.06) * k, `GENERATED BY CANOPY MCT GENERATOR ${new Date().toISOString().slice(0, 10)}. FULL-SIZE GEOMETRY IN INCHES; PLOT THIS SHEET AT ${k === 1 ? 'FULL SIZE' : '1:' + k}.`);
+  return { k, W };
+}
+function dxfBuild(lay) {
+  const o = dxfOpts(), C = dxfCtx(), D = new DxfW(o.prefix), sheets = [], add = (title, fn, kmin, kmax, part) => sheets.push({ title, fn, kmin, kmax, part });
+  if (o.draw.cover) add('COVER, SHEET INDEX AND NOTES', dxfCover, 1, 1);
+  if (o.draw.plan && C.three) add('ROOF FRAMING PLAN', dxfPlan, 12);
+  if (o.draw.frame) add(C.three ? 'TYPICAL FRAME ELEVATION' : 'FRAME ELEVATION', dxfFrame, 6);
+  if (o.draw.long && C.three) add('LONGITUDINAL ELEVATION', dxfLong, 12);
+  if (o.draw.base) add('COLUMN AND BASE LAYOUT', dxfBase, 12);
+  if (o.draw.loads && o.paper === 'B') { add('DESIGN LOADS', dxfLoads, 1, 1, 1); add('MEMBER SCHEDULE AND LOAD COMBINATIONS', dxfLoads, 1, 1, 2); }
+  else if (o.draw.loads) add('DESIGN LOADS AND MEMBER SCHEDULE', dxfLoads, 1, 1);
+  if (!sheets.length) throw new Error('No sheets selected.');
+  C.nums = {}; C.list = []; sheets.forEach((S, i) => { C.nums[S.title] = i + 1; C.list.push(S.title); });
+  let ox = 0; const done = [];
+  sheets.forEach((S, i) => { const r = dxfSheet(D, { ...S, paper: o.paper, txt: o.txt, n: i + 1, of: sheets.length, lay }, S.fn, C, ox); done.push(`${S.title} (1:${r.k})`); ox += r.W + 2 * r.k * 12; });
+  if (lay) { const base = n => n ? n.replace(/_\d+(\.\d+)?$/, '') : n;   // per-scale linetypes are not needed: viewports scale linetypes
+    const spec = { prefix: o.prefix, txt: o.txt, layers: Object.fromEntries(Object.entries(D.L).map(([k, v]) => [k, { color: v.color, lt: base(v.lt), lw: v.lw }])),
+      entities: D.E.map(e => ({ t: e.t, l: e.l, lt: base(e.lt), pts: e.pts, r: e.r, closed: e.closed, s: e.s, hh: e.hh, j: e.j, rot: e.rot, ang: e.ang, txt: e.t === 'DIM' ? (e.txt || '<>').replace('<>', dxfFI(e.meas)) : e.txt, k: e.k })), sheets: D.sheets };
+    return { spec, parts: done, n: D.E.length, over: D.over || [] }; }
+  return { text: D.toString(), parts: done, layers: Object.keys(D.L), n: D.E.length, over: D.over || [] };
+}
+/* paper space layouts: the drawing is written by ezdxf running in the browser (Pyodide), loaded on first use */
+let DXF_PY = null;
+async function dxfPy(msg) {
+  if (DXF_PY) return DXF_PY;
+  msg('Loading the Python runtime (first export only)...');
+  if (!window.loadPyodide) await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js'; sc.onload = res; sc.onerror = () => rej(new Error('Could not load the Python runtime from the internet.')); document.head.appendChild(sc); });
+  const py = await loadPyodide(); msg('Loading the DXF library (first export only)...');
+  await py.loadPackage(['micropip', 'numpy']); await py.runPythonAsync("import micropip\nawait micropip.install('ezdxf==1.4.4')"); py.runPython(document.getElementById('cnDxfPy').textContent); DXF_PY = py; return py;
+}
+function dxfFileName() { return (state.projTitle || 'Canopy').replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '') || 'Canopy'; }
+function dxfSave(text) { const blob = new Blob([text], { type: 'application/dxf' }), a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `${dxfFileName()}_drawings.dxf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+function dxfMsg(t) { const el = document.getElementById('dxfMsg'); if (el) el.textContent = t; }
+async function dxfDownloadLayouts() {
+  let r; try { r = dxfBuild(true); } catch (e) { console.error(e); dxfMsg('DXF export failed: ' + e.message); return; }
+  dxfMsg(`Preparing ${r.parts.length} sheets...`);
+  try { const py = await dxfPy(dxfMsg); dxfMsg('Writing the drawing...'); await new Promise(z => setTimeout(z, 30)); py.globals.set('CN_SPEC', JSON.stringify(r.spec)); const text = py.runPython('build(CN_SPEC)');
+    dxfSave(text); window.DXF_LAST = { parts: r.parts, n: r.n, layouts: true, over: r.over };
+    dxfMsg(`Exported ${r.parts.length} layouts: ${r.parts.join('; ')}.` + (r.over.length ? ` Did not fit one page even at 1:1200: ${r.over.join('; ')}.` : '')); }
+  catch (e) { console.error(e); dxfMsg(`Layouts could not be written (${e.message}). The R12 format works offline: choose it above.`); }
+}
+function dxfDownloadR12() {
+  let r; try { r = dxfBuild(false); } catch (e) { console.error(e); dxfMsg('DXF export failed: ' + e.message); return; }
+  dxfSave(r.text); window.DXF_LAST = r;
+  dxfMsg(`Exported ${r.parts.length} sheets in model space: ${r.parts.join('; ')}.` + (r.over.length ? ` Did not fit one page even at 1:1200: ${r.over.join('; ')}.` : ''));
+}
+function dxfStart() {
+  const o = dxfOpts(), three = is3D(state), dlg = document.getElementById('dxfDlg');
+  const items = [['cover', 'Cover, sheet index and general notes', true], ['plan', 'Roof framing plan (3D)', three], ['frame', three ? 'Typical frame elevation' : 'Frame elevation', true], ['long', 'Longitudinal elevation (3D)', three], ['base', 'Column and base layout, with MIDAS reactions when pasted', true], ['loads', 'Design loads, wind cases, combinations, member schedule', true]];
+  document.getElementById('dxfItems').innerHTML = items.map(([k, l, ok]) => `<label style="display:block;margin:3px 0;${ok ? '' : 'color:var(--muted)'}"><input type="checkbox" id="dx_${k}" ${o.draw[k] && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}> ${l}</label>`).join('');
+  document.getElementById('dx_px').value = o.prefix; document.getElementById('dx_tx').value = o.txt; document.getElementById('dx_fm').value = o.fmt; document.getElementById('dx_pp').value = o.paper;
+  dxfMsg(''); dlg.showModal();
+}
+document.getElementById('dxfBtn').addEventListener('click', dxfStart);
+document.getElementById('dxfClose').addEventListener('click', () => document.getElementById('dxfDlg').close());
+document.getElementById('dxfGo').addEventListener('click', () => { const o = dxfOpts(), v = id => document.getElementById(id).value;
+  Object.keys(DXF_DEF.draw).forEach(k => { const c = document.getElementById('dx_' + k); if (c && !c.disabled) o.draw[k] = c.checked; });
+  o.prefix = v('dx_px').replace(/[^\w\-$]/g, '').toUpperCase(); const t = parseFloat(v('dx_tx')); o.txt = t > 0 ? t : 0.1; o.paper = v('dx_pp'); o.fmt = v('dx_fm');
+  if (o.fmt === 'r12') dxfDownloadR12(); else dxfDownloadLayouts(); });
+
+
+// ============================================================================
 // PROJECTS — save/load (localStorage) + JSON export/import
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','longSect','purlins','purlinSect','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
