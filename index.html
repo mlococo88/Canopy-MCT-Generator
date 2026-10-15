@@ -335,6 +335,11 @@
         <div class="panel-head"><h2>Structure geometry</h2><span class="tag" id="geomTag">elevation</span></div>
         <div class="panel-body"><div id="plotGeom" class="plot"></div></div>
       </div>
+      <div class="panel" id="planPanel" style="display:none">
+        <div class="panel-head"><h2>Plan view</h2><span class="tag" id="planTag">3D structure</span></div>
+        <div class="panel-body"><div id="plotPlan" class="plot" style="height:460px;min-height:0"></div></div>
+        <div class="hint" style="padding:0 14px 12px">Looking down on the roof. Length (Y) runs left to right from the front edge; across the frame (X) runs bottom to top from the low eave to the high eave. Dimensions are plan distances in feet. Hover a member for its section.</div>
+      </div>
       <div class="panel">
         <div class="panel-head"><h2>Derived geometry</h2><span class="tag">computed from inputs</span></div>
         <div class="panel-body" style="padding:0"><div id="geomDerived"></div></div>
@@ -3355,15 +3360,18 @@ async function buildReport(){
   }
   // ensure all plots have been drawn at least once
   try{ drawGeom(); drawMeshPlot(mesh); drawGravity(); drawWind(); }catch(e){}
-  async function snap(id){
+  async function snap(id,w,h){
     const el=document.getElementById(id);
     if(!el) return null;
     try{
-      const img=Plotly.toImage(el,{format:'png',width:760,height:440,scale:2});
+      const img=Plotly.toImage(el,{format:'png',width:w||760,height:h||440,scale:2});
       const timeout=new Promise(res=>setTimeout(()=>res(null),4000));
       return await Promise.race([img,timeout]);   // null if it stalls past 4s
     }catch(e){ return null; }
   }
+  let imgPlan=null;
+  if(is3D(s)){ try{ drawPlan(); const pe=document.getElementById('plotPlan'), r=(parseFloat(pe.style.height)||460)/(pe.clientWidth||900);
+    imgPlan=await snap('plotPlan',760,Math.round(Math.max(300,Math.min(700,760*r)))); }catch(e){} }
   const imgGeom=await snap('plotGeom'), imgMesh=await snap('plotMesh'),
         imgGrav=await snap('plotGravity');
   // snapshot ALL FOUR wind cases by rendering each into the offscreen scratch plot
@@ -3749,6 +3757,7 @@ async function buildReport(){
   ${geomMath}
   ${frame3DMath}
   ${imgTag(imgGeom,'Figure 2.1 — Structure elevation showing the sloped roof beam, columns, and base supports.')}
+  ${imgTag(imgPlan,'Figure 2.2 — Plan view: frames and columns, eave and column-line beams, purlins, and plan dimensions.')}
 
   <h2 id="s3">3 · Gravity Loading (Dead &amp; Snow)</h2>
   <p>Gravity loads act vertically (global Z) and comprise member self-weight (added automatically by MIDAS), superimposed dead load, and snow. Surface pressures (psf) are converted to line loads on the roof beam by multiplying by the tributary width B = ${s.B_trib} ft.</p>
@@ -4665,6 +4674,95 @@ function longLineItems(s){
   return items;
 }
 
+// ---- Tab 1: plan view (3D) ----
+// Horizontal axis = Y along the length (front edge at 0), vertical axis = X across the
+// frame (low eave at 0, high eave at L). Equal scale, dimension chains on all sides.
+function drawPlan(){
+  const panel=document.getElementById('planPanel'); if(!panel) return;
+  const s=state;
+  if(!is3D(s)){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  const g=computeModel(s).geom, L=g.L, L3=length3D(s), ys=frameYs(s), sp=frameSpans(s);
+  const lay=longLineLayout(s), cp=sectProps(s.colSect), cdx=cp.d/12, cby=cp.b/12;
+  const traces=[], shapes=[], ann=[];
+  const dc='#6a665d', small={size:10,color:dc};
+  // roof outline
+  shapes.push({type:'rect',x0:0,x1:L3,y0:0,y1:L,fillcolor:'rgba(29,78,107,0.06)',line:{color:COL.steel,width:1.5}});
+  // longitudinal lines: eaves / column lines (amber), purlins (purple, dashed)
+  let pn=0;
+  lay.forEach(ln=>{
+    const pur=ln.kind==='purlin'; if(pur) pn++;
+    traces.push({x:[0,L3],y:[ln.x,ln.x],mode:'lines',line:{color:pur?'#8c6bb1':COL.amber,width:pur?2:3,dash:pur?'dash':'solid'},
+      hoverinfo:'text',text:pur?`Purlin ${pn} at x = ${f(ln.x,2)} ft (${s.purlinSect})`:`${ln.kind} beam at x = ${f(ln.x,2)} ft (${s.longSect})`,name:''});
+    ann.push({x:L3,y:ln.x,xanchor:'left',yanchor:'middle',xshift:4,showarrow:false,font:{size:9,color:pur?'#6a4f91':'#8a5e10'},
+      text:pur?`P${pn}`:(ln.kind==='low eave'?'low eave':ln.kind==='high eave'?'high eave':'col. line')});
+  });
+  // windscreen on the first column line
+  const ld=computeModel(s).loads;
+  if(s.screen!=='none' && ld.screenH>0){
+    traces.push({x:[0,L3],y:[g.colX[0]-cdx,g.colX[0]-cdx],mode:'lines',line:{color:'#3f7d99',width:2,dash:'dot'},hoverinfo:'text',
+      text:`windscreen on column line 1, el. ${f(ld.scr_bot,1)}–${f(ld.scr_top,1)} ft`,name:''});
+  }
+  // frames + columns
+  ys.forEach((y,j)=>{
+    traces.push({x:[y,y],y:[0,L],mode:'lines',line:{color:COL.steel,width:4},hoverinfo:'text',text:`Frame ${j+1} at y = ${f(y,2)} ft (${s.beamSect})`,name:''});
+    ann.push({x:y,y:L,yanchor:'bottom',yshift:4,showarrow:false,text:`<b>F${j+1}</b>`,font:{size:11,color:COL.ink}});
+    g.colX.forEach((cx,i)=>shapes.push({type:'rect',x0:y-cby/2,x1:y+cby/2,y0:cx-cdx/2,y1:cx+cdx/2,fillcolor:COL.moss,line:{color:COL.moss,width:1}}));
+  });
+  traces.push({x:ys.flatMap(y=>g.colX.map(()=>y)),y:ys.flatMap(()=>g.colX),mode:'markers',marker:{size:10,color:'rgba(0,0,0,0)'},
+    hoverinfo:'text',text:ys.flatMap((y,j)=>g.colX.map((cx,i)=>`F${j+1}-C${i+1}: ${s.colSect}, base el. ${f(g.colBase[i],2)} ft`)),name:''});
+  // ---- scale: work in screen pixels so labels and margins fit at any canopy size ----
+  const el=document.getElementById('plotPlan');
+  const W=Math.max(480,el.clientWidth||900), padL=120, padR=130, padB=92, padT=28;
+  const k=Math.max(L3/(W-padL-padR), L/(760-padB-padT));     // ft per pixel
+  const H=Math.round(L/k+padB+padT);
+  el.style.height=H+'px';
+  const px=v=>v*k;                                              // pixels -> ft
+  const tk=px(5);
+  const fits=(label,segFt)=>label.replace(/<[^>]+>/g,'').length*6.2 < segFt/k-4;
+  const hDim=(a,b,yy,label,row)=>{ if(b-a<1e-6) return;
+    shapes.push({type:'line',x0:a,x1:b,y0:yy,y1:yy,line:{color:dc,width:1}});
+    [a,b].forEach(v=>shapes.push({type:'line',x0:v,x1:v,y0:yy-tk,y1:yy+tk,line:{color:dc,width:1}}));
+    ann.push({x:(a+b)/2,y:yy,yanchor:'top',yshift:-3-(row||0)*13,showarrow:false,text:label,font:small}); };
+  const vDim=(a,b,xx,label,side)=>{ if(b-a<1e-6) return;
+    shapes.push({type:'line',x0:xx,x1:xx,y0:a,y1:b,line:{color:dc,width:1}});
+    [a,b].forEach(v=>shapes.push({type:'line',x0:xx-tk,x1:xx+tk,y0:v,y1:v,line:{color:dc,width:1}}));
+    const ok=fits(label,b-a);
+    ann.push({x:xx,y:(a+b)/2,xanchor:side<0?'right':'left',xshift:side<0?-3:3,showarrow:false,text:ok?label:label.replace(/^[A-Za-z ]+ /,''),font:small,textangle:ok?-90:0}); };
+  // a chain of horizontal segments: long label if it fits, else the bare value, else
+  // the bare value staggered onto a second row
+  const hChain=(stations,yy,longLbl,shortLbl)=>{ let prevStag=false;
+    for(let i=0;i<stations.length-1;i++){
+      const seg=stations[i+1]-stations[i]; if(seg<1e-6) continue;
+      let lbl=longLbl(i,seg), row=0;
+      if(!fits(lbl,seg)){ lbl=shortLbl(i,seg); if(!fits(lbl,seg)){ row=prevStag?0:1; } }
+      prevStag=(row===1); hDim(stations[i],stations[i+1],yy,lbl,row);
+    } };
+  // along the length (below the roof): overhangs + frame bays, then overall
+  const yst=[0,...ys,L3];
+  hChain(yst,-px(16),(i,sg)=>i===0?`front OH ${f(sg,2)}'`:(i===yst.length-2)?`back OH ${f(sg,2)}'`:`bay ${i}: ${f(sg,2)}'`,(i,sg)=>`${f(sg,2)}'`);
+  hDim(0,L3,-px(64),`length L<sub>Y</sub> = ${f(L3,2)}'`);
+  // across the frame (left of the roof): overhangs + column spacing, then overall
+  const xst=[0,...g.colX,L];
+  for(let i=0;i<xst.length-1;i++){
+    const sg=xst[i+1]-xst[i];
+    vDim(xst[i],xst[i+1],-px(22),(i===0)?`L OH ${f(sg,2)}'`:(i===xst.length-2)?`R OH ${f(sg,2)}'`:`col. ${f(sg,2)}'`,-1);
+  }
+  vDim(0,L,-px(72),`L = ${f(L,2)}'`,-1);
+  // spacing between longitudinal lines (right of the roof), when purlins are present
+  if(purlinXs(s).length) for(let i=0;i<lay.length-1;i++) vDim(lay[i].x,lay[i+1].x,L3+px(78),`${f(lay[i+1].x-lay[i].x,2)}'`,1);
+  // roof slope direction
+  ann.push({x:L3*0.5,y:L*0.82,ax:L3*0.5,ay:L*0.18,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:2,arrowwidth:1.6,arrowcolor:'#9b9486',text:''});
+  ann.push({x:L3*0.5,y:L*0.5,xshift:6,xanchor:'left',showarrow:false,text:`slope ${s.slope} up to high eave (θ = ${f(g.theta*180/Math.PI,1)}°)`,font:{size:10,color:'#7a756a'},bgcolor:'rgba(255,255,255,0.7)'});
+  const layout=BASE_LAYOUT({shapes,annotations:ann,showlegend:false,margin:{l:0,r:0,t:0,b:0},height:H});
+  const x0=-px(padL), y0=-px(padB);
+  layout.xaxis=Object.assign({},layout.xaxis||{},{visible:false,range:[x0,x0+W*k],fixedrange:false});
+  layout.yaxis=Object.assign({},layout.yaxis||{},{visible:false,scaleanchor:'x',scaleratio:1,range:[y0,y0+H*k]});
+  Plotly.react('plotPlan',traces,layout,PLOT_CFG);
+  const tag=document.getElementById('planTag');
+  if(tag) tag.textContent=`${ys.length} frames · ${f(L3,1)} × ${f(L,1)} ft${purlinXs(s).length?` · ${purlinXs(s).length} purlins`:''}`;
+}
+
 // ---- Tab 1: meshed model ----
 function drawMeshPlot(mesh){
   if(mesh.is3D) return drawMeshPlot3D(mesh);
@@ -5499,7 +5597,7 @@ let _lastMCT='',_lastMesh=null;
 function onTabShown(tab){
   // Plotly needs the container visible to size correctly; draw on show
   if(tab!=='threed' && typeof stopWindAnim==='function') stopWindAnim();
-  if(tab==='geometry'){drawGeom();drawMeshPlot(_lastMesh||buildMCT(state).mesh);}
+  if(tab==='geometry'){drawGeom();drawPlan();drawMeshPlot(_lastMesh||buildMCT(state).mesh);}
   else if(tab==='gravity'){drawGravity();}
   else if(tab==='wind'){drawWind();}
   else if(tab==='threed'){draw3D();}
