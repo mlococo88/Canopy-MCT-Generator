@@ -275,6 +275,18 @@
             <div class="field"><label>Shape</label><select id="longSect" class="inp" style="grid-column:2/4;width:100%"></select></div>
             <div class="field-desc" id="longSectDesc"></div>
             <div class="field-desc">Longitudinal beams run the full length along the low and high roof edges and over every column line, and cantilever past the end frames to the front and back overhangs. They are written to the MCT as AISC10(US) database sections.</div>
+            <div class="subhead-lbl">Purlins (ft, plan distance from the low roof tip)</div>
+            <div id="purlinTable" class="bay-table"></div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0">
+              <button class="btn" id="purlinAddBtn" type="button">+ Add purlin</button>
+              <span class="ctl-label" style="margin-left:6px">Fill evenly</span>
+              <input type="number" min="1" max="40" step="1" id="purlinFillN" value="3" style="width:52px">
+              <button class="btn" id="purlinFillBtn" type="button">Fill</button>
+              <button class="btn" id="purlinClearBtn" type="button">Clear</button>
+            </div>
+            <div class="field"><label>Purlin shape</label><select id="purlinSect" class="inp" style="grid-column:2/4;width:100%"></select></div>
+            <div class="field-desc" id="purlinSectDesc"></div>
+            <div class="field-desc" id="purlinLoadNote">Purlins run the full length on top of the frame beams, alongside the eave and column-line beams. With at least one purlin, the roof dead, snow and wind loads go onto every longitudinal line (purlins, eave beams, column-line beams) by its tributary width across the roof. MIDAS then carries them into the frames, including the overhangs as cantilevers. With no purlins, roof loads go straight to the frames by tributary width. Fill evenly places that many purlins at equal spacing between the eaves.</div>
           </div>
           <div class="field"><label>Number of columns</label><input type="number" min="1" max="10" step="1" id="nColInput" value="2"><span class="unit"></span></div>
           <div class="field-desc">Number of column lines supporting the roof beam. 1 = cantilever; 2 = simple bay; 3+ = multi-bay continuous canopy (statically indeterminate, solved by the in-app stiffness analysis).</div>
@@ -658,6 +670,8 @@ const state = Object.assign({}, DEFAULTS, {
   nFrameBays: 3,                 // 3D: bays along the length (frames = bays + 1)
   frameSpacings: [20,20,20],     // 3D: per-bay frame spacing along Y (ft)
   longSect: 'HSS6X6X.250',       // 3D: longitudinal edge/eave beam section
+  purlins: [],                   // 3D: purlin positions, plan ft from the low roof tip (x = 0)
+  purlinSect: 'W8X10',           // 3D: purlin section
   B_trib2D: null,                // B_trib entered in 2D, restored when switching back from 3D
   beamConnect: 'continuous',     // column-to-beam connection: 'continuous' = fixed/moment, 'pinned' = hinged (releases column top)
   baseFixity: 'fixed', flow: 'clear', screen: 'partial',
@@ -792,6 +806,26 @@ function frameStrips(s){
     out.push([y0,y1]);
   }
   return out;
+}
+// Purlins (3D): valid positions strictly inside the roof, sorted, no duplicates
+function purlinXs(s){
+  const L=totalLength(s);
+  return [...new Set((s.purlins||[]).map(Number).filter(x=>isFinite(x) && x>1e-6 && x<L-1e-6).map(x=>+x.toFixed(6)))].sort((a,b)=>a-b);
+}
+// With purlins the roof load is carried by the longitudinal members (purlins, eave beams,
+// column-line beams) and MIDAS delivers it to the frames; without, it goes to the frames
+// by tributary width.
+function loadViaPurlins(s){ return is3D(s) && purlinXs(s).length>0; }
+// every longitudinal line across the frame and its plan tributary width (sums to L)
+function longLineLayout(s){
+  const L=totalLength(s), cols=columnXs(s), pur=new Set(purlinXs(s));
+  const xs=[...new Set([0,...cols,...pur,L].map(x=>+x.toFixed(6)))].sort((a,b)=>a-b);
+  return xs.map((x,i)=>{
+    const a=(i===0)?0:(xs[i-1]+x)/2, b=(i===xs.length-1)?L:(x+xs[i+1])/2;
+    const isCol=cols.some(c=>Math.abs(c-x)<1e-6);
+    const kind=(Math.abs(x)<1e-6)?'low eave':(Math.abs(x-L)<1e-6)?'high eave':isCol?'column line':'purlin';
+    return {x,a,b,trib:b-a,kind};
+  });
 }
 // x-positions of every column, first column at x = L_OH
 function columnXs(s){
@@ -1122,6 +1156,7 @@ function refreshSectDesc(){
   document.getElementById('beamSectDesc').innerHTML=sectDescHTML(state.beamSect);
   document.getElementById('colSectDesc').innerHTML=sectDescHTML(state.colSect);
   const ld=document.getElementById('longSectDesc'); if(ld) ld.innerHTML=sectDescHTML(state.longSect);
+  const pd=document.getElementById('purlinSectDesc'); if(pd) pd.innerHTML=sectDescHTML(state.purlinSect);
 }
 populateSectDropdown('beamSect'); populateSectDropdown('colSect');
 document.getElementById('beamSect').value=state.beamSect;
@@ -1131,6 +1166,43 @@ document.getElementById('colSect').addEventListener('change',e=>{state.colSect=e
 populateSectDropdown('longSect');
 document.getElementById('longSect').value=state.longSect;
 document.getElementById('longSect').addEventListener('change',e=>{state.longSect=e.target.value;refreshSectDesc();recompute();});
+populateSectDropdown('purlinSect');
+document.getElementById('purlinSect').value=state.purlinSect;
+document.getElementById('purlinSect').addEventListener('change',e=>{state.purlinSect=e.target.value;refreshSectDesc();recompute();});
+// ---- purlin position table ----
+function buildPurlinTable(){
+  if(!Array.isArray(state.purlins)) state.purlins=[];
+  const L=totalLength(state), wrap=document.getElementById('purlinTable'); if(!wrap) return;
+  if(!state.purlins.length){ wrap.innerHTML='<div class="field-desc">No purlins. Roof loads go to the frames by tributary width.</div>'; return; }
+  wrap.innerHTML=state.purlins.map((x,i)=>{
+    const v=+x, bad=!(v>0 && v<L);
+    return `<div class="bay-row" style="grid-template-columns:70px 1fr 26px 22px"><label>Purlin ${i+1}</label>`+
+      `<input type="number" step="any" data-purl="${i}" value="${x}"${bad?' style="border-color:var(--rust)" title="Outside the roof (0 to '+f(L,2)+' ft); ignored"':''}>`+
+      `<span class="u">ft</span><button class="btn" type="button" data-purldel="${i}" title="Remove" style="padding:0 6px">×</button></div>`;
+  }).join('');
+}
+document.getElementById('purlinTable').addEventListener('input',e=>{
+  const inp=e.target.closest('input[data-purl]'); if(!inp) return;
+  const v=parseFloat(inp.value); if(!isNaN(v)){ state.purlins[+inp.dataset.purl]=v; recomputeDebounced(); }
+  // flag an out-of-roof position in place (rebuilding here would swallow a click on ×)
+  const L=totalLength(state), bad=!(v>0 && v<L);
+  inp.style.borderColor=bad?'var(--rust)':''; inp.title=bad?`Outside the roof (0 to ${f(L,2)} ft); ignored`:'';
+});
+document.getElementById('purlinTable').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-purldel]'); if(!b) return;
+  state.purlins.splice(+b.dataset.purldel,1); buildPurlinTable(); recompute();
+});
+document.getElementById('purlinAddBtn').addEventListener('click',()=>{
+  // new purlin at the middle of the widest gap between existing lines
+  const L=totalLength(state), xs=[0,...purlinXs(state),L];
+  let best=0; for(let i=1;i<xs.length;i++) if(xs[i]-xs[i-1]>xs[best+1]-xs[best]) best=i-1;
+  state.purlins.push(+((xs[best]+xs[best+1])/2).toFixed(3)); buildPurlinTable(); recompute();
+});
+document.getElementById('purlinFillBtn').addEventListener('click',()=>{
+  const n=Math.max(1,Math.min(40,parseInt(document.getElementById('purlinFillN').value)||1)), L=totalLength(state);
+  state.purlins=Array.from({length:n},(_,i)=>+(L*(i+1)/(n+1)).toFixed(3)); buildPurlinTable(); recompute();
+});
+document.getElementById('purlinClearBtn').addEventListener('click',()=>{ state.purlins=[]; buildPurlinTable(); recompute(); });
 refreshSectDesc();
 
 // ---- 3D structure inputs ----
@@ -1181,7 +1253,9 @@ function apply3DVis(){
   segFix.querySelectorAll('button[data-v=pinned]').forEach(b=>{ b.disabled=on; b.title=on?'3D model: columns resist wind along the length as cantilevers, so bases are fixed':''; });
   document.getElementById('nFrameBayInput').value=nFrameBays(state);
   buildFrameBayTable();
+  buildPurlinTable();
   document.getElementById('longSect').value=state.longSect;
+  document.getElementById('purlinSect').value=state.purlinSect;
   sync3DTrib();
 }
 
@@ -1566,7 +1640,7 @@ function computeModel(s){
   // last result keyed on a signature of the inputs that affect geometry/loads.
   const key=JSON.stringify([s.L_OH,s.R_OH,s.slope,s.H_col,s.El_base,s.colBases,s.B_trib,s.nCol,s.baySpacings,
     s.DL,s.SL,s.q_h,s.G,s.flow,s.d_roof,s.p_lat,s.p_col,s.colWindMode,s.fasciaWindMode,s.fasciaCfMethod,s.screen,s.p_screen,s.scr_bot,s.scr_top,s.scrPctOpen,s.screenWindMode,s.colSect,
-    s.modelDim,s.nFrameBays,s.frameSpacings,s.OH_front,s.OH_back,s.longSect]);
+    s.modelDim,s.nFrameBays,s.frameSpacings,s.OH_front,s.OH_back,s.longSect,s.purlins,s.purlinSect]);
   if(_cmCache.key===key) return _cmCache.val;
   const val=_computeModel(s);
   _cmCache={key,val};
@@ -2033,7 +2107,7 @@ function buildMesh3D(s){
     }
   }
   const colX=g.colX, ys=frameYs(s), L3=length3D(s);
-  let beamStations=[0, g.C1x, g.C3x, g.C2x, g.L, ...colX];
+  let beamStations=[0, g.C1x, g.C3x, g.C2x, g.L, ...colX, ...purlinXs(s)];
   beamStations=[...new Set(beamStations.map(x=>+x.toFixed(6)))].filter(x=>x>=-1e-6&&x<=g.L+1e-6).sort((a,b)=>a-b);
   const _scr=m.loads||{};
   const screenOn=(s.screen!=='none') && ((_scr.screenH||0)>1e-6);
@@ -2056,14 +2130,17 @@ function buildMesh3D(s){
       Lbase:cols[0].base, Ltop:cols[0].top, Rbase:cols[cols.length-1].base, Rtop:cols[cols.length-1].top};
     return {j,y,keyNodes};
   });
-  // longitudinal lines: low edge, every column line, high edge (deduped if a column sits at a tip)
-  const lineXs=[...new Set([0,...colX,g.L].map(x=>+x.toFixed(6)))].sort((a,b)=>a-b);
-  const yStations=[...new Set([0,...ys,L3].map(y=>+y.toFixed(6)))].sort((a,b)=>a-b);
-  const longLines=lineXs.map((x,li)=>{
-    const z=g.yAt(x);
-    for(let k=0;k<yStations.length-1;k++) meshMember([x,yStations[k],z],[x,yStations[k+1],z],3,'long'+li,null);
-    return {li,x,z,
-      kind:(Math.abs(x)<1e-6)?'low edge':(Math.abs(x-g.L)<1e-6)?'high edge':'column line',
+  // longitudinal lines: low eave, every column line, every purlin, high eave. Purlins use
+  // section 4. With purlins carrying the roof load, nodes are also forced at the
+  // Fig. 27.3-7 zone boundaries (h and 2h from each end) so no element straddles a zone.
+  const layout=longLineLayout(s);
+  let yStations=[0,...ys,L3];
+  if(loadViaPurlins(s)){ const h=roofMeanHeight(s); [h,2*h,L3-h,L3-2*h].forEach(y=>{ if(y>1e-6 && y<L3-1e-6) yStations.push(y); }); }
+  yStations=[...new Set(yStations.map(y=>+y.toFixed(6)))].sort((a,b)=>a-b);
+  const longLines=layout.map((ln,li)=>{
+    const x=ln.x, z=g.yAt(x), sec=(ln.kind==='purlin')?4:3;
+    for(let k=0;k<yStations.length-1;k++) meshMember([x,yStations[k],z],[x,yStations[k+1],z],sec,'long'+li,null);
+    return {li,x,z,kind:ln.kind,trib:ln.trib,a:ln.a,b:ln.b,sec,
       front:addNode(x,0,z), back:addNode(x,L3,z)};
   });
   return {nodes,elements,frames,longLines,geom:g,beamStations,colX,ys,L3,is3D:true};
@@ -2141,6 +2218,7 @@ function buildMCT3D(s){
   lines.push(sectLine(1, s.colSect));    // 1 = columns
   lines.push(sectLine(2, s.beamSect));   // 2 = frame roof beams
   lines.push(sectLine(3, s.longSect));   // 3 = longitudinal edge/eave beams
+  if(purlinXs(s).length) lines.push(sectLine(4, s.purlinSect));   // 4 = purlins
   lines.push('');
 
   const wcases=windCases(s), lcases=longWindCases(s), allW=wcases.concat(lcases);
@@ -2219,6 +2297,8 @@ function buildMCT3D(s){
     lines.push('');
   };
 
+  if(loadViaPurlins(s)){ emitPurlinLoads(); }
+  else {
   // DL + self weight, Snow: per-frame tributary width, over the horizontal projection
   { const rows=[]; F.forEach(fe=>beamLoadBlock(rows, fe.beam, 'GZ', -(s.DL*fe.B), true));
     emit('DL',[],rows,['*SELFWEIGHT    ; Self Weight','; X, Y, Z, GROUP','   0, 0, -1, ','']); }
@@ -2260,6 +2340,62 @@ function buildMCT3D(s){
     });
     emit(lc.name,con,rows);
   });
+  }
+
+  // ---- roof load through the longitudinal members (purlins + eave + column-line beams) ----
+  // Each line carries the roof strip [a,b] across the frame (plan width = trib). A net
+  // pressure p (normal to the sloped roof, + toward the roof) on a strip of plan width w
+  // gives, per unit length along Y: GZ = -p w and GX = +p w tan(theta) (the roof normal
+  // tilts toward -X). Gravity loads are per plan area: GZ = -q w.
+  function emitPurlinLoads(){
+    const tanT=Math.tan(g.theta);
+    const lineEls=mesh.longLines.map(ln=>mesh.elements.filter(e=>e.member==='long'+ln.li));
+    const roofRows=(rows, pOf)=>{   // pOf(line, element) -> integrated p*w (lbf/ft)
+      mesh.longLines.forEach((ln,i)=>lineEls[i].forEach(e=>{
+        const P=pOf(ln,e);
+        beamLoadBlock(rows,[e.id],'GZ',-P);
+        beamLoadBlock(rows,[e.id],'GX',P*tanT);
+      }));
+    };
+    { const rows=[]; mesh.longLines.forEach((ln,i)=>beamLoadBlock(rows, lineEls[i].map(e=>e.id), 'GZ', -(s.DL*ln.trib)));
+      emit('DL',[],rows,['*SELFWEIGHT    ; Self Weight','; X, Y, Z, GROUP','   0, 0, -1, ','']); }
+    { const rows=[]; mesh.longLines.forEach((ln,i)=>beamLoadBlock(rows, lineEls[i].map(e=>e.id), 'GZ', -(s.SL*ln.trib)));
+      emit('Snow',[],rows); }
+    // cross wind: lower half (x < L/2) carries pLower, upper half pUpper; a strip that
+    // straddles mid-span takes each part at its own pressure
+    wcases.forEach(wc=>{
+      const toHigh=(wc.gamma===180), dragSign=toHigh?1:-1, rows=[];
+      roofRows(rows,(ln)=>{
+        const lo=Math.max(0,Math.min(L/2,ln.b)-ln.a), hi=Math.max(0,ln.b-Math.max(L/2,ln.a));
+        return wc.pLower*lo + wc.pUpper*hi;
+      });
+      // fascia along the windward eave beam, as a line load along the full length
+      const eave=mesh.longLines[toHigh?0:mesh.longLines.length-1];
+      beamLoadBlock(rows, lineEls[eave.li].map(e=>e.id), 'GX', dragSign*s.d_roof*s.p_lat);
+      F.forEach(fe=>{
+        beamLoadBlock(rows, fe.drag, 'GX', dragSign*wColWind);
+        if(fe.screen.length) beamLoadBlock(rows, fe.screen, 'GX', dragSign*s.p_screen*fe.B);
+      });
+      emit(wc.name,[],rows);
+    });
+    // longitudinal wind: Fig. 27.3-7 C_N at each element's distance from the windward edge
+    // (zone boundaries are mesh nodes, so every element lies within one zone)
+    const lx=mesh.longLines.map(l=>l.trib);
+    lcases.forEach(lc=>{
+      const con=[], rows=[];
+      roofRows(rows,(ln,e)=>{
+        const d=(lc.gamma===90)?e.ym:mesh.L3-e.ym;
+        const z=lc.zones.find(z=>d>=z.d0-1e-9 && d<=z.d1+1e-9)||lc.zones[lc.zones.length-1];
+        return lc.qhG*z.cn*ln.trib;
+      });
+      F.forEach(fe=>beamLoadBlock(rows, fe.cols, 'GY', lc.ySign*wColWind));
+      mesh.longLines.forEach((ln,i)=>{
+        const fy=lc.ySign*s.d_roof*pEnd*lx[i];
+        if(Math.abs(fy)>=5e-4) con.push(`   ${lc.gamma===90?ln.front:ln.back}, 0, ${num(fy,3)}, 0, 0, 0, 0, ,`);
+      });
+      emit(lc.name,con,rows);
+    });
+  }
 
   lines.push('*LOADCOMB    ; Combinations');
   lines.push('; NAME, KIND, ACTIVE, bES, iTYPE, DESC');
@@ -2274,7 +2410,7 @@ function buildMCT3D(s){
   for(let i=0;i<cbsTerms.length;i+=4) lines.push('        '+cbsTerms.slice(i,i+4).join(', '));
   lines.push('');
   lines.push('*ENDDATA');
-  return {text:lines.join('\n'), mesh, wcases:allW, pEnd, lineTrib};
+  return {text:lines.join('\n'), mesh, wcases:allW, pEnd, lineTrib:mesh.longLines.map(l=>l.trib)};
 }
 
 // ASCE 7-16 §2.3.1 LRFD strength combinations for this canopy (L, Lr = 0).
@@ -2855,6 +2991,11 @@ async function buildCalcWorkbook(s, A, meta, H){
     row('Canopy length','L_Y',length3D(s),FT,'out');
     ys3.forEach((y,j)=>row(`Frame ${j+1} tributary width (at y = ${f(y,2)} ft)`,`B_${j+1}`,tr3[j],FT,'out'));
     row('Edge / eave beam section','\u2014',s.longSect,'@','in');
+    if(loadViaPurlins(s)){
+      row('Purlin section','\u2014',s.purlinSect,'@','in');
+      sub('Longitudinal lines carrying the roof (purlins, eaves, column lines)');
+      longLineLayout(s).forEach(l=>row(`${l.kind} at x = ${f(l.x,2)} ft, roof width`,'w',l.trib,FT,'out'));
+    }
     note('Each frame takes half of each adjacent bay, and the end frames also take the front or back overhang. The Tributary width B above is the governing (largest) frame value; the MIDAS model applies each frame\u2019s own width. Column bases are fixed, and the columns resist wind along the length as cantilevers.');
     r++;
   }
@@ -3364,7 +3505,14 @@ async function buildReport(){
   <table class="rpt"><thead><tr><th>Frame</th><th>y (ft)</th><th>Tributary width B<sub>j</sub> (ft)</th><th>w<sub>D</sub> (lbf/ft)</th><th>w<sub>S</sub> (lbf/ft)</th></tr></thead><tbody>
   ${ys.map((y,j)=>`<tr><td>F${j+1}</td><td>${f(y,2)}</td><td>${f(tribs[j],2)}</td><td>${f(s.DL*tribs[j],0)}</td><td>${f(s.SL*tribs[j],0)}</td></tr>`).join('')}
   </tbody></table>
-  <p class="note-sm">\\(\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)}\\) ft \\(= L_Y\\), so the whole roof area is carried. The single-frame derivations in this report use the governing (largest) tributary width B = ${f(s.B_trib,2)} ft. The MCT applies each frame\u2019s own B<sub>j</sub>.</p>`;
+  <p class="note-sm">\\(\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)}\\) ft \\(= L_Y\\), so the whole roof area is carried. The single-frame derivations in this report use the governing (largest) tributary width B = ${f(s.B_trib,2)} ft. The MCT applies each frame\u2019s own B<sub>j</sub>.</p>`
+    + (loadViaPurlins(s) ? (()=>{ const lay=longLineLayout(s), tanT=Math.tan(g.theta); return `
+  <h3>2.2 Purlins and load path</h3>
+  <p>${purlinXs(s).length} purlins (${esc(s.purlinSect)}) run the full length on top of the frame beams, alongside the eave and column-line beams (${esc(s.longSect)}). The roof dead, snow and wind loads are applied to these longitudinal lines, each carrying the roof strip halfway to its neighbours. MIDAS then delivers the load to the frames, and the overhang strips are carried as cantilevers. Wind pressure acts normal to the roof, so a line carrying plan width w receives \\(w_Z=-p\\,w\\) and \\(w_X=+p\\,w\\tan\\theta\\) (\\(\\tan\\theta=${f(tanT,4)}\\)) per foot along the length.</p>
+  <table class="rpt"><thead><tr><th>Line</th><th>x (ft)</th><th>Roof strip (ft)</th><th>Width w (ft)</th><th>w<sub>D</sub> (lbf/ft)</th><th>w<sub>S</sub> (lbf/ft)</th></tr></thead><tbody>
+  ${lay.map(l=>`<tr><td>${l.kind}</td><td>${f(l.x,2)}</td><td>${f(l.a,2)}–${f(l.b,2)}</td><td>${f(l.trib,2)}</td><td>${f(s.DL*l.trib,0)}</td><td>${f(s.SL*l.trib,0)}</td></tr>`).join('')}
+  </tbody></table>
+  <p class="note-sm">\\(\\sum w = ${f(lay.reduce((a,l)=>a+l.trib,0),2)}\\) ft = L. Cross wind: lines in the lower half take p<sub>lower</sub>, lines in the upper half p<sub>upper</sub>, and a strip that straddles mid-span takes each part at its own pressure. The fascia acts as a line load along the windward eave beam. Wind along the length: each element takes the Fig. 27.3-7 C<sub>N</sub> of its zone.</p>`; })() : '');
     const lc0=lcases[0], fl=(s.flow==='obstr')?'obstr':'clear';
     const pEnd=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L).p:s.p_lat;
     long3DMath=`
@@ -3628,7 +3776,8 @@ async function buildReport(){
     ${fld('Nodes',mesh.nodes.length)}${fld('Elements',mesh.elements.length)}
     ${fld('Beam elements',mesh.elements.filter(e=>e.member==='beam').length)}
     ${fld('Column elements',mesh.elements.filter(e=>/^col\d/.test(e.member)).length)}
-    ${is3d?fld('Edge / eave beam elements',mesh.elements.filter(e=>/^long/.test(e.member)).length+` (${esc(s.longSect)}, section 3)`):''}
+    ${is3d?fld('Edge / eave beam elements',mesh.elements.filter(e=>e.sec===3).length+` (${esc(s.longSect)}, section 3)`):''}
+    ${is3d&&purlinXs(s).length?fld('Purlin elements',mesh.elements.filter(e=>e.sec===4).length+` (${esc(s.purlinSect)}, section 4; ${purlinXs(s).length} purlins at x = ${purlinXs(s).map(x=>f(x,2)).join(', ')} ft)`):''}
     ${is3d?fld('Frames',`${mesh.frames.length} at y = ${mesh.ys.map(y=>f(y,2)).join(', ')} ft`):''}
     ${fld('Material','A36 / USER steel')}
     ${fld('Base support',(is3d||s.baseFixity==='fixed')?'Fixed (111111)':'Pinned (111000)')}
@@ -3659,7 +3808,7 @@ async function buildReport(){
     <li>${s.snowMode==='calc'?'Snow per ASCE 7-16 Ch. 7 (balanced), including the §7.3.4 minimum check.':'Snow entered manually as a uniform surface load.'}</li>
     <li>Wind by the ASCE 7-16 §27.3 open-building monoslope free-roof method (Fig. 27.3-4): four net-pressure cases (A/B × γ=0°/180°), ${s.flow==='clear'?'clear':'obstructed'} wind flow, plus fascia, column, and ${s.screen!=='none'?'windscreen':'(no windscreen)'} lateral loads.</li>
     <li>${nCombo} LRFD strength load combinations (ASCE 7-16 §2.3.1) plus an envelope, generated as MIDAS load cases/combinations.</li>
-    ${is3d?`<li>3D structure: ${frameYs(s).length} identical frames tied by longitudinal edge and eave beams (${esc(s.longSect)}). Roof gravity and wind loads go to the frame beams by tributary width, and the end frames include the front and back overhangs. The edge and eave beams carry their own self weight and the end fascia force, and they provide continuity between frames. They are not separately loaded by the overhang roof area.</li>
+    ${is3d?`<li>3D structure: ${frameYs(s).length} identical frames tied by longitudinal edge and eave beams (${esc(s.longSect)}). ${loadViaPurlins(s)?`Roof gravity and wind loads are applied to the purlins, eave beams and column-line beams by their roof width, and MIDAS carries them into the frames; the overhangs are carried as cantilevers. Purlins are modeled at the roof-line elevation with their strong axis vertical (no roll to the roof slope), connected rigidly to the frame beams.`:`Roof gravity and wind loads go to the frame beams by tributary width, and the end frames include the front and back overhangs. The edge and eave beams carry their own self weight and the end fascia force, and they provide continuity between frames. They are not separately loaded by the overhang roof area.`}</li>
     <li>Longitudinal stability comes from the columns acting as fixed-base cantilevers (weak-axis bending for W-shapes). No bracing is modeled.</li>
     <li>Wind along the length per ASCE 7-16 Fig. 27.3-7 (C<sub>N</sub> by distance from the windward edge, cases A/B, γ = 90°/270°), averaged over each frame\u2019s roof strip.</li>`:''}
   </ul>
@@ -4224,10 +4373,12 @@ function draw3DFull(){
     if(showLabels) label3D(-1.2, y, g.yStart+0.8, `F${j+1}`, COL.ink, 11);
   });
   // longitudinal edge / eave beams (top of section flush with the frame beam top)
-  const lineXs=[...new Set([0,...g.colX,g.L].map(x=>+x.toFixed(6)))];
-  lineXs.forEach(x=>{
-    const z=g.yAt(x)+bd/2-ld_/2;
-    traces.push(box3D(x,L3/2,z, lb/2,0,0, 0,L3/2,0, 0,0,ld_/2, COL.amber, `edge/eave beam ${lp.desig}`));
+  const lineLay=longLineLayout(s), lineXs=lineLay.map(l=>l.x);
+  const pp=sectProps(s.purlinSect), pd_=pp.d/12, pb_=pp.b/12;
+  lineLay.forEach(ln=>{
+    const x=ln.x, pur=(ln.kind==='purlin');
+    const dd=pur?pd_:ld_, bw=pur?pb_:lb, z=g.yAt(x)+bd/2+(pur?dd/2:-dd/2);   // purlins sit on top of the frame beams
+    traces.push(box3D(x,L3/2,z, bw/2,0,0, 0,L3/2,0, 0,0,dd/2, pur?'#8c6bb1':COL.amber, pur?`purlin x = ${f(x,2)} ft ${pp.desig}`:`${ln.kind} beam ${lp.desig}`));
   });
   if(showSect){ label3D(mx,ys[0],mz+bd+0.6,bp.desig,COL.steel,10); label3D(g.colX[0]+cd,ys[0],g.colBase[0]+2,cp.desig,COL.moss,10); label3D(0,L3/2,g.yStart+0.9,lp.desig,'#8a5e10',10); }
   // roof surface + windscreen (translucent)
@@ -4275,7 +4426,9 @@ function draw3DFull(){
     const press=threedCase==='DL'?s.DL:s.SL, col=threedCase==='DL'?COL.ink:COL.steel;
     drawDistributed(roofPts(0,g.L,0,L3,4,Math.max(3,ys.length*2)),{x:0,y:0,z:-1},press,Math.max(press,1),col);
     if(showLabels) label3D(g.L/2,L3/2,Math.max(g.yStart,g.yEnd)+modelScale*0.2,`${threedCase==='DL'?'D':'S'} = ${f(press,1)} psf`,col,12);
-    loadNote=`${threedCase==='DL'?'Dead':'Snow'} = ${f(press,1)} psf over the whole roof; each frame takes its own tributary width (${tribs.map(b=>f(b,1)).join(', ')} ft).`;
+    loadNote=`${threedCase==='DL'?'Dead':'Snow'} = ${f(press,1)} psf over the whole roof; `+(loadViaPurlins(s)
+      ? `carried by the purlins, eave and column-line beams (roof widths ${longLineLayout(s).map(l=>f(l.trib,2)).join(', ')} ft) into the frames.`
+      : `each frame takes its own tributary width (${tribs.map(b=>f(b,1)).join(', ')} ft).`);
   } else {
     const wc=A.loads.wcases.find(w=>w.name===threedCase), lc=(A.loads.lcases||[]).find(w=>w.name===threedCase);
     if(wc){
@@ -4326,7 +4479,7 @@ function draw3DFull(){
   else sceneObj.camera=cams[threedView]||cams.iso;
   Plotly.react('plot3d',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,scene:sceneObj},{responsive:true,displaylogo:false});
   const note=document.getElementById('threedNote');
-  if(note) note.innerHTML=`<b>3D structure · ${ys.length} frames × ${nCols(s)} column${nCols(s)>1?'s':''}.</b> Length ${f(L3,1)} ft. Frame beams ${bp.desig}, columns ${cp.desig}, edge/eave beams ${lp.desig}; fixed bases.`+(loadNote?` <span style="color:var(--steel)">${loadNote}</span>`:' Drag to orbit.')+(reactNote?`<span style="color:var(--moss)">${reactNote}</span>`:'');
+  if(note) note.innerHTML=`<b>3D structure · ${ys.length} frames × ${nCols(s)} column${nCols(s)>1?'s':''}.</b> Length ${f(L3,1)} ft. Frame beams ${bp.desig}, columns ${cp.desig}, edge/eave beams ${lp.desig}${purlinXs(s).length?`, ${purlinXs(s).length} purlins ${pp.desig} (roof load carried through the purlins and eave beams)`:''}; fixed bases.`+(loadNote?` <span style="color:var(--steel)">${loadNote}</span>`:' Drag to orbit.')+(reactNote?`<span style="color:var(--moss)">${reactNote}</span>`:'');
   stopWindAnim();
   const animOn=tog('threedWindAnim',true);
   const wcSel=A.loads.wcases.concat(A.loads.lcases||[]).find(w=>w.name===threedCase);
@@ -4496,8 +4649,20 @@ function frameLayoutItems(s){
     {label:'Frame positions (from the front edge)', tex: ys.map((y,j)=>`y_{${j+1}}=${f(y,2)}`).join(',\\ ')+`\\ \\text{ft}`},
     {label:'Frame tributary widths', note:'half of each adjacent bay; the end frames also take the front / back overhang',
      tex: tribs.map((b,j)=>`B_{${j+1}}=${f(b,2)}`).join(',\\ ')+`\\ \\text{ft}\\qquad \\textstyle\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)} = L_Y`},
-    {label:'Governing (typical) frame used in the 2D derivations', tex:`B = \\max B_j = ${f(Math.max(...tribs),2)}\\ \\text{ft}`}
+    {label:'Governing (typical) frame used in the 2D derivations', tex:`B = \\max B_j = ${f(Math.max(...tribs),2)}\\ \\text{ft}`},
+    ...longLineItems(s)
   ];
+}
+// longitudinal lines and (with purlins) their roof tributary widths across the frame
+function longLineItems(s){
+  const lay=longLineLayout(s), via=loadViaPurlins(s);
+  const items=[{label:'Longitudinal lines across the frame', note: via
+      ? 'purlins carry the roof: each line takes the roof strip halfway to its neighbours (plan width w)'
+      : 'eave and column-line beams tie the frames; with no purlins the roof load goes to the frames by tributary width',
+    tex: lay.map(l=>`\\text{${l.kind==='purlin'?'P':l.kind==='column line'?'C':'E'}}\\,x=${f(l.x,2)}${via?`\\,(w=${f(l.trib,2)})`:''}`).join(',\\ ')+`\\ \\text{ft}`}];
+  if(via) items.push({label:'Roof line loads on each longitudinal line', note:'w = width carried; D and S per plan area; wind p acts normal to the roof, so each line gets GZ = -p w and GX = +p w tan θ',
+    tex: lay.map(l=>`w_{D}=${f(s.DL*l.trib,0)},\\ w_{S}=${f(s.SL*l.trib,0)}`).join(';\\ ')+`\\ \\text{lbf/ft}`});
+  return items;
 }
 
 // ---- Tab 1: meshed model ----
@@ -4526,7 +4691,7 @@ function drawMeshPlot(mesh){
 // 3D: isometric line drawing of the whole meshed model (nodes hover with id and xyz)
 function drawMeshPlot3D(mesh){
   const traces=[];
-  const bySec={1:{c:COL.moss,w:4,n:'columns'},2:{c:COL.steel,w:3,n:'frame beams'},3:{c:COL.amber,w:3,n:'edge / eave beams'}};
+  const bySec={1:{c:COL.moss,w:4,n:'columns'},2:{c:COL.steel,w:3,n:'frame beams'},3:{c:COL.amber,w:3,n:'edge / eave beams'},4:{c:'#8c6bb1',w:2,n:'purlins'}};
   Object.keys(bySec).forEach(k=>{
     const xs=[],ys=[],zs=[];
     mesh.elements.filter(e=>e.sec==k).forEach(e=>{const a=mesh.nodes[e.n1-1],b=mesh.nodes[e.n2-1];
@@ -4617,11 +4782,17 @@ function renderGravDerived(s,g,ld){
       : `W_{sw} = \\gamma\\,(A_{beam}L_{beam} + ${nCols(s)}\\,A_{col}H) = ${s.density_pcf}\\,(${f(Abeam,4)}\\cdot${f(Lbeam,2)} + ${nCols(s)}\\cdot${f(Acol,4)}\\cdot${f(s.H_col,2)}) = ${f(Wsw,2)}\\ \\text{kip}`});
   if(is3D(s)){
     const tribs=frameTribs(s);
+    if(loadViaPurlins(s)){
+      items.push({h:'3D structure — load through the purlins'});
+      items.push(...longLineItems(s));
+      items.push({label:'Purlin and edge/eave beam self weight', tex:`${sectProps(s.purlinSect).desig}:\\ ${f(consistentPlf(s.purlinSect,s.density_pcf),2)},\\quad ${sectProps(s.longSect).desig}:\\ ${f(consistentPlf(s.longSect,s.density_pcf),2)}\\ \\text{plf}`});
+    } else {
     items.push({h:'3D structure — load on each frame'});
     items.push({label:'Dead and snow line loads by frame', note:'each frame\u2019s own tributary width; this is what the MCT applies',
       tex: tribs.map((b,j)=>`w_{D,${j+1}}=${f(s.DL*b,0)},\\ w_{S,${j+1}}=${f(s.SL*b,0)}`).join(';\\ ')+`\\ \\text{lbf/ft}`});
     items.push({label:'Edge / eave beams', note:'carry their own self weight only (roof loads go to the frames by tributary width)',
       tex:`${sectProps(s.longSect).desig}:\\ ${f(consistentPlf(s.longSect,s.density_pcf),2)}\\ \\text{plf}`});
+    }
   }
   items.push({h:'Shared'});
   items.push({label:'Tributary width and span used above',
@@ -4789,7 +4960,9 @@ function longWindItems(s,g,ld){
   items.push({label:`Net pressure coefficients, ASCE 7-16 Fig. 27.3-7 (free roofs, θ ≤ 45°, ${fl==='clear'?'clear':'obstructed'} flow)`,
     note:'C_N by horizontal distance from the windward edge; Load Cases A and B',
     tex:`\\begin{array}{lcc} \\text{distance} & A & B\\\\ \\le h & ${f(CN90_ZONES[0][fl].A,1)} & ${f(CN90_ZONES[0][fl].B,1)}\\\\ h\\text{–}2h & ${f(CN90_ZONES[1][fl].A,1)} & ${f(CN90_ZONES[1][fl].B,1)}\\\\ >2h & ${f(CN90_ZONES[2][fl].A,1)} & ${f(CN90_ZONES[2][fl].B,1)} \\end{array}`});
-  items.push({label:'Roof pressure on each frame', note:'C_N averaged over the roof strip the frame carries (length-weighted across the zones), then p = q_h G C_N and w = p B_j along the frame beam, normal to the roof',
+  if(loadViaPurlins(s)) items.push({label:'Applied through the purlins', note:'each purlin / eave / column-line element takes the C_N of the zone it lies in (zone boundaries at h and 2h are mesh nodes), times its roof width w. The frame averages below are for reference only.',
+    tex:`w = q_h G\\,C_N\\,w_{line}`});
+  items.push({label:loadViaPurlins(s)?'Equivalent pressure on each frame strip (reference)':'Roof pressure on each frame', note:'C_N averaged over the roof strip the frame carries (length-weighted across the zones), then p = q_h G C_N and w = p B_j along the frame beam, normal to the roof',
     tex:`p_j = q_h G\\,\\bar C_{N,j} = ${f(qhG,2)}\\,\\bar C_{N,j}`});
   ld.lcases.forEach(lc=>{
     items.push({label:lc.name, note:`wind enters at the ${lc.gamma===90?'front (y = 0)':'back (y = '+f(L3,1)+' ft)'} edge`,
@@ -5280,6 +5453,11 @@ function validateInputs(){
     if(frameSpans(s).some(b=>!(b>0))) msgs.push('Every frame spacing must be greater than zero.');
     if((+s.OH_front||0)<0||(+s.OH_back||0)<0) msgs.push('Front and back overhangs cannot be negative.');
     if(!sectProps(s.longSect).found) msgs.push(`Edge/eave beam section "${s.longSect}" not in the AISC database.`);
+    if(purlinXs(s).length && !sectProps(s.purlinSect).found) msgs.push(`Purlin section "${s.purlinSect}" not in the AISC database.`);
+    const nBadP=(s.purlins||[]).length-purlinXs(s).length;
+    if(nBadP>0) msgs.push(`${nBadP} purlin position${nBadP>1?'s are':' is'} outside the roof (0 to ${f(totalLength(s),2)} ft) or duplicated and ignored.`);
+    const onCol=purlinXs(s).filter(x=>columnXs(s).some(c=>Math.abs(c-x)<1e-6));
+    if(onCol.length) msgs.push(`Purlin${onCol.length>1?'s':''} at x = ${onCol.map(x=>f(x,2)).join(', ')} ft sit${onCol.length>1?'':'s'} on a column line and merge${onCol.length>1?'':'s'} with that line\u2019s edge/eave beam section.`);
     // ASCE 7-16 Figs. 27.3-4 to 27.3-7 are stated for 0.25 <= h/L <= 1.0, L measured along the wind
     const h=roofMeanHeight(s), L3=length3D(s);
     if(L3>0 && (h/L3<0.25 || h/L3>1.0)) msgs.push(`For wind along the length, h/L = ${f(h,1)}/${f(L3,1)} = ${(h/L3).toFixed(2)} is outside 0.25–1.0, the range stated for ASCE 7-16 Fig. 27.3-7. Confirm the free-roof C_N values apply to this canopy.`);
@@ -5373,7 +5551,7 @@ document.getElementById('downloadReportBtn').onclick=downloadReport;
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','longSect','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','longSect','purlins','purlinSect','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
@@ -5422,6 +5600,7 @@ function applyProject(obj){
   STATE_KEYS.forEach(k=>{if(k in obj)state[k]=obj[k];});
   if(!('colBases' in obj)) state.colBases=[];   // older projects: every base at the datum
   if(!('modelDim' in obj)) state.modelDim='2d'; // older projects are 2D frames
+  if(!('purlins' in obj)) state.purlins=[];     // older projects have no purlins
   refreshAllInputs(); updateCfgTag(); recompute();
   // restore pasted MIDAS results (if any) and re-derive reactions/comparison
   const pasteEl=document.getElementById('resPaste');
