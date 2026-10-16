@@ -586,8 +586,16 @@
         </span>
       </div>
       <div class="panel-body">
-        <div class="hint" style="margin-bottom:6px">Every member is coloured by the largest magnitude of the chosen result at either end of each element, for the chosen load (Envelope = the governing value across all strength combinations). Hover a member for its frame, element and value. Click a row in the frame table to show that frame in the diagrams below.</div>
-        <div id="plotWhole" class="plot" style="height:520px"></div>
+        <div class="hint" style="margin-bottom:6px">Coloured members: each member is coloured by the largest magnitude of the chosen result at either end of each element. Diagrams: the result is drawn along every member as in MIDAS (strong-axis results offset in the member's local z direction, weak-axis results in local y, same sign convention as the frame diagrams below); the envelope shows the max and min curves. Envelope = the governing value across all strength combinations. Hover a member or a diagram for the frame, element, end, value and governing combination. Click a row in the frame table to show that frame in the diagrams below.</div>
+        <div class="toolbar" style="margin:0 0 6px;gap:10px;flex-wrap:wrap;align-items:center">
+          <span class="ctl-label">Display</span>
+          <span class="seg" id="segWsMode" style="margin:0;width:230px"><button data-v="colour" class="on">Coloured members</button><button data-v="diagram">Diagrams</button></span>
+          <span id="wsDiagCtl" style="display:none;align-items:center;gap:8px">
+            <span class="ctl-label">Scale</span><input type="range" id="wsScale" min="0.2" max="3" step="0.1" value="1" style="width:110px">
+            <label class="t3d"><input type="checkbox" id="wsVals" checked> <span class="ctl-label">Peak values</span></label>
+          </span>
+        </div>
+        <div id="plotWhole" class="plot" style="height:560px"></div>
         <div class="subhead-lbl" style="margin-top:12px">Frames — peak values <span class="sm" id="wsLoadLbl"></span></div>
         <div id="wsFrameTable"></div>
         <div class="subhead-lbl" style="margin-top:12px">Eave beams &amp; purlins — peak values</div>
@@ -5835,7 +5843,7 @@ function drawFBDInto(plotId,data){
 }
 
 // ---- 3D: whole-structure results (every frame, eave beam and purlin) ----
-let wsLoad='__env__';
+let wsLoad='__env__', wsMode='colour';
 const WS_QTY={momentY:'Moment-y',shearZ:'Shear-z',axial:'Axial',momentZ:'Moment-z',shearY:'Shear-y',torsion:'Torsion'};
 const wsIsMom=q=>q==='momentY'||q==='momentZ'||q==='torsion';
 // loads offered: the envelope (as one entry) plus every case and combination
@@ -5843,13 +5851,14 @@ function wsLoads(){ return [...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean
 // peak |field| per element over both ends for load ld. '__env__' reads the envelope rows,
 // or every load when the results carry no envelope.
 function wsPeaks(ld,q){
-  let set;
-  if(ld==='__env__'){ const env=envelopeLoads(); set=new Set(env.length?env:RESULT_ROWS.map(r=>r.load)); }
-  else set=new Set([ld]);
-  const pk=new Map();
+  const set=wsLoadSet(ld), pk=new Map();
   RESULT_ROWS.forEach(r=>{ if(!set.has(r.load)) return; const v=Math.abs(r[q]||0), p=pk.get(r.elem);
     if(!p||v>p.v) pk.set(r.elem,{v,load:r.load,elem:r.elem,q}); });
   return pk;
+}
+function wsLoadSet(ld){
+  if(ld!=='__env__') return new Set([ld]);
+  const env=envelopeLoads(); return new Set(env.length?env:RESULT_ROWS.map(r=>r.load));
 }
 // name the combination behind an envelope value (the case / combination row that matches it)
 function wsGovName(p){
@@ -5886,7 +5895,9 @@ function renderWhole(){
   sel.innerHTML=`<option value="__env__">${hasEnv?'Envelope (governing)':'All loads (no envelope pasted)'}</option>`+loads.map(l=>`<option value="${l.replace(/"/g,'&quot;')}">${l}</option>`).join('');
   sel.value=wsLoad;
   const defOK=!!wsDisp(wsLoad);
-  document.getElementById('wsDefWrap').style.display=(RES_SRC==='app')?'':'none';
+  document.getElementById('wsDefWrap').style.display=(RES_SRC==='app'&&wsMode==='colour')?'':'none';
+  document.getElementById('wsDiagCtl').style.display=wsMode==='diagram'?'inline-flex':'none';
+  document.getElementById('segWsMode').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===wsMode));
   const defCb=document.getElementById('wsDef'); defCb.disabled=!defOK;
   document.getElementById('wsDefWrap').title=defOK?'':'Pick a load case or combination (the envelope has no single deflected shape)';
   document.getElementById('wsLoadLbl').textContent=`· ${wsLoad==='__env__'?(hasEnv?'envelope':'all loads'):wsLoad} · ${resSrcName()}`;
@@ -5929,7 +5940,8 @@ function wsTables(mesh){
 function drawWhole(mesh){
   if(typeof Plotly==='undefined') return;
   const q=document.getElementById('wsQty').value, pk=wsPeaks(wsLoad,q), mom=wsIsMom(q);
-  const U=document.getElementById('wsDef').checked?wsDisp(wsLoad):null;
+  const diag=wsMode==='diagram';
+  const U=(!diag&&document.getElementById('wsDef').checked)?wsDisp(wsLoad):null;
   const xr=mesh.geom.L+2, yr=mesh.L3+2, zs0=mesh.nodes.map(n=>n.z), zr=Math.max(...zs0)-Math.min(...zs0)+2, mr=Math.max(xr,yr,zr);
   let sc=0, umax=0;
   if(U){ mesh.nodes.forEach(n=>{ const i=APP_RES.nodeIdx.get(n.id); if(i!=null) umax=Math.max(umax,Math.hypot(U[6*i],U[6*i+1],U[6*i+2])); }); sc=umax>0?0.06*mr/umax:0; }
@@ -5942,6 +5954,8 @@ function drawWhole(mesh){
     traces.push({type:'scatter3d',mode:'lines',x:xs,y:ys,z:zs,line:{color:'#b8b2a7',width:1.5,dash:'dot'},name:'undeformed',hoverinfo:'skip',showlegend:false}); }
   const xs=[],ys=[],zs=[],cc=[], mx=[],my=[],mz=[],mc=[],mt=[];
   const memName=e=>e.frame!=null?(e.member==='beam'?`Frame ${e.frame+1} beam`:`Frame ${e.frame+1} column ${+e.member.slice(3)+1}`):wsLongName(mesh.longLines[+e.member.slice(4)],mesh);
+  if(diag) traces.push(...wsDiagramTraces(mesh,q,mr,memName));
+  else {
   mesh.elements.forEach(e=>{ const a=P(mesh.nodes[e.n1-1]), b=P(mesh.nodes[e.n2-1]), p=pk.get(e.id), v=p?conv(p.v):0;
     xs.push(a[0],b[0],null); ys.push(a[1],b[1],null); zs.push(a[2],b[2],null); cc.push(v,v,v);
     mx.push((a[0]+b[0])/2); my.push((a[1]+b[1])/2); mz.push((a[2]+b[2])/2); mc.push(v);
@@ -5951,6 +5965,7 @@ function drawWhole(mesh){
     line:{color:cc,colorscale:cs,cmin:0,cmax,width:6,showscale:true,colorbar:{title:{text:`|${WS_QTY[q]}|<br>(${unit})`,font:{size:10}},thickness:12,len:0.6,tickfont:{size:9}}}});
   traces.push({type:'scatter3d',mode:'markers',x:mx,y:my,z:mz,text:mt,hoverinfo:'text',showlegend:false,
     marker:{size:2.5,color:mc,colorscale:cs,cmin:0,cmax,opacity:0.9}});
+  }
   // supports and frame labels
   const bases=[]; mesh.frames.forEach(F=>F.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
   traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),marker:{size:4,color:COL.ink,symbol:'square'},hoverinfo:'skip',showlegend:false});
@@ -5959,8 +5974,59 @@ function drawWhole(mesh){
     text:mesh.frames.map(F=>`F${F.j+1}`),textfont:{size:11,color:COL.ink},hoverinfo:'skip',showlegend:false});
   const ann=U?[{text:`Deformed shape × ${f(sc,0)} (max ${f(umax*12,3)} in)`,x:0.01,y:0.99,xref:'paper',yref:'paper',showarrow:false,xanchor:'left',yanchor:'top',font:{size:11,color:COL.ink}}]:[];
   Plotly.react('plotWhole',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,uirevision:'ws',annotations:ann,
-    scene:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr},camera:{eye:{x:0.95,y:-1.05,z:0.55}},
-      xaxis:{title:'X (ft)'},yaxis:{title:'Y (ft)'},zaxis:{title:'Z (ft)'}}},PLOT_CFG);
+    scene:Object.assign(diag?{aspectmode:'data'}:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr}},{camera:{eye:diag?{x:1.45,y:-1.6,z:0.85}:{x:0.95,y:-1.05,z:0.55}},
+      xaxis:{title:'X (ft)'},yaxis:{title:'Y (ft)'},zaxis:{title:'Z (ft)'}})},PLOT_CFG);
+}
+// MIDAS-style force diagrams on every member: ordinates offset along the member's local z
+// (strong-axis results, axial, torsion) or local y (weak-axis results), positive toward
+// +local axis as in the 2D frame diagrams. Envelope: max and min curves.
+function wsDiagramTraces(mesh,q,mr,memName){
+  const set=wsLoadSet(wsLoad), mom=wsIsMom(q), weak=(q==='momentZ'||q==='shearY');
+  const conv=v=>mom?uMomVal(v):uForceVal(v), unit=mom?uMomLbl():uForceLbl(), fmt=v=>mom?uMom(v):uForce(v);
+  const ev=new Map();
+  RESULT_ROWS.forEach(r=>{ if(!set.has(r.load)) return; const k=r.elem+'|'+r.end, v=r[q]||0, o=ev.get(k);
+    if(!o) ev.set(k,{max:{v,r},min:{v,r}}); else { if(v>o.max.v) o.max={v,r}; if(v<o.min.v) o.min={v,r}; } });
+  let vmax=0; ev.forEach(o=>{ vmax=Math.max(vmax,Math.abs(o.max.v),Math.abs(o.min.v)); });
+  const sc=+(document.getElementById('wsScale').value||1), k=vmax>0?0.09*mr*sc/vmax:0;
+  const env=wsLoad==='__env__', series=env?['max','min']:['max'];
+  const gov=(p)=>{ if(!/envelope/i.test(p.r.load)) return p.r.load;
+    const m=RESULT_ROWS.find(r=>r.elem===p.r.elem&&r.end===p.r.end&&!/envelope/i.test(r.load)&&Math.abs((r[q]||0)-p.v)<=1e-6*Math.max(1,Math.abs(p.v))); return m?m.load:p.r.load; };
+  const cmax=Math.max(conv(vmax),1e-9), cs=[[0,'#1f5f8b'],[0.5,'#eeeae2'],[1,'#b3502d']];
+  const traces=[];
+  // undeformed members
+  { const xs=[],ys=[],zs=[]; mesh.elements.forEach(e=>{ const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1]; xs.push(a.x,b.x,null); ys.push(a.y,b.y,null); zs.push(a.z,b.z,null); });
+    traces.push({type:'scatter3d',mode:'lines',x:xs,y:ys,z:zs,line:{color:'#6a665d',width:3},hoverinfo:'skip',showlegend:false}); }
+  const labels={x:[],y:[],z:[],t:[]};
+  series.forEach((sk,si)=>{
+    const vx=[],vy=[],vz=[],vi=[],I=[],J=[],K=[], lx=[],ly=[],lz=[],lc=[], hx=[],hy=[],hz=[],hc=[],ht=[];
+    const peak=new Map();   // member group -> {v,pos,txt}
+    mesh.elements.forEach(e=>{
+      const oI=ev.get(e.id+'|I'), oJ=ev.get(e.id+'|J'); if(!oI||!oJ) return;
+      const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1], A=[a.x,a.y,a.z], B=[b.x,b.y,b.z];
+      const ax=anaAxes(A,B).R, d=weak?ax[1]:ax[2];
+      const pI=oI[sk], pJ=oJ[sk], dI=A.map((c,i)=>c+k*pI.v*d[i]), dJ=B.map((c,i)=>c+k*pJ.v*d[i]);
+      const n0=vx.length; [A,B,dJ,dI].forEach(p=>{ vx.push(p[0]); vy.push(p[1]); vz.push(p[2]); });
+      vi.push(conv(pI.v),conv(pJ.v),conv(pJ.v),conv(pI.v)); I.push(n0,n0); J.push(n0+1,n0+2); K.push(n0+2,n0+3);
+      [A,dI,dJ,B].forEach((p,i)=>{ lx.push(p[0]); ly.push(p[1]); lz.push(p[2]); lc.push(conv(i<2?pI.v:pJ.v)); }); lx.push(null); ly.push(null); lz.push(null); lc.push(0);
+      const nm=memName(e);
+      [[dI,pI,'I',e.n1],[dJ,pJ,'J',e.n2]].forEach(([p,o,end,nd])=>{
+        hx.push(p[0]); hy.push(p[1]); hz.push(p[2]); hc.push(conv(o.v));
+        ht.push(`${nm} · elem ${e.id} · ${end}-end (node ${nd})<br><b>${WS_QTY[q]} = ${fmt(o.v)} ${unit}</b><br>${env?(sk==='max'?'max: ':'min: '):''}${gov(o)}`);
+        const g=peak.get(nm); if(!g||Math.abs(o.v)>Math.abs(g.v)) peak.set(nm,{v:o.v,p});
+      });
+    });
+    traces.push({type:'mesh3d',x:vx,y:vy,z:vz,i:I,j:J,k:K,intensity:vi,intensitymode:'vertex',colorscale:cs,cmin:-cmax,cmax,
+      opacity:0.45,flatshading:true,lighting:{ambient:1,diffuse:0,specular:0,roughness:1,fresnel:0},hoverinfo:'skip',
+      showscale:si===0,colorbar:{title:{text:`${WS_QTY[q]}<br>(${unit})`,font:{size:10}},thickness:12,len:0.6,tickfont:{size:9}}});
+    traces.push({type:'scatter3d',mode:'lines',x:lx,y:ly,z:lz,line:{color:lc,colorscale:cs,cmin:-cmax,cmax,width:3},hoverinfo:'skip',showlegend:false});
+    traces.push({type:'scatter3d',mode:'markers',x:hx,y:hy,z:hz,text:ht,hoverinfo:'text',showlegend:false,
+      marker:{size:2.5,color:hc,colorscale:cs,cmin:-cmax,cmax}});
+    peak.forEach(g=>{ if(Math.abs(g.v)<0.1*vmax) return; labels.x.push(g.p[0]); labels.y.push(g.p[1]); labels.z.push(g.p[2]); labels.t.push(fmt(g.v)); });
+  });
+  if(document.getElementById('wsVals').checked && labels.t.length)
+    traces.push({type:'scatter3d',mode:'text',x:labels.x,y:labels.y,z:labels.z,text:labels.t,textposition:'top center',
+      textfont:{size:10,color:COL.ink},hoverinfo:'skip',showlegend:false});
+  return traces;
 }
 function setResFrame(j){
   resFrame=j; const sel=document.getElementById('resFrameSel'); if(sel) sel.value=String(j);
@@ -6129,6 +6195,9 @@ document.getElementById('resFrameNext').onclick=()=>{ if(resFrame<frameYs(state)
 document.getElementById('wsQty').addEventListener('change',()=>renderWhole());
 document.getElementById('wsLoad').addEventListener('change',e=>{ wsLoad=e.target.value; renderWhole(); });
 document.getElementById('wsDef').addEventListener('change',()=>renderWhole());
+document.getElementById('segWsMode').addEventListener('click',e=>{ const b=e.target.closest('button[data-v]'); if(!b) return; wsMode=b.dataset.v; renderWhole(); });
+document.getElementById('wsScale').addEventListener('input',()=>drawWhole(buildMCT(state).mesh));
+document.getElementById('wsVals').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
