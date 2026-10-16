@@ -6894,16 +6894,19 @@ function dxfPlan(D, C) { const h = D.h, g = C.g, X = v => v * 12, L = g.L, L3 = 
     `ARROW: ROOF SLOPES UP ${dxfFrac(12 * s.slope, 16)}:12 (${f(g.theta * 180 / Math.PI, 2)} DEG.) FROM THE LOW EAVE TO THE HIGH EAVE.`], 110);
   D.text(ly.t, X(L3) + 0.5 * h, X(L) + 0.4 * h, 0.9 * h, 'HIGH EAVE'); D.text(ly.t, X(L3) + 0.5 * h, -1.1 * h, 0.9 * h, 'LOW EAVE');
   // section tags
-  const fk = C.list ? C.list.find(t => /FRAME ELEVATION/.test(t)) : null, nF = fk && C.nums[fk], nL = C.nums && C.nums['LONGITUDINAL ELEVATION'];
-  dxfTag(D, ly.t, X(y1), X(L) + ext * 0.4, 'A', `${fk && fk !== 'TYPICAL FRAME ELEVATION' ? 'FRAME ELEVATIONS' : 'TYPICAL FRAME'}${nF ? ', SHEET ' + nF : ''}`, 1, 1);
+  const nL = C.nums && C.nums['LONGITUDINAL ELEVATION'], secSheet = j => { const fs = (C.fsets || []).findIndex(q => q.js.includes(j)), t = C.list && C.list.filter(x => /^FRAME SECTION/.test(x))[fs]; return t ? C.nums[t] : null; };
+  C.ys.forEach((y, j) => { const n = secSheet(j); dxfTag(D, ly.t, X(y), X(L) + ext * 0.4, String(j + 1), n ? `SHT ${n}` : '', 1, 1); });
   dxfTag(D, ly.t, X(L3) * 0.5, X(g.colX[0]), 'B', `LONGITUDINAL ELEVATION${nL ? ', SHEET ' + nL : ''}`, 1, -1);
   dxfNorth(D, ly.t, X(L3) + ext + 8 * h, X(L) + ext + 2 * h);
   D.text(ly.t, -ext - 10 * h, X(L) + ext + 7 * h, 1.6 * h, 'ROOF FRAMING PLAN');
   D.text(ly.t, -ext - 10 * h, X(L) + ext + 5 * h, 0.9 * h, `LENGTH (Y) LEFT TO RIGHT FROM THE FRONT EDGE; LOW EAVE AT BOTTOM. MEMBERS SHOWN AT FLANGE WIDTH. ${C.purl.length ? 'PURLINS BEAR ON THE FRAME BEAMS.' : ''}`);
 }
 /* ---------- 3: typical frame elevation (drawing x = X, y = Z) ---------- */
-function dxfFrame(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L = g.L, th = g.theta, c = Math.cos(th), sn = Math.sin(th);
-  const fsets = C.fsets || [{ js: [0] }], fset = fsets[C.part || 0] || fsets[0], fj = fset.js[0], colBase = g.colBaseF[fj], colH = g.colHF[fj];
+// frame sections: every frame drawn on its own (1 or 2 per sheet), side by side
+function dxfFrame(D, C) { const fsets = C.fsets || [{ js: [0] }], fset = fsets[C.part || 0] || fsets[0]; let x = 0;
+  fset.js.forEach(fj => { const i0 = D.mark(); dxfFrameOne(D, C, fj); const b = D.bbox(i0); D.move(i0, x - b[0], -b[3]); x += (b[2] - b[0]) + 8 * D.h; }); }
+function dxfFrameOne(D, C, fj) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L = g.L, th = g.theta, c = Math.cos(th), sn = Math.sin(th);
+  const colBase = g.colBaseF[fj], colH = g.colHF[fj];
   const ly = { bm: D.layer('STL-BEAM', 5), co: D.layer('STL-COLS', 3), lg: D.layer('STL-LONG', 30), pu: D.layer('STL-PURL', 6), gr: D.layer('GRID', 8), gd: D.layer('GRADE', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7), sc: D.layer('SCRN', 4), tb: D.layer('TABL', 7) }, cl = D.ltype('CENTER'), hid = D.ltype('HIDDEN');
   const bd = C.bp.d, cd = C.cp.d, zA = x => X(g.yAt(x));   // work line (beam centerline) elevation, inches
   const nx = -sn * bd / 2, nz = c * bd / 2;              // half-depth normal to the roof
@@ -6914,8 +6917,8 @@ function dxfFrame(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L = 
     D.rect(ly.co, X(cx) - cd / 2, zb, X(cx) + cd / 2, zt);
     if (s.baseFixity === 'fixed' || C.three) dxfFixedBase(D, ly.co, X(cx), zb, cd / 2 + 3); else { D.pline(ly.co, [[X(cx), zb], [X(cx) - 1.2 * h, zb - 1.6 * h], [X(cx) + 1.2 * h, zb - 1.6 * h]], true); }
     if (s.beamConnect === 'pinned' && C.nC > 1) D.circle(ly.co, X(cx), zt, 0.5 * h);
-    D.line(ly.gr, X(cx), zMin - 3 * h, X(cx), Math.max(g.yStart, g.yEnd) * 12 + bd + 8 * h, cl);
-    dxfBubble(D, ly.gr, X(cx), Math.max(g.yStart, g.yEnd) * 12 + bd + 9.3 * h, dxfLetter(i));
+    D.line(ly.gr, X(cx), zMin - 3 * h, X(cx), Math.max(g.yStart, g.yEnd) * 12 + bd + 11 * h, cl);
+    dxfBubble(D, ly.gr, X(cx), Math.max(g.yStart, g.yEnd) * 12 + bd + 12.3 * h, dxfLetter(i));
     D.text(ly.t, X(cx) + cd / 2 + 0.5 * h, zb + 0.4 * h, 0.9 * h, `BASE ${dxfEl(colBase[i])}`);
     D.text(ly.t, X(cx) + cd / 2 + 0.5 * h, zA(cx) - (bd / 2) / c - 1.4 * h, 0.9 * h, `W.P. ${dxfEl(g.yAt(cx))}`);
     D.dimV(ly.d, zb, zA(cx), X(cx) - cd / 2 - 3 * h, X(cx) - cd / 2, 'H = <>'); });
@@ -6925,25 +6928,26 @@ function dxfFrame(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L = 
   // grade
   const gz = s.El_base * 12; D.line(ly.gd, -6 * h, gz, X(L) + 6 * h, gz, hid); D.text(ly.t, X(L) + 6.5 * h, gz - 0.35 * h, 0.9 * h, `DATUM ${dxfEl(s.El_base)}`);
   // windscreen (edge-on in this view, on column line A)
-  const ld = C.A.loads; if (s.screen !== 'none' && ld.screenH > 0) { const xs = X(g.colX[0]) - cd / 2 - 1.2 * h;
-    D.rect(ly.sc, xs - 0.35 * h, ld.scr_bot * 12, xs, ld.scr_top * 12); D.text(ly.t, xs - 0.9 * h, (ld.scr_bot + ld.scr_top) * 6, 0.9 * h, `WINDSCREEN ${dxfEl(ld.scr_bot)} TO ${dxfEl(ld.scr_top)}`, 1, 90); }
+  const ld = C.A.loads; if (s.screen !== 'none' && ld.screenH > 0) { const xs = X(g.colX[0]) - cd / 2 - 1.2 * h, [sb, st] = screenBand(s, g, ld, fj);
+    D.rect(ly.sc, xs - 0.35 * h, sb * 12, xs, st * 12); D.text(ly.t, xs - 4.6 * h, (sb + st) * 6, 0.9 * h, `WINDSCREEN ${dxfEl(sb)} TO ${dxfEl(st)}`, 1, 90); }
+  // eave and purlin positions across the frame (horizontal, from the low roof tip)
+  if (C.lay.length > 2) { const zt = Math.max(zA(0), zA(L)) + bd + 4 * h; D.chainH(ly.d, C.lay.map(l => X(l.x)), zt, Math.max(zA(0), zA(L)) + bd / 2); }
   // dimensions along the bottom, slope symbol, tip elevations, labels
   D.chainH(ly.d, [0, ...g.colX, L].map(X), zMin - 6 * h, zMin); D.dimH(ly.d, 0, X(L), zMin - 10 * h, zMin, 'OVERALL <>');
   D.text(ly.t, -nx - 0.4 * h, zA(0) - nz - 1.4 * h, 0.9 * h, `CL BEAM ${dxfEl(g.yStart)}`, 2); D.text(ly.t, X(L) + 0.6 * h, zA(L) + 0.2 * h, 0.9 * h, `CL BEAM ${dxfEl(g.yEnd)}`);
   if (s.slope > 1e-6) { const st = [0, ...g.colX, L]; let bi = 0; for (let i = 1; i < st.length - 1; i++) if (st[i + 1] - st[i] > st[bi + 1] - st[bi]) bi = i;
-    const run = 12 * h, x0 = X((st[bi] + st[bi + 1]) / 2) - run / 2, z0 = zA((st[bi] + st[bi + 1]) / 2) + (bd / 2) / c + (C.purl.length ? C.pp.d : 0) + 3 * h, rise = run * s.slope;
+    const run = 12 * h, x0 = X((st[bi] + st[bi + 1]) / 2) - run / 2, z0 = Math.max(zA(0), zA(L)) + bd + (C.lay.length > 2 ? 7 : 3) * h, rise = run * s.slope;
     D.line(ly.t, x0, z0, x0 + run, z0); D.line(ly.t, x0 + run, z0, x0 + run, z0 + rise); D.line(ly.t, x0, z0, x0 + run, z0 + rise);
     D.text(ly.t, x0 + run / 2, z0 - 1.2 * h, 0.9 * h, '12', 1); D.text(ly.t, x0 + run + 0.4 * h, z0 + rise / 2 - 0.45 * h, 0.9 * h, dxfFrac(12 * s.slope, 16)); }
   D.text(ly.t, X(L) * 0.3 - sn * (bd / 2 + 1.2 * h), zA(L * 0.3) + c * (bd / 2) + 0.6 * h, 0.9 * h, `ROOF BEAM ${s.beamSect}`, 1, th * 180 / Math.PI);
-  D.text(ly.t, X(g.colX[0]) - cd / 2 - 0.5 * h, (colBase[0] * 12 + zA(g.colX[0])) / 2, 0.9 * h, `COLUMN ${s.colSect}${C.nC > 1 ? ' (TYP.)' : ''}`, 1, 90);
+  { const xl = X(g.colX[C.nC - 1]) + cd / 2 + 1.6 * h, i = C.nC - 1; D.text(ly.t, xl, (colBase[i] * 12 + zA(g.colX[i])) / 2, 0.9 * h, `COLUMN ${s.colSect}${C.nC > 1 ? ' (TYP.)' : ''}`, 1, 90); }
   if (C.lay.length) { const pl = C.lay.find(l => l.kind === 'purlin'); if (pl) D.text(ly.t, X(pl.x), zA(pl.x) + (bd / 2) / c + C.pp.d + 0.6 * h, 0.9 * h, `PURLIN ${s.purlinSect}`, 1);
     D.text(ly.t, X(0), zA(0) + (bd / 2) / c + 0.6 * h, 0.9 * h, `EAVE ${s.longSect}`, 0); }
-  const top = Math.max(g.yStart, g.yEnd) * 12 + bd + 13 * h;
-  D.text(ly.t, -6 * h, top + 2 * h, 1.6 * h, !C.three ? 'FRAME ELEVATION' : fsets.length > 1 ? `FRAME ELEVATION - FRAME${fset.js.length > 1 ? 'S' : ''} ${dxfRange(fset.js.map(j => j + 1))}` : 'TYPICAL FRAME ELEVATION');
-  D.text(ly.t, -6 * h, top, 0.9 * h, `${C.three ? 'SECTION A, ' : ''}LOOKING ALONG +Y. W.P. = WORK POINT AT ROOF BEAM CENTERLINE. ${s.beamConnect === 'pinned' && C.nC > 1 ? 'CIRCLE = PINNED COLUMN-TO-BEAM CONNECTION.' : 'COLUMN-TO-BEAM CONNECTIONS ARE MOMENT CONNECTIONS.'}`);
+  const top = Math.max(g.yStart, g.yEnd) * 12 + bd + 16 * h;
+  D.text(ly.t, -6 * h, top + 2 * h, 1.6 * h, C.three ? `SECTION ${fj + 1} - FRAME ${fj + 1}` : 'FRAME ELEVATION');
+  D.text(ly.t, -6 * h, top, 0.9 * h, `${C.three ? `AT Y = ${dxfFI(X(C.ys[fj]))} FROM THE FRONT EDGE, ` : ''}LOOKING ALONG +Y. W.P. = WORK POINT AT ROOF BEAM CENTERLINE. ${s.beamConnect === 'pinned' && C.nC > 1 ? 'CIRCLE = PINNED COLUMN-TO-BEAM CONNECTION.' : 'COLUMN-TO-BEAM CONNECTIONS ARE MOMENT CONNECTIONS.'}`);
   // column schedule for the frame
-  if (fsets.length > 1) D.text(ly.t, -6 * h, top - 1.5 * h, 0.9 * h, `COLUMN BASE ELEVATIONS VARY BY FRAME: THIS SHEET SHOWS FRAME${fset.js.length > 1 ? 'S' : ''} ${dxfRange(fset.js.map(j => j + 1))}.`);
-  dxfTable(D, ly.tb, X(L) + 14 * h, zMin + (C.nC + 3) * 1.5 * h + 1.7 * h, ['GRID', 'X FROM LOW TIP', 'BASE EL.', 'W.P. EL.', 'LENGTH'], g.colX.map((cx, i) => [dxfLetter(i), dxfFI(X(cx)), dxfEl(colBase[i]).slice(4), dxfEl(g.yAt(cx)).slice(4), dxfFI(colH[i] * 12)]), 'COLUMNS');
+  dxfTable(D, ly.tb, C.paper === 'B' ? X(L) + 14 * h : 0, C.paper === 'B' ? zMin + (C.nC + 3) * 1.5 * h + 1.7 * h : zMin - 14 * h, ['GRID', 'X FROM LOW TIP', 'BASE EL.', 'W.P. EL.', 'LENGTH'], g.colX.map((cx, i) => [dxfLetter(i), dxfFI(X(cx)), dxfEl(colBase[i]).slice(4), dxfEl(g.yAt(cx)).slice(4), dxfFI(colH[i] * 12)]), 'COLUMNS');
 }
 /* ---------- 4: longitudinal elevation (3D). Drawing x = Y, y = Z; seen from the low eave side ---------- */
 function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = C.L3, c = Math.cos(g.theta);
@@ -6960,7 +6964,14 @@ function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   const gz = s.El_base * 12; D.line(ly.gd, -6 * h, gz, X(L3) + 6 * h, gz, hid);
   const zMin = Math.min(zb0, gz);
   D.chainH(ly.d, [0, ...C.ys, L3].map(X), zMin - 6 * h, zMin); D.dimH(ly.d, 0, X(L3), zMin - 10 * h, zMin, 'OVERALL <>');
-  D.dimV(ly.d, zbA(0), zA(g.colX[0]), X(C.ys[0]) - cb / 2 - 3 * h, X(C.ys[0]) - cb / 2, 'H = <>');
+  C.ys.forEach((y, j) => D.dimV(ly.d, zbA(j), zA(g.colX[0]), X(y) - cb / 2 - 3 * h, X(y) - cb / 2, 'H = <>'));
+  D.text(ly.t, X(L3) + 6.5 * h, gz - 0.35 * h, 0.9 * h, `DATUM ${dxfEl(s.El_base)}`);
+  // member callouts
+  const xm1 = X(C.ys.length > 1 ? (C.ys[0] + C.ys[1]) / 2 : C.ys[0] + 2), lowE = C.lay.find(l => l.kind === 'low eave'), pur = C.lay.find(l => l.kind === 'purlin');
+  if (lowE) D.text(ly.t, xm1, zA(0) + (bd / 2) / c - C.lp.d - 1.4 * h, 0.9 * h, `LOW EAVE BEAM ${s.longSect}`, 1);
+  if (pur) D.text(ly.t, xm1, zHi + 1.2 * h, 0.9 * h, `PURLINS ${s.purlinSect} AND HIGH EAVE BEAM ${s.longSect} BEYOND`, 1);
+  D.text(ly.t, X(C.ys[0]) + bb / 2 + 0.6 * h, (zLo + zHi) / 2, 0.8 * h, `FRAME BEAM ${s.beamSect} (END VIEW)`);
+  D.text(ly.t, X(C.ys[C.ys.length - 1]) + cb / 2 + 1.6 * h, (zbA(C.ys.length - 1) + ztc) / 2, 0.9 * h, `COLUMN ${s.colSect} (TYP.)`, 1, 90);
   D.text(ly.t, X(L3) + 1 * h, zHi - 0.3 * h, 0.9 * h, `HIGH EAVE ${dxfEl(g.yEnd)} (CL)`); D.text(ly.t, X(L3) + 1 * h, zLo - 0.3 * h, 0.9 * h, `LOW EAVE ${dxfEl(g.yStart)} (CL)`);
   D.text(ly.t, -6 * h, zHi + 15 * h, 1.6 * h, 'LONGITUDINAL ELEVATION');
   D.text(ly.t, -6 * h, zHi + 13 * h, 0.9 * h, `SECTION B: LOOKING FROM THE LOW EAVE SIDE (+X). COLUMN LINE A SHOWN; MEMBERS BEHIND IT HIDDEN. FRONT OVERHANG ${dxfFI(X(s.OH_front))}, BACK OVERHANG ${dxfFI(X(s.OH_back))}.`);
@@ -6977,10 +6988,10 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
       if (agr && agr.bp && agr.bp.plate) { const G = dxfAnchorGeo(agr), pyc = yOf(y) + G.ex, pxc = X(cx) - G.ey;   // plate centre: designer x = -Y, y = X
         D.rect(ly.co, pyc - G.P.B / 2, pxc - G.P.N / 2, pyc + G.P.B / 2, pxc + G.P.N / 2); G.ys.forEach(yy => G.xs.forEach(xx => D.circle(ly.co, pyc - xx, pxc + yy, (G.R.dia || 1) / 2))); }
       else D.rect(ly.co, yOf(y) - cb / 2 - 3, X(cx) - cd / 2 - 3, yOf(y) + cb / 2 + 3, X(cx) + cd / 2 + 3, hid);
-      D.text(ly.t, yOf(y) + cb / 2 + 0.6 * h, X(cx) + cd / 2 + 0.5 * h, 0.9 * h, dxfMarkOf(j, i)); }); });
+      const mk = dxfMarkAt(C, j, i, yOf(y), X(cx)); D.text(ly.t, mk[0] + 0.5 * h, mk[1] + 0.4 * h, 0.9 * h, dxfMarkOf(j, i)); }); });
   g.colX.forEach((cx, i) => { D.line(ly.gr, -ext, X(cx), X(len) + ext, X(cx), cl); dxfBubble(D, ly.gr, -ext - 1.3 * h, X(cx), dxfLetter(i)); });
-  if (C.three) { D.chainH(ly.d, C.ys.map(X), -ext - 5 * h, 0); }
-  D.chainV(ly.d, g.colX.map(X), -ext - 5 * h, 0);
+  if (C.three) { D.chainH(ly.d, [0, ...C.ys, len].map(X), -ext - 5 * h, 0); D.dimH(ly.d, 0, X(len), -ext - 9 * h, 0, 'OVERALL <>'); }
+  D.chainV(ly.d, [0, ...g.colX, g.L].map(X), -ext - 5 * h, 0); D.dimV(ly.d, 0, X(g.L), -ext - 9 * h, 0, 'OVERALL <>');
   dxfNorth(D, ly.t, X(len) + ext + 8 * h, X(g.L) + ext);
   D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 7 * h, 1.6 * h, 'COLUMN AND BASE LAYOUT');
   D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 5 * h, 0.9 * h, `PLAN. MARK = FRAME GRID + COLUMN GRID. BASES ${C.three ? 'FIXED' : s.baseFixity.toUpperCase()}. DASHED = ROOF OUTLINE${anchorInUse() ? '.' : ' AND BASE PLATE ZONE (BASE PLATES NOT DESIGNED HERE).'}`);
@@ -6988,11 +6999,12 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   // column schedule
   const AU = anchorInUse(), agOf = (j, i) => { const id = AU ? anchorGroupOf(anchorKey(j, i)) : null, gr = id && anchorGroup(id); return gr ? dxfStr(gr.name).toUpperCase() : '-'; };
   const rows = []; C.ys.forEach((y, j) => g.colX.forEach((cx, i) => rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(X(cx)), C.three ? dxfFI(X(y)) : '-', s.colSect, dxfEl(g.colBaseF[j][i]).slice(4), dxfFI(g.colHF[j][i] * 12)].concat(AU ? [agOf(j, i)] : []))));
-  let yT = -ext - 10 * h; const T = dxfTable(D, ly.tb, 0, yT, ['MARK', 'GRID', 'X', 'Y', 'SECTION', 'BASE EL.', 'COL. LENGTH'].concat(AU ? ['ANCHORAGE'] : []), rows, 'COLUMN SCHEDULE (X FROM THE LOW ROOF TIP, Y FROM THE FRONT EDGE)');
+  let yT = -ext - 13 * h; const T = dxfTable(D, ly.tb, 0, yT, ['MARK', 'GRID', 'X', 'Y', 'SECTION', 'BASE EL.', 'COL. LENGTH'].concat(AU ? ['ANCHORAGE'] : []), rows, 'COLUMN SCHEDULE (X FROM THE LOW ROOF TIP, Y FROM THE FRONT EDGE)');
   // the anchorage groups themselves are scheduled on the base plate and anchorage details and the setting plan
   const yA = T.y;
   // reactions from MIDAS, when pasted
-  if (typeof RESULT_ROWS !== 'undefined' && RESULT_ROWS.length) { let gov = null; try { gov = midasGoverning(); } catch (e) {}
+  if (typeof RESULT_ROWS !== 'undefined' && RESULT_ROWS.length && dxfOpts().draw.react) D.text(ly.t, 0, yA - 2 * h, 0.9 * h, `GOVERNING BASE REACTIONS: SEE THE FOUNDATION REACTIONS PLAN${C.nums && C.nums['FOUNDATION REACTIONS PLAN'] ? ', SHEET ' + C.nums['FOUNDATION REACTIONS PLAN'] : ''}.`);
+  else if (typeof RESULT_ROWS !== 'undefined' && RESULT_ROWS.length) { let gov = null; try { gov = midasGoverning(); } catch (e) {}
     if (gov && gov.length) { const kf = v => uForce(v || 0), km = v => uMom(v || 0), FU = uForceLbl().toUpperCase().replace('·', '-'), MU = uMomLbl().toUpperCase().replace('·', '-'), lbl = (gg, k) => { const m = /F(\d+)-C(\d+)/.exec(gg.label || ''); return m ? dxfMarkOf(+m[1] - 1, +m[2] - 1) : dxfMarkOf(0, k); };
       const rr = gov.map((gg, k) => [lbl(gg, k), kf(gg.N.v), kf(gg.V.v), km(gg.M.v)].concat(C.three ? [kf(gg.VL.v), km(gg.ML.v)] : []).concat([dxfStr(gg.N.load).toUpperCase()]));
       dxfTable(D, ly.tb, 0, yA - 2 * h, ['MARK', `N (${FU})`, `V (${FU})`, `M (${MU})`].concat(C.three ? [`V LONG (${FU})`, `M LONG (${MU})`] : []).concat(['FROM']), rr,
@@ -7087,20 +7099,22 @@ function dxfAnchor(D, C) { const h = D.h, hid = D.ltype('HIDDEN'), cl = D.ltype(
 // head below h_ef, top nut 0.875 d and one diameter of thread above the nut
 function dxfRodGeo(G) { const d = G.R.dia || 1, headH = G.R.head === 'plainrod' ? 0 : 0.6 * d, hef = G.R.hef || 0, above = G.gap + G.P.t + 0.875 * d + d;
   return { d, headH, hef, above, len: hef + headH + above }; }
-// frames with identical column bases share one elevation sheet
-function dxfFrameSets(C) { const sets = []; C.ys.forEach((y, j) => { const key = C.three ? C.g.colBaseF[j].map(z => z.toFixed(4)).join(',') : ''; let s = sets.find(q => q.key === key); if (!s) sets.push(s = { key, js: [] }); s.js.push(j); }); return sets; }
 function dxfRange(ns) { const out = []; let a = ns[0], b = ns[0]; for (let i = 1; i <= ns.length; i++) { if (ns[i] === b + 1) { b = ns[i]; continue; } out.push(a === b ? `${a}` : b === a + 1 ? `${a}, ${b}` : `${a}-${b}`); a = b = ns[i]; } return out.join(', '); }
 // spans as "3 @ 20'-0"" runs
 function dxfSpans(xs) { const out = []; let i = 0; while (i < xs.length - 1) { const d = xs[i + 1] - xs[i]; let j = i + 1; while (j < xs.length - 1 && Math.abs((xs[j + 1] - xs[j]) - d) < 1e-6) j++; out.push(`${j - i} @ ${dxfFI(d * 12)}`); i = j; } return out.join(' + ') || '-'; }
 // plan of the column grid (drawing x = Y along the canopy, y = X across the frame), as on the base layout sheet
+// column mark position: up and right of the base plate when the column has one, else of the column
+function dxfMarkAt(C, j, i, py, px) { const id = anchorInUse() ? anchorGroupOf(anchorKey(j, i)) : null, gr = id && anchorGroup(id);
+  let hx = C.cp.b / 2, hy = C.cp.d / 2; if (gr && gr.bp && gr.bp.plate) { const G = dxfAnchorGeo(gr); hx = Math.abs(G.ex) + G.P.B / 2; hy = Math.abs(G.ey) + G.P.N / 2; }
+  return [py + hx, px + hy]; }
 function dxfGridPlan(D, C, ly, cl, hid, colFn) { const h = D.h, g = C.g, X = v => v * 12, len = C.three ? C.L3 : Math.max(C.s.B_trib, 4), ext = 6 * h;
   const yOf = y => C.three ? X(y) : X(len / 2);
   D.rect(ly.ro, 0, 0, X(len), X(g.L), hid);
   C.ys.forEach((y, j) => { D.line(ly.gr, yOf(y), -ext, yOf(y), X(g.L) + ext, cl); dxfBubble(D, ly.gr, yOf(y), X(g.L) + ext + 1.3 * h, String(j + 1)); g.colX.forEach((cx, i) => colFn(j, i, yOf(y), X(cx))); });
   g.colX.forEach((cx, i) => { D.line(ly.gr, -ext, X(cx), X(len) + ext, X(cx), cl); dxfBubble(D, ly.gr, -ext - 1.3 * h, X(cx), dxfLetter(i)); });
-  if (C.three) D.chainH(ly.d, C.ys.map(X), -ext - 5 * h, 0);
-  D.chainV(ly.d, g.colX.map(X), -ext - 5 * h, 0);
-  return { ext, top: X(g.L) + ext + 4 * h, len }; }
+  if (C.three) { D.chainH(ly.d, [0, ...C.ys, len].map(X), -ext - 5 * h, 0); D.dimH(ly.d, 0, X(len), -ext - 9 * h, 0, 'OVERALL <>'); }
+  D.chainV(ly.d, [0, ...g.colX, g.L].map(X), -ext - 5 * h, 0); D.dimV(ly.d, 0, X(g.L), -ext - 9 * h, 0, 'OVERALL <>');
+  return { ext: ext + 4 * h, top: X(g.L) + ext + 4 * h, len }; }
 /* ---------- anchor rod setting plan and schedule ---------- */
 function dxfSetting(D, C) { const h = D.h, g = C.g, cb = C.cp.b, cd = C.cp.d, cl = D.ltype('CENTER'), hid = D.ltype('HIDDEN');
   const ly = { co: D.layer('STL-COLS', 3), an: D.layer('ANCH', 1), gr: D.layer('GRID', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7), tb: D.layer('TABL', 7), ro: D.layer('ROOF', 8) };
@@ -7114,7 +7128,7 @@ function dxfSetting(D, C) { const h = D.h, g = C.g, cb = C.cp.b, cd = C.cp.d, cl
       rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(px), C.three ? dxfFI(py) : '-', dxfStr(gr.name).toUpperCase(), `${G.nx * G.ny} - ${dxfFrac(R.d, 16)}" DIA.`,
         dxfEl(z).slice(4), dxfEl(top).slice(4), dxfEl(z + (G.P.t + 0.875 * R.d + R.d) / 12).slice(4), dxfEl(top - (R.hef + R.headH) / 12).slice(4), dxfFI(R.len)]); }
     else rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(px), C.three ? dxfFI(py) : '-', '-', '-', dxfEl(z).slice(4), '-', '-', '-', '-']);
-    D.text(ly.t, py + cb / 2 + 0.6 * h, px + cd / 2 + 0.5 * h, 0.9 * h, dxfMarkOf(j, i)); });
+    const mk = dxfMarkAt(C, j, i, py, px); D.text(ly.t, mk[0] + 0.5 * h, mk[1] + 0.4 * h, 0.9 * h, dxfMarkOf(j, i)); });
   dxfNorth(D, ly.t, (C.three ? C.L3 : P.len) * 12 + P.ext + 8 * h, C.g.L * 12 + P.ext);
   D.text(ly.t, -P.ext - 4 * h, P.top + 3 * h, 1.6 * h, 'ANCHOR ROD SETTING PLAN');
   D.text(ly.t, -P.ext - 4 * h, P.top + 1.2 * h, 0.9 * h, 'PLAN. RODS SHOWN PER THE ANCHORAGE GROUP OF EACH COLUMN; DASHED = BASE PLATE. ROD PATTERNS ARE DIMENSIONED ON THE BASE PLATE AND ANCHORAGE DETAILS.');
@@ -7144,7 +7158,7 @@ function dxfReact(D, C) { const h = D.h, g = C.g, cb = C.cp.b, cd = C.cp.d, cl =
     'REACTIONS ARE AT THE UNDERSIDE OF THE BASE PLATE (COLUMN BASE ELEVATION).'], 100);
 }
 // arrow from (x1, y1) to (x2, y2) with an open head
-function dxfArrow(D, l, x1, y1, x2, y2) { const h = D.h, a = Math.atan2(y2 - y1, x2 - x1), s = 0.9 * h;
+function dxfArrowLine(D, l, x1, y1, x2, y2) { const h = D.h, a = Math.atan2(y2 - y1, x2 - x1), s = 0.9 * h;
   D.line(l, x1, y1, x2, y2); [a + 2.7, a - 2.7].forEach(b => D.line(l, x2, y2, x2 + s * Math.cos(b), y2 + s * Math.sin(b))); }
 // north arrow at (x, y): state.dxf.north = degrees clockwise from the top of the plan sheets (blank = none)
 function dxfNorth(D, l, x, y) { const o = dxfOpts(), a = parseFloat(o.north); if (!isFinite(a)) return; const h = D.h, r = 3.2 * h, t = a * Math.PI / 180, u = [Math.sin(t), Math.cos(t)], n = [u[1], -u[0]];
@@ -7153,26 +7167,28 @@ function dxfNorth(D, l, x, y) { const o = dxfOpts(), a = parseFloat(o.north); if
 /* ---------- wind load diagrams: roof plans per wind case ---------- */
 function dxfWind(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, A = C.A, len = C.three ? C.L3 : Math.max(s.B_trib, 4), hid = D.ltype('HIDDEN');
   const ly = { ro: D.layer('ROOF', 8), w: D.layer('WIND', 4), t: D.layer('ANNO-TEXT', 7), d: D.layer('DIMS', 7) };
-  const W = X(len), Hh = X(g.L), arrows = (pts) => pts.forEach(p => dxfArrow(D, ly.w, ...p));
+  const W = X(len), Hh = X(g.L), arrows = (pts) => pts.forEach(p => dxfArrowLine(D, ly.w, ...p));
   const blocks = [() => { D.text(ly.t, 0, 0, 1.6 * h, 'WIND LOAD DIAGRAMS'); D.text(ly.t, 0, -1.8 * h, 0.9 * h, 'ROOF PLANS: X ACROSS THE FRAME (UP), Y ALONG THE CANOPY (RIGHT).');
     D.text(ly.t, 0, -3.2 * h, 0.9 * h, `QH = ${f(s.q_h, 2)} PSF, G = ${s.G}, ${s.flow === 'clear' ? 'CLEAR' : 'OBSTRUCTED'} FLOW.`);
     D.text(ly.t, 0, -4.6 * h, 0.9 * h, '+ = NET PRESSURE TOWARD THE ROOF, - = SUCTION.'); }];
   const part = C.part || 0, wcs = part === 2 ? [] : (A.loads.wcases || []), lcs = part === 1 ? [] : (A.loads.lcases || []);
   wcs.forEach(wc => blocks.push(() => { const up = wc.gamma === 180;
     D.rect(ly.ro, 0, 0, W, Hh); D.line(ly.ro, 0, Hh / 2, W, Hh / 2, hid);
+    D.chainV(ly.d, [0, Hh / 2, Hh], W + 3 * h, W); if (C.three) D.dimH(ly.d, 0, W, up ? Hh + 3 * h : -3 * h, up ? Hh : 0, 'LENGTH <>');
     D.text(ly.w, W / 2, Hh * 0.25 - 0.5 * h, 1.1 * h, `LOWER HALF  ${f(wc.pLower, 1)} PSF`, 1); D.text(ly.w, W / 2, Hh * 0.75 - 0.5 * h, 1.1 * h, `UPPER HALF  ${f(wc.pUpper, 1)} PSF`, 1);
     arrows([0.2, 0.5, 0.8].map(fr => up ? [W * fr, -7 * h, W * fr, -1.5 * h] : [W * fr, Hh + 7 * h, W * fr, Hh + 1.5 * h]));
     D.text(ly.t, 0, Hh + 10.5 * h, 1.1 * h, `${wc.name.toUpperCase()} (GAMMA = ${wc.gamma}%%d)`);
     D.text(ly.t, 0, Hh + 9 * h, 0.8 * h, `TOWARD THE ${up ? 'HIGH' : 'LOW'} SIDE. CNW ${f(wc.cnw, 3)}, CNL ${f(wc.cnl, 3)}.`); }));
   lcs.forEach(lc => blocks.push(() => { const fwd = lc.gamma === 90, yOf = d => fwd ? d : len - d;
-    D.rect(ly.ro, 0, 0, W, Hh);
+    D.rect(ly.ro, 0, 0, W, Hh); D.dimV(ly.d, 0, Hh, fwd ? W + 3 * h : -3 * h, fwd ? W : 0, '<>');
+    D.chainH(ly.d, [...new Set([0, ...lc.zones.map(z => Math.min(z.d0, len)), ...lc.zones.map(z => Math.min(z.d1, len))])].sort((a, b) => a - b).map(d => X(yOf(d))), -3 * h, 0);
     lc.zones.forEach((z, i) => { const d0 = Math.min(z.d0, len), d1 = Math.min(z.d1, len); if (d1 <= d0 + 1e-9) return;
       const ya = X(yOf(d0)), yb = X(yOf(d1)); if (i) D.line(ly.ro, ya, 0, ya, Hh, hid);
       const xm = (ya + yb) / 2; D.text(ly.w, xm, Hh / 2 + 0.6 * h, 0.9 * h, `CN ${f(z.cn, 2)}`, 1); D.text(ly.w, xm, Hh / 2 - 1.0 * h, 0.9 * h, `${f(lc.qhG * z.cn, 1)} PSF`, 1); });
     arrows([0.25, 0.5, 0.75].map(fr => fwd ? [-7 * h, Hh * fr, -1.5 * h, Hh * fr] : [W + 7 * h, Hh * fr, W + 1.5 * h, Hh * fr]));
     D.text(ly.t, 0, Hh + 4.5 * h, 1.1 * h, `${lc.name.toUpperCase()} (GAMMA = ${lc.gamma}%%d)`);
     D.text(ly.t, 0, Hh + 3 * h, 0.8 * h, `ENTERING AT THE ${fwd ? 'FRONT' : 'BACK'} EDGE. ZONES AT H, 2H (H = ${f(lc.h, 1)} FT).`); }));
-  blocks.push(() => dxfNotes(D, ly.t, 0, 0, 'WIND NOTES', [
+  if (part !== 2) blocks.push(() => dxfNotes(D, ly.t, 0, 0, 'WIND NOTES', [
     `FASCIA: ${f(s.p_lat, 1)} PSF ON THE ${f(s.d_roof, 2)} FT FASCIA DEPTH. COLUMNS: ${f(s.p_col, 1)} PSF ON THE COLUMN FACE.${s.screen !== 'none' ? ` WINDSCREEN: ${f(s.p_screen, 1)} PSF.` : ''}`,
     'ROOF NET PRESSURES ACT NORMAL TO THE ROOF. STRIP-AVERAGED FRAME VALUES FOR THE ALONG-LENGTH CASES ARE TABULATED ON THE DESIGN LOADS SHEET.',
     'ACROSS THE FRAMES: ASCE 7-16 FIG. 27.3-4. ALONG THE LENGTH: FIG. 27.3-7.'], C.paper === 'B' ? 55 : 110));
@@ -7190,6 +7206,13 @@ function dxfIso(D, C) { const h = D.h, mesh = buildMCT(state).mesh; if (!mesh.is
   if (anchorInUse()) mesh.frames.forEach(F => F.keyNodes.cols.forEach(c => { const id = anchorGroupOf(anchorKey(F.j, c.i)), gr = id && anchorGroup(id); if (!gr || !gr.bp || !gr.bp.plate) return;
     const n = mesh.nodes[c.base - 1], bx = gr.bp.plate.N / 24, by = gr.bp.plate.B / 24;
     D.pline(ly.co, [[-bx, -by], [bx, -by], [bx, by], [-bx, by]].map(([dx, dy]) => P(n.x + dx, n.y + dy, n.z)), true); }));
+  // member callouts with leaders
+  const s = C.s, f0 = mesh.frames[0], fl = mesh.frames[mesh.frames.length - 1], lowE = C.lay.find(l => l.kind === 'low eave'), pur = C.lay.find(l => l.kind === 'purlin');
+  const call = (pt, dx, dy, txt) => { const q = [pt[0] + dx * h, pt[1] + dy * h]; D.line(ly.t, pt[0], pt[1], q[0], q[1]); D.text(ly.t, q[0] + (dx >= 0 ? 0.4 : -0.4) * h, q[1] - 0.4 * h, 0.9 * h, txt, dx >= 0 ? 0 : 2); };
+  { const n0 = mesh.nodes[f0.keyNodes.cols[0].base - 1]; call(P(n0.x, n0.y, (n0.z + g.yAt(n0.x)) / 2), -6, -3, `COLUMN ${s.colSect} (TYP.)`); }
+  call(P(g.L * 0.75, fl.y, g.yAt(g.L * 0.75)), 6, 4, `FRAME BEAM ${s.beamSect} (TYP.)`);
+  if (lowE) call(P(0, (C.ys[0] + (C.ys[1] ?? C.ys[0] + 4)) / 2, g.yAt(0)), -6, -4, `LOW EAVE BEAM ${s.longSect}`);
+  if (pur) call(P(pur.x, C.L3 * 0.6, g.yAt(pur.x)), 6, 5, `PURLIN ${s.purlinSect} (TYP.)`);
   const bb = D.bbox(0); D.text(ly.t, bb[0], bb[3] + 3 * h, 1.6 * h, 'ISOMETRIC VIEW');
   D.text(ly.t, bb[0], bb[3] + 1.3 * h, 0.9 * h, 'ISOMETRIC PROJECTION OF THE ANALYSIS MODEL (MEMBER CENTERLINES), TRUE LENGTH ALONG X, Y AND Z. FOR INFORMATION ONLY.');
 }
@@ -7271,7 +7294,8 @@ function dxfBuild(lay) {
   if (o.draw.cover) add('COVER, SHEET INDEX AND NOTES', dxfCover, 1, 1);
   if (o.draw.iso && C.three) add('ISOMETRIC VIEW', dxfIso, 12);
   if (o.draw.plan && C.three) add('ROOF FRAMING PLAN', dxfPlan, 12);
-  if (o.draw.frame) { C.fsets = dxfFrameSets(C); C.fsets.forEach((fs, k) => add(!C.three ? 'FRAME ELEVATION' : C.fsets.length > 1 ? `FRAME ELEVATION - FRAME${fs.js.length > 1 ? 'S' : ''} ${dxfRange(fs.js.map(j => j + 1))}` : 'TYPICAL FRAME ELEVATION', dxfFrame, 6, undefined, k)); }
+  if (o.draw.frame) { const per = o.paper === 'B' ? 1 : 2; C.fsets = []; for (let j = 0; j < C.ys.length; j += per) C.fsets.push({ js: C.ys.slice(j, j + per).map((_, k) => j + k) });
+    C.fsets.forEach((fs, k) => add(!C.three ? 'FRAME ELEVATION' : `FRAME SECTION${fs.js.length > 1 ? 'S' : ''} ${dxfRange(fs.js.map(j => j + 1))}`, dxfFrame, 6, undefined, k)); }
   if (o.draw.long && C.three) add('LONGITUDINAL ELEVATION', dxfLong, 12);
   if (o.draw.base) add('COLUMN AND BASE LAYOUT', dxfBase, 12);
   const anchOn = anchorInUse() && anchorState().groups.some(gr => anchorColumnsOf(gr.id).length);
