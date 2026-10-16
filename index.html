@@ -666,7 +666,8 @@
             <span id="reactCaseWrap" style="display:flex;gap:6px;align-items:center;margin-left:auto"><span class="ctl-label">Show</span><select id="reactCaseSelect"></select></span>
           </div>
           <div id="noEnvNote" style="display:none;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:8px 12px;margin-bottom:8px;font-size:11.5px;color:var(--rust)">No <b>Envelope</b> combination was found in the pasted results. Governing values below fall back to the maximum across all pasted cases, which may include individual unfactored load cases. Paste the envelope combination results for correct governing design reactions.</div>
-          <div id="plotReact" class="plot" style="height:330px"></div>
+          <div style="display:flex;justify-content:flex-end;margin:-2px 0 4px"><label class="t3d"><input type="checkbox" id="fbdMember"> <span class="ctl-label">Show column member forces</span></label></div>
+          <div id="plotReact" style="border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fcfbf8"></div>
           <div id="reactTable" style="margin-top:8px"></div>
           <div id="reactAllWrap" style="display:none;margin-top:14px">
             <div class="subhead-lbl">Governing base reactions — all frames (envelope)</div>
@@ -3743,6 +3744,8 @@ async function buildReport(){
   async function snap(id,w,h){
     const el=document.getElementById(id);
     if(!el) return null;
+    const sv=el.querySelector(':scope > svg[viewBox]');
+    if(sv){ try{ return await svgToPng(sv,2); }catch(e){ return null; } }
     try{
       const img=Plotly.toImage(el,{format:'png',width:w||760,height:h||440,scale:2});
       const timeout=new Promise(res=>setTimeout(()=>res(null),4000));
@@ -4022,14 +4025,14 @@ async function buildReport(){
     }).join('');
     // snapshot the FBD (governing) for the report
     reactShowCase='__gov__';
-    const _rAll=reactAllFrames; reactAllFrames=false;
+    const _rAll=reactAllFrames, _rMem=fbdShowMember; reactAllFrames=false; fbdShowMember=false;
     try{ drawFBDInto('plotReact', midasData()); }catch(e){}
-    reactAllFrames=_rAll;
+    reactAllFrames=_rAll; fbdShowMember=_rMem;
     imgReactFBD=await snap('plotReact');
     midasReactBlock=`
     ${staleNote}
     <p>Base reactions below are taken directly from the ${RES_SRC==='app'?'in-app linear elastic analysis of the MCT model':'MIDAS analysis (pasted beam-force results)'}, read at each column base element. Axis map: Axial → vertical reaction (N), Shear-z → horizontal (V), Moment-y → base moment (M). MIDAS reports member forces at the base; the reactions shown are equal and opposite (what the foundation resists). These are the design values, shown in ${uForceLbl()} / ${uMomLbl()}.</p>
-    ${imgTag(imgReactFBD,'Figure 6.1 — Column base free-body: member forces (red) and equal-and-opposite reactions (blue), governing envelope.')}
+    ${imgTag(imgReactFBD,`Figure 6.1 — Column base free-body${is3D(s)?` (frame ${Math.min(resFrame,frameYs(s).length-1)+1})`:''}: governing support reactions on each column (envelope), with the combination that governs each component.`)}
     <h3>6.1 Governing base reactions (${RES_SRC==='app'?'in-app analysis':'MIDAS'}) — all columns</h3>
     <table class="rpt"><thead><tr><th>Column</th><th>Max |N| reaction (${uForceLbl()})<br>+ = compression</th><th>Max |V| reaction (${uForceLbl()})</th><th>Max |M| base (${uMomLbl()})</th>${lng3?`<th>Max |V<sub>long</sub>| (${uForceLbl()})<br>Shear-y</th><th>Max |M<sub>long</sub>| (${uMomLbl()})<br>Moment-z</th>`:''}</tr></thead><tbody>${govR}</tbody></table>
     ${lng3?`<p class="note-sm">3D model: supports are labelled F<i>j</i>-C<i>i</i> (frame <i>j</i>, column <i>i</i>). V and M act in the frame plane; V<sub>long</sub> and M<sub>long</sub> act along the canopy length (column weak axis), from the longitudinal wind cases. The free-body figure shows frame ${Math.min(resFrame,frameYs(s).length-1)+1}.</p>`:''}
@@ -5821,63 +5824,93 @@ function buildReactTableInto(divId,data,isGov){
   document.getElementById(divId).innerHTML=h+'</tbody></table>';
 }
 
+// Column base free-body sketch (SVG): one card per support, in the frame elevation (X right,
+// Z up, viewed from the front). Blue = support reactions acting on the column (N up = +,
+// V toward +X = +, M counter-clockwise = + in this view); red (optional) = the column member
+// forces at the base, equal and opposite. Arrow lengths scale with magnitude across the cards.
+// 3D: the out-of-plane components (V long, M long) are listed under each card.
+let fbdShowMember=false;
 function drawFBDInto(plotId,data){
-  if(typeof Plotly==='undefined')return;
-  const A=computeModel(state), g=A.geom;
-  const traces=[], shapes=[], annotations=[];
-  const n=data.length;
-  // Schematic even spacing: ignore true plan positions (they crowd the labels).
-  // Give each column a wide slot so arrows + text never collide.
-  const slot=20;                       // horizontal slot width per column (plot units)
-  const px=data.map((d,i)=>i*slot);    // schematic x per column
-  const xlo=-slot*1.05, xhi=(n-1)*slot+slot*1.05;
-  const Hstub=10, aLen=Hstub*0.85;     // fixed sketch height (independent of real H)
-  // ground line + hatching
-  shapes.push({type:'line',x0:xlo,x1:xhi,y0:0,y1:0,line:{color:COL.ink,width:1.5}});
-  for(let x=xlo;x<xhi;x+=0.9)shapes.push({type:'line',x0:x,x1:x-0.4,y0:0,y1:-0.4,line:{color:COL.muted,width:0.8}});
-  data.forEach((d,i)=>{
-    const cx=px[i];
-    // outer side = direction away from the row centroid; labels pin here so they
-    // never land in the gap between columns regardless of arrow direction.
-    const mid=(n-1)/2;
-    const outer=(i<mid)?-1:(i>mid?1:1);   // left cols label left, right cols label right
-    shapes.push({type:'line',x0:cx,x1:cx,y0:0,y1:Hstub,line:{color:COL.moss,width:5}});
-    if(!d.reaction)return;
-    const R=d.reaction, M=d.member;
-    const ah=slot*0.30;   // horizontal arrow length (shear)
-    // ---- member forces (red) at top ----
-    annotations.push({x:cx,y:Hstub,ax:cx,ay:Hstub+aLen*0.9,xref:'x',yref:'y',axref:'x',ayref:'y',
-      showarrow:true,arrowhead:2,arrowwidth:2.5,arrowcolor:'#c0392b',text:`N=${uForce(M.N)}`,font:{size:9,color:'#c0392b'},yanchor:'bottom'});
-    const Vsign=Math.sign(M.V)||1;
-    annotations.push({x:cx,y:Hstub*0.72,ax:cx-Vsign*ah,ay:Hstub*0.72,xref:'x',yref:'y',axref:'x',ayref:'y',
-      showarrow:true,arrowhead:2,arrowwidth:2.5,arrowcolor:'#c0392b',text:''});
-    annotations.push({x:cx+outer*(ah+slot*0.04),y:Hstub*0.72,text:`V=${uForce(M.V)}`,showarrow:false,
-      font:{size:9,color:'#c0392b'},xanchor:outer>0?'left':'right',yanchor:'middle'});
-    // ---- reactions (blue) at base ----
-    annotations.push({x:cx,y:0,ax:cx,ay:-aLen*0.9,xref:'x',yref:'y',axref:'x',ayref:'y',
-      showarrow:true,arrowhead:2,arrowwidth:2.5,arrowcolor:'#1d4e6b',text:`N=${uForce(R.N)}`,font:{size:9,color:'#1d4e6b'},yanchor:'top',xanchor:'right'});
-    const RVsign=Math.sign(R.V)||1;
-    annotations.push({x:cx,y:-aLen*0.5,ax:cx-RVsign*ah,ay:-aLen*0.5,xref:'x',yref:'y',axref:'x',ayref:'y',
-      showarrow:true,arrowhead:2,arrowwidth:2.5,arrowcolor:'#1d4e6b',text:''});
-    annotations.push({x:cx+outer*(ah+slot*0.04),y:-aLen*0.5,text:`V=${uForce(R.V)}`,showarrow:false,
-      font:{size:9,color:'#1d4e6b'},xanchor:outer>0?'left':'right',yanchor:'middle'});
-    // ---- moments: member (red, top) + reaction (blue, base), opposite sense ----
-    // moment rotation glyph: positive moment reads clockwise (↻), negative CCW (↺),
-    // matching the MIDAS global-Y (right-hand-rule) sense as viewed in this X-Z elevation.
-    // Member (red) and reaction (blue) are equal & opposite, so their arcs differ.
-    const memArc=(M.M>=0)?'↻':'↺', reactArc=(R.M>=0)?'↻':'↺';
-    annotations.push({x:cx+slot*0.10,y:Hstub*0.42,text:`${memArc} M=${uMom(M.M)}`,showarrow:false,
-      font:{size:9,color:'#c0392b'},xanchor:'left'});
-    annotations.push({x:cx+slot*0.12,y:-aLen*1.25,text:`${reactArc} M=${uMom(R.M)}`,showarrow:false,
-      font:{size:9,color:'#1d4e6b'},xanchor:'left'});
-    annotations.push({x:cx,y:Hstub+aLen*1.15,text:`${d.label||('Col '+(d.ci+1))}${d.x!=null?` (x=${f(d.x,1)}′)`:''}`,showarrow:false,
-      font:{size:10,color:COL.ink},yanchor:'bottom'});
-  });
-  const layout=BASE_LAYOUT({shapes,annotations});
-  layout.yaxis.range=[-aLen*1.9, Hstub+aLen*1.7];
-  layout.xaxis.range=[xlo,xhi];
-  layout.xaxis.visible=false; layout.yaxis.visible=false;
-  Plotly.react(plotId,traces,layout,PLOT_CFG);
+  const host=document.getElementById(plotId); if(!host) return;
+  const ok=data.filter(d=>d.reaction); host.style.height='auto';
+  if(!ok.length){ host.innerHTML=''; return; }
+  const lng=ok.some(d=>d.reaction.VL!=null), pinned=state.baseFixity==='pinned';
+  const BLUE='#1d4e6b', RED='#b3402d', INK='#16191d', MUTED='#6a665d', STEEL='#5b6770';
+  const fu=uForceLbl(), mu=uMomLbl();
+  const mx=k=>Math.max(1e-9,...ok.map(d=>Math.abs(d.reaction[k]||0)));
+  const NM=mx('N'), VM=mx('V');
+  const lenN=v=>22+(pinned?34:44)*Math.abs(v)/NM, lenV=v=>22+44*Math.abs(v)/VM;
+  // layout: rows of cards (one row per frame for "all frames", else up to 4 per row)
+  const byRow=[]; const frames=[...new Set(ok.map(d=>d.fj))];
+  if(frames.length>1 && frames[0]!=null) frames.forEach(fj=>byRow.push(ok.filter(d=>d.fj===fj)));
+  else for(let i=0;i<ok.length;i+=4) byRow.push(ok.slice(i,i+4));
+  const W=360, H=lng?330:296, cols=Math.max(...byRow.map(r=>r.length));
+  const VW=Math.max(cols*W,560), VH=byRow.length*H+58;
+  const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const T=(x,y,t,o={})=>`<text x="${x}" y="${y}" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="${o.s||13}" font-weight="${o.w||400}" fill="${o.c||INK}" text-anchor="${o.a||'middle'}"${o.b?' dominant-baseline="'+o.b+'"':''}>${esc(t)}</text>`;
+  const arrow=(x1,y1,x2,y2,c,w)=>`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="${w||3}" marker-end="url(#ah${c===RED?'r':'b'})"/>`;
+  // circular arrow of radius r around (cx,cy); ccw=true draws a counter-clockwise arc (screen)
+  const arc=(cx,cy,r,ccw,c)=>{ const a0=ccw?-200:20, a1=ccw?20:-200, p=a=>[cx+r*Math.cos(a*Math.PI/180), cy-r*Math.sin(a*Math.PI/180)];
+    const [x0,y0]=p(a0), [x1,y1]=p(a1); return `<path d="M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 1 ${ccw?0:1} ${x1.toFixed(1)},${y1.toFixed(1)}" fill="none" stroke="${c}" stroke-width="2.6" marker-end="url(#ah${c===RED?'r':'b'})"/>`; };
+  let svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VW} ${VH}" width="100%" style="max-width:${Math.min(VW,1200)}px;display:block;margin:0 auto" role="img" aria-label="Column base free-body diagram">
+  <defs>
+    <marker id="ahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${BLUE}"/></marker>
+    <marker id="ahr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${RED}"/></marker>
+    <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" stroke="#a49d8f" stroke-width="1.4"/></pattern>
+  </defs>
+  <rect x="0" y="0" width="${VW}" height="${VH}" fill="#fcfbf8"/>`;
+  // legend
+  svg+=`<g transform="translate(14,20)">${arrow(0,0,26,0,BLUE,2.6)}${T(32,0,'Support reaction on the column',{a:'start',s:12,c:BLUE,b:'middle'})}`+
+       (fbdShowMember?`${arrow(250,0,276,0,RED,2.6)}${T(282,0,'Column member force at the base (equal and opposite)',{a:'start',s:12,c:RED,b:'middle'})}`:'')+`</g>`+
+       T(VW/2,VH-12,'Front elevation (X to the right, Z up): +N acts upward, +V toward +X, +M counter-clockwise. Arrow lengths scale with magnitude.',{s:11,c:MUTED});
+  byRow.forEach((row,ri)=>row.forEach((d,ci)=>{
+    const ox=(VW-row.length*W)/2+ci*W, oy=34+ri*H, cx=ox+W/2, base=oy+160, top=oy+58, R=d.reaction, Mf=d.member;
+    svg+=`<g>`;
+    svg+=`<rect x="${ox+6}" y="${oy+4}" width="${W-12}" height="${H-12}" rx="8" fill="#fff" stroke="#e2ddd0"/>`;
+    svg+=T(cx,oy+26,d.label||('Col '+(d.ci+1)),{s:15,w:700});
+    if(d.x!=null) svg+=T(cx,oy+44,`x = ${f(d.x,1)} ft`,{s:11,c:MUTED});
+    // column (break line at top), base plate, foundation
+    svg+=`<rect x="${cx-9}" y="${top}" width="18" height="${base-top-6}" fill="${STEEL}"/>`;
+    svg+=`<path d="M${cx-15},${top+2} l7,-6 l8,10 l8,-10 l7,6" fill="none" stroke="${STEEL}" stroke-width="2"/>`;
+    svg+=`<rect x="${cx-26}" y="${base-6}" width="52" height="6" fill="#3d454c"/>`;
+    if(pinned) svg+=`<path d="M${cx},${base} l-16,20 h32 z" fill="#fff" stroke="${INK}" stroke-width="1.6"/><rect x="${cx-38}" y="${base+20}" width="76" height="9" fill="url(#hatch)"/><line x1="${cx-38}" y1="${base+20}" x2="${cx+38}" y2="${base+20}" stroke="${INK}" stroke-width="1.6"/>`;
+    else svg+=`<rect x="${cx-46}" y="${base}" width="92" height="12" fill="url(#hatch)"/><line x1="${cx-46}" y1="${base}" x2="${cx+46}" y2="${base}" stroke="${INK}" stroke-width="1.8"/>`;
+    const fy=pinned?base+30:base+12;
+    // N: vertical reaction below the base
+    const lN=lenN(R.N);
+    if(Math.abs(R.N)>1e-6){ if(R.N>0) svg+=arrow(cx,fy+lN,cx,fy+2,BLUE); else svg+=arrow(cx,fy+2,cx,fy+lN,BLUE); }
+    svg+=T(cx+12,fy+Math.max(lN,26)/2+2,`N = ${uForce(R.N)} ${fu}`,{s:13,w:600,c:BLUE,a:'start',b:'middle'});
+    // V: horizontal reaction at the base, on the left side
+    const lV=lenV(R.V), vy=base-16;
+    if(Math.abs(R.V)>1e-6){ if(R.V>0) svg+=arrow(cx-14-lV,vy,cx-14,vy,BLUE); else svg+=arrow(cx-14,vy,cx-14-lV,vy,BLUE); }
+    svg+=T(cx-20,vy-12,`V = ${uForce(R.V)} ${fu}`,{s:13,w:600,c:BLUE,a:'end'});
+    // M: curved arrow around the base, right side
+    if(Math.abs(R.M)>1e-6) svg+=arc(cx+30,base-36,17,R.M>0,BLUE);
+    svg+=T(cx+56,base-34,`M = ${uMom(R.M)} ${mu}${pinned&&Math.abs(R.M)<0.5?' (pinned)':''}`,{s:13,w:600,c:BLUE,a:'start',b:'middle'});
+    // member forces at the top of the stub (optional)
+    if(fbdShowMember && Mf){
+      const my=top+4;
+      if(Math.abs(Mf.N)>1e-6){ if(Mf.N>0) svg+=arrow(cx+30,my+30,cx+30,my,RED,2.4); else svg+=arrow(cx+30,my,cx+30,my+30,RED,2.4); }
+      if(Math.abs(Mf.V)>1e-6){ if(Mf.V>0) svg+=arrow(cx-60,my+44,cx-16,my+44,RED,2.4); else svg+=arrow(cx-16,my+44,cx-60,my+44,RED,2.4); }
+      svg+=T(cx+40,my+6,`N ${uForce(Mf.N)}`,{s:11,c:RED,a:'start'})+T(cx+40,my+22,`M ${uMom(Mf.M)}`,{s:11,c:RED,a:'start'})+T(cx-20,my+36,`V ${uForce(Mf.V)}`,{s:11,c:RED,a:'end'});
+    }
+    // out-of-plane (3D) and governing combinations
+    let ly=oy+H-(lng?56:34);
+    if(lng){ svg+=T(cx,ly,`V long = ${uForce(R.VL||0)} ${fu} · M long = ${uMom(R.ML||0)} ${mu}`,{s:12,c:BLUE}); ly+=16;
+      svg+=T(cx,ly,'out of plane: along the canopy length',{s:10,c:MUTED}); ly+=18; }
+    if(d.gov) svg+=T(cx,ly,`N: ${d.gov.N} · V: ${d.gov.V} · M: ${d.gov.M}`,{s:10.5,c:MUTED});
+    svg+=`</g>`;
+  }));
+  svg+='</svg>';
+  host.innerHTML=svg;
+}
+// SVG figure -> PNG data URL (for the report)
+async function svgToPng(svgEl,scale){
+  const vb=svgEl.viewBox.baseVal, s=scale||2, xml=new XMLSerializer().serializeToString(svgEl);
+  const img=new Image(); img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(xml); await img.decode();
+  const c=document.createElement('canvas'); c.width=vb.width*s; c.height=vb.height*s;
+  const ctx=c.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); ctx.drawImage(img,0,0,c.width,c.height);
+  return c.toDataURL('image/png');
 }
 
 // ---- 3D: whole-structure results (every frame, eave beam and purlin) ----
@@ -6197,7 +6230,7 @@ function refreshReactionPanel(){
     fw.style.display=on3?'inline-flex':'none';
     document.getElementById('reactCaseWrap').style.marginLeft=on3?'0':'auto';
     if(on3){ const ys=frameYs(state);
-      fs.innerHTML=ys.map((y,j)=>`<option value="${j}">Frame ${j+1} (y = ${f(y,1)} ft)</option>`).join('')+`<option value="all">All frames (table)</option>`;
+      fs.innerHTML=ys.map((y,j)=>`<option value="${j}">Frame ${j+1} (y = ${f(y,1)} ft)</option>`).join('')+`<option value="all">All frames</option>`;
       fs.value=reactAllFrames?'all':String(Math.min(resFrame,ys.length-1)); }
     else reactAllFrames=false;
     renderReactPanelData();
@@ -6207,8 +6240,7 @@ function refreshReactionPanel(){
 function renderReactPanelData(){
   const data=midasData(), all=is3D(state)&&reactAllFrames;
   buildReactTableInto('reactTable', data, reactShowCase==='__gov__');
-  const pr=document.getElementById('plotReact'); pr.style.display=all?'none':'';
-  if(!all) drawFBDInto('plotReact', data);
+  drawFBDInto('plotReact', data);
 }
 
 // ============================================================================
@@ -6332,6 +6364,7 @@ document.getElementById('wsTxt').addEventListener('input',e=>{ document.getEleme
 document.getElementById('wsReact').addEventListener('change',()=>renderWhole());
 document.getElementById('wsReactM').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value; renderReactPanelData();});
+document.getElementById('fbdMember').addEventListener('change',e=>{ fbdShowMember=e.target.checked; renderReactPanelData(); });
 document.getElementById('reactFrameSel').addEventListener('change',e=>{ if(e.target.value==='all'){ reactAllFrames=true; renderReactPanelData(); } else { reactAllFrames=false; setResFrame(+e.target.value); } });
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
