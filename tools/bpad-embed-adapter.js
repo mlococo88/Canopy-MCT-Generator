@@ -34,7 +34,9 @@
     commit:"__BPAD_COMMIT__",
     ready:false,
     defaults:function(){ return clone(defaultState()); },
-    library:function(){ return {w:LIB.wshapes.map(function(s){return s.name;}), hss:LIB.hss.map(function(s){return {name:s.name,kind:s.kind,d:s.d,b:s.b};})}; },
+    library:function(){ var nm=function(a){ var o={}; (a||[]).forEach(function(g){ o[g.id]=g.name; }); return o; };
+      return {w:LIB.wshapes.map(function(s){return s.name;}), hss:LIB.hss.map(function(s){return {name:s.name,kind:s.kind,d:s.d,b:s.b};}),
+              plateGrades:nm(LIB.plateGrades), anchorGrades:nm(LIB.anchorGrades)}; },
     /* show a group's inputs in the designer */
     load:function(st){
       quiet++;
