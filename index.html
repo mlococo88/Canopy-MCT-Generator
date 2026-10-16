@@ -738,6 +738,11 @@
     <label for="dx_pp">Sheet size</label><select id="dx_pp"><option value="D">34 x 22 (ANSI D)</option><option value="B">17 x 11 (ANSI B)</option></select>
     <label for="dx_tx">Plotted text height (in)</label><input id="dx_tx" type="number" step="0.01" min="0.05">
     <label for="dx_px">Layer prefix</label><input id="dx_px" type="text">
+    <label for="dx_snp">Sheet numbers</label><span style="display:flex;gap:6px;align-items:center"><input id="dx_snp" type="text" placeholder="prefix, e.g. S-" style="width:110px"><input id="dx_sn0" type="number" step="1" min="0" style="width:80px" title="first sheet number"><span class="hint" style="margin:0">blank prefix and 1 = 1, 2, 3 …</span></span>
+    <label for="dx_na">North arrow</label><span style="display:flex;gap:6px;align-items:center"><input id="dx_na" type="number" step="1" style="width:80px"><span class="hint" style="margin:0">° clockwise from the top of the plan sheets (+X); blank = none</span></span>
+    <label for="dx_firm">Firm / logo text</label><textarea id="dx_firm" rows="2" placeholder="Firm name&#10;Address, phone" style="font-family:inherit;font-size:12px"></textarea>
+    <label for="dx_rev">Revisions</label><textarea id="dx_rev" rows="3" placeholder="0 | 2026-10-16 | ISSUED FOR REVIEW&#10;1 | 2026-11-02 | REVISED BASE PLATES" style="font-family:var(--mono);font-size:11px"></textarea>
+    <label for="dx_seal">Seal / stamp box</label><label style="display:flex;gap:6px;align-items:center"><input id="dx_seal" type="checkbox"> <span class="hint" style="margin:0">blank box in the title block for the engineer's seal</span></label>
   </div>
   <p id="dxfMsg" class="hint" style="min-height:1.2em;margin:10px 0 0;color:var(--steel)"></p>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="btn" id="dxfClose" type="button">Close</button><button class="btn primary" id="dxfGo" type="button">Export DXF</button></div>
@@ -774,12 +779,17 @@ def _title_block(lay, sh, W, H, lyr):
     ty, th = 0.5, 2.6 if W > 20 else 1.6
     lay.add_line((0.75, ty + th), (W - 0.5, ty + th), dxfattribs={'layer': T})
     sx = (W - 1.25) / (34.0 - 1.25)   # cell positions are given on a 34 in sheet; map them inside this border
-    for i, (cx, lab, val) in enumerate(sh['cells']):
+    big = W > 20
+    for i, (cx, cw, lab, lines, kind) in enumerate(sh['cells']):
         x = 0.75 + (cx - 0.75) * sx
         if i:
             lay.add_line((x, ty), (x, ty + th), dxfattribs={'layer': T})
-        lay.add_text(lab, height=0.1 if W > 20 else 0.07, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th - 0.35 * th / 2.6))
-        lay.add_text(str(val).upper(), height=0.18 if W > 20 else 0.11, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th * 0.38))
+        lay.add_text(lab, height=0.1 if big else 0.07, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th - 0.35 * th / 2.6))
+        if len(lines) == 1:
+            lay.add_text(str(lines[0]).upper(), height=0.18 if big else 0.11, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th * 0.38))
+        else:
+            for j, ln in enumerate(lines):
+                lay.add_text(str(ln).upper(), height=0.11 if big else 0.075, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((x + 0.15 * sx, ty + th - 0.35 * th / 2.6 - (j + 1) * (0.24 if big else 0.16)))
     lay.add_text(sh['foot'], height=0.08 if W > 20 else 0.06, dxfattribs={'layer': T, 'style': 'CN'}).set_placement((0.9, ty + 0.1 * th))
 
 
@@ -834,7 +844,7 @@ def build(spec_json):
         lyr[n] = nm
     for i, sh in enumerate(S['sheets']):
         W, H, k = sh['W'], sh['H'], sh['k']
-        name = re.sub(r'[<>/\\":;?*|,=`]', '', f"{i + 1:02d} {sh['title']}")[:60].strip()
+        name = re.sub(r'[<>/\\":;?*|,=`]', '', f"{sh.get('no') or '%02d' % (i + 1)} {sh['title']}")[:60].strip()
         lay = doc.layouts.new(name)
         media = 'ANSI_full_bleed_D' if W > 20 else 'ANSI_full_bleed_B'
         lay.page_setup(size=(W, H), margins=(0, 0, 0, 0), units='inch', scale=(1, 1), name=media, device='DWG To PDF.pc3')   # ready for PUBLISH
@@ -6722,7 +6732,8 @@ document.getElementById('downloadReportBtn').onclick=downloadReport;
 // needs internet), or R12 with each sheet's border and title block in model space (offline).
 // ============================================================================
 const DXF_DEF = { prefix: 'S-', txt: 0.10, paper: 'D', fmt: 'layouts',
-  draw: { cover: true, plan: true, frame: true, long: true, base: true, setting: true, anchor: true, react: true, loads: true } };
+  draw: { cover: true, iso: true, plan: true, frame: true, long: true, base: true, setting: true, anchor: true, react: true, wind: true, loads: true },
+  snPfx: '', sn0: 1, firm: '', revs: '', north: '', seal: false };
 const DXF_PAPER = { D: [34, 22], B: [17, 11] }, DXF_SC = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 120, 240, 360, 480, 600, 720, 960, 1200];
 // drawing area inside the border, above the title block (paper inches): [x0, y0, x1, y1]
 const DXF_VP = { D: [1.0, 3.3, 33.25, 21.25], B: [0.95, 2.25, 16.4, 10.4] };
@@ -6842,14 +6853,17 @@ function dxfCover(D, C) { const h = D.h, l = D.layer('ANNO-TEXT', 7), tb = D.lay
       : `COLUMN BASES ARE ${s.baseFixity.toUpperCase()}. COLUMN-TO-BEAM CONNECTIONS ARE ${s.beamConnect === 'pinned' ? 'PINNED' : 'MOMENT (FIXED)'}.`,
     'WORK POINTS (W.P.) ARE AT THE ROOF BEAM CENTERLINE OVER EACH COLUMN. ELEVATIONS ARE RELATIVE TO THE PROJECT DATUM.',
     'CONTRACTOR TO VERIFY ALL DIMENSIONS AND ELEVATIONS IN THE FIELD BEFORE FABRICATION.',
-    'CONNECTIONS, BASE PLATES, ANCHOR RODS AND FOUNDATIONS ARE NOT SHOWN AND SHALL BE DESIGNED FOR THE REACTIONS ON THE COLUMN AND BASE LAYOUT SHEET.'];
+    anchorInUse() ? 'BASE PLATES AND ANCHOR RODS PER THE BASE PLATE AND ANCHORAGE DETAILS. CONNECTIONS AND FOUNDATIONS ARE NOT SHOWN AND SHALL BE DESIGNED FOR THE REACTIONS SHOWN.'
+      : 'CONNECTIONS, BASE PLATES, ANCHOR RODS AND FOUNDATIONS ARE NOT SHOWN AND SHALL BE DESIGNED FOR THE REACTIONS ON THE COLUMN AND BASE LAYOUT SHEET.'];
+  const revs = String(dxfOpts().revs || '').split('\n').map(r => r.split('|').map(q => q.trim())).filter(r => r.join('').length);
   dxfFlow(D, C, [
     () => { D.text(l, 0, 0, 3 * h, (mt.name || 'CANOPY').toUpperCase()); D.text(l, 0, -4 * h, 1.6 * h, 'MONO-SLOPE STEEL CANOPY');
       D.text(l, 0, -6.5 * h, h, C.three
         ? `${C.ys.length} FRAMES x ${C.nC} COLUMN${C.nC > 1 ? 'S' : ''}, ${dxfFI(C.g.L * 12)} x ${dxfFI(C.L3 * 12)} IN PLAN, ROOF SLOPE ${s.slope} (${f(C.g.theta * 180 / Math.PI, 1)} DEG.), FIXED COLUMN BASES`
         : `SINGLE FRAME, ${C.nC} COLUMN${C.nC > 1 ? 'S' : ''}, ${dxfFI(C.g.L * 12)} ROOF, SLOPE ${s.slope} (${f(C.g.theta * 180 / Math.PI, 1)} DEG.), ${s.baseFixity.toUpperCase()} COLUMN BASES`); },
-    () => dxfTable(D, tb, 0, 0, ['SHEET', 'TITLE'], C.list.map((x, i) => [String(i + 1), x]), 'SHEET INDEX'),
-    () => dxfTable(D, tb, 0, 0, ['REV.', 'DATE', 'DESCRIPTION', 'BY'], [['0', mt.date, 'ISSUED FROM CANOPY MCT GENERATOR', dxfStr(mt.by)], ['', '', '', ''], ['', '', '', '']], 'REVISIONS'),
+    () => dxfTable(D, tb, 0, 0, ['SHEET', 'TITLE'], C.list.map((x, i) => [String(dxfSheetNo(i + 1) || i + 1), x]), 'SHEET INDEX'),
+    () => { if (C.paper === 'B' && revs.length) return;   // B sheets: the revisions are in the title block
+      dxfTable(D, tb, 0, 0, ['REV.', 'DATE', 'DESCRIPTION', 'BY'], revs.length ? revs.map(r => [r[0] || '', r[1] || '', dxfStr(r.slice(2).join(' ')).toUpperCase(), dxfStr(mt.by)]) : [['0', mt.date, 'ISSUED FROM CANOPY MCT GENERATOR', dxfStr(mt.by)], ['', '', '', ''], ['', '', '', '']], 'REVISIONS'); },
     () => dxfNotes(D, l, 0, 0, 'GENERAL NOTES', notes, C.paper === 'B' ? 60 : 80)]);
 }
 /* ---------- 2: roof framing plan (3D). Drawing x = Y along the length, drawing y = X across the frame ---------- */
@@ -6880,9 +6894,10 @@ function dxfPlan(D, C) { const h = D.h, g = C.g, X = v => v * 12, L = g.L, L3 = 
     `ARROW: ROOF SLOPES UP ${dxfFrac(12 * s.slope, 16)}:12 (${f(g.theta * 180 / Math.PI, 2)} DEG.) FROM THE LOW EAVE TO THE HIGH EAVE.`], 110);
   D.text(ly.t, X(L3) + 0.5 * h, X(L) + 0.4 * h, 0.9 * h, 'HIGH EAVE'); D.text(ly.t, X(L3) + 0.5 * h, -1.1 * h, 0.9 * h, 'LOW EAVE');
   // section tags
-  const nF = C.nums && C.nums['TYPICAL FRAME ELEVATION'], nL = C.nums && C.nums['LONGITUDINAL ELEVATION'];
-  dxfTag(D, ly.t, X(y1), X(L) + ext * 0.4, 'A', `TYPICAL FRAME${nF ? ', SHEET ' + nF : ''}`, 1, 1);
+  const fk = C.list ? C.list.find(t => /FRAME ELEVATION/.test(t)) : null, nF = fk && C.nums[fk], nL = C.nums && C.nums['LONGITUDINAL ELEVATION'];
+  dxfTag(D, ly.t, X(y1), X(L) + ext * 0.4, 'A', `${fk && fk !== 'TYPICAL FRAME ELEVATION' ? 'FRAME ELEVATIONS' : 'TYPICAL FRAME'}${nF ? ', SHEET ' + nF : ''}`, 1, 1);
   dxfTag(D, ly.t, X(L3) * 0.5, X(g.colX[0]), 'B', `LONGITUDINAL ELEVATION${nL ? ', SHEET ' + nL : ''}`, 1, -1);
+  dxfNorth(D, ly.t, X(L3) + ext + 8 * h, X(L) + ext + 2 * h);
   D.text(ly.t, -ext - 10 * h, X(L) + ext + 7 * h, 1.6 * h, 'ROOF FRAMING PLAN');
   D.text(ly.t, -ext - 10 * h, X(L) + ext + 5 * h, 0.9 * h, `LENGTH (Y) LEFT TO RIGHT FROM THE FRONT EDGE; LOW EAVE AT BOTTOM. MEMBERS SHOWN AT FLANGE WIDTH. ${C.purl.length ? 'PURLINS BEAR ON THE FRAME BEAMS.' : ''}`);
 }
@@ -6966,6 +6981,7 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   g.colX.forEach((cx, i) => { D.line(ly.gr, -ext, X(cx), X(len) + ext, X(cx), cl); dxfBubble(D, ly.gr, -ext - 1.3 * h, X(cx), dxfLetter(i)); });
   if (C.three) { D.chainH(ly.d, C.ys.map(X), -ext - 5 * h, 0); }
   D.chainV(ly.d, g.colX.map(X), -ext - 5 * h, 0);
+  dxfNorth(D, ly.t, X(len) + ext + 8 * h, X(g.L) + ext);
   D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 7 * h, 1.6 * h, 'COLUMN AND BASE LAYOUT');
   D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 5 * h, 0.9 * h, `PLAN. MARK = FRAME GRID + COLUMN GRID. BASES ${C.three ? 'FIXED' : s.baseFixity.toUpperCase()}. DASHED = ROOF OUTLINE${anchorInUse() ? '.' : ' AND BASE PLATE ZONE (BASE PLATES NOT DESIGNED HERE).'}`);
   if (anchorInUse()) D.text(ly.t, -ext - 4 * h, X(g.L) + ext + 3.6 * h, 0.9 * h, 'BASE PLATES AND RODS SHOWN PER EACH COLUMN\'S ANCHORAGE GROUP: SEE THE BASE PLATE AND ANCHORAGE DETAILS.');
@@ -7099,6 +7115,7 @@ function dxfSetting(D, C) { const h = D.h, g = C.g, cb = C.cp.b, cd = C.cp.d, cl
         dxfEl(z).slice(4), dxfEl(top).slice(4), dxfEl(z + (G.P.t + 0.875 * R.d + R.d) / 12).slice(4), dxfEl(top - (R.hef + R.headH) / 12).slice(4), dxfFI(R.len)]); }
     else rows.push([dxfMarkOf(j, i), `${j + 1} / ${dxfLetter(i)}`, dxfFI(px), C.three ? dxfFI(py) : '-', '-', '-', dxfEl(z).slice(4), '-', '-', '-', '-']);
     D.text(ly.t, py + cb / 2 + 0.6 * h, px + cd / 2 + 0.5 * h, 0.9 * h, dxfMarkOf(j, i)); });
+  dxfNorth(D, ly.t, (C.three ? C.L3 : P.len) * 12 + P.ext + 8 * h, C.g.L * 12 + P.ext);
   D.text(ly.t, -P.ext - 4 * h, P.top + 3 * h, 1.6 * h, 'ANCHOR ROD SETTING PLAN');
   D.text(ly.t, -P.ext - 4 * h, P.top + 1.2 * h, 0.9 * h, 'PLAN. RODS SHOWN PER THE ANCHORAGE GROUP OF EACH COLUMN; DASHED = BASE PLATE. ROD PATTERNS ARE DIMENSIONED ON THE BASE PLATE AND ANCHORAGE DETAILS.');
   const T = dxfTable(D, ly.tb, 0, -P.ext - 10 * h, ['MARK', 'GRID', 'X', 'Y', 'ANCHORAGE', 'RODS', 'U/S PLATE EL.', 'T.O. PEDESTAL EL.', 'T.O. ROD EL.', 'B.O. ROD EL.', 'ROD LENGTH'], rows,
@@ -7118,6 +7135,7 @@ function dxfReact(D, C) { const h = D.h, g = C.g, cb = C.cp.b, cd = C.cp.d, cl =
     const gg = at(j, i); const lines = [dxfMarkOf(j, i)];
     if (gg) { lines.push(`N ${uForce(gg.N.v)}`, `V ${uForce(gg.V.v)}`, `M ${uMom(gg.M.v)}`); if (C.three) lines.push(`VL ${uForce(gg.VL.v)}`, `ML ${uMom(gg.ML.v)}`); }
     lines.forEach((t, k) => D.text(k ? ly.rx : ly.t, py + cb / 2 + 0.8 * h, px + cd / 2 + 0.6 * h - k * 1.25 * h, 0.85 * h, t)); });
+  dxfNorth(D, ly.t, (C.three ? C.L3 : P.len) * 12 + P.ext + 8 * h, C.g.L * 12 + P.ext);
   D.text(ly.t, -P.ext - 4 * h, P.top + 3 * h, 1.6 * h, 'FOUNDATION REACTIONS PLAN');
   D.text(ly.t, -P.ext - 4 * h, P.top + 1.2 * h, 0.9 * h, `GOVERNING ${RES_SRC === 'app' ? 'IN-APP LINEAR ANALYSIS' : 'MIDAS'} BASE REACTIONS (STRENGTH ENVELOPE, FACTORED) AT EACH COLUMN. FORCES IN ${FU}, MOMENTS IN ${MU}.`);
   dxfNotes(D, ly.t, 0, -P.ext - 10 * h, 'REACTION NOTES', [
@@ -7125,6 +7143,70 @@ function dxfReact(D, C) { const h = D.h, g = C.g, cb = C.cp.b, cd = C.cp.d, cl =
     'EACH VALUE IS THE GOVERNING (LARGEST MAGNITUDE) VALUE OVER THE LRFD STRENGTH COMBINATIONS; THE VALUES ARE NOT CONCURRENT. SEE THE CALCULATIONS FOR CONCURRENT SETS AND SERVICE-LEVEL VALUES.',
     'REACTIONS ARE AT THE UNDERSIDE OF THE BASE PLATE (COLUMN BASE ELEVATION).'], 100);
 }
+// arrow from (x1, y1) to (x2, y2) with an open head
+function dxfArrow(D, l, x1, y1, x2, y2) { const h = D.h, a = Math.atan2(y2 - y1, x2 - x1), s = 0.9 * h;
+  D.line(l, x1, y1, x2, y2); [a + 2.7, a - 2.7].forEach(b => D.line(l, x2, y2, x2 + s * Math.cos(b), y2 + s * Math.sin(b))); }
+// north arrow at (x, y): state.dxf.north = degrees clockwise from the top of the plan sheets (blank = none)
+function dxfNorth(D, l, x, y) { const o = dxfOpts(), a = parseFloat(o.north); if (!isFinite(a)) return; const h = D.h, r = 3.2 * h, t = a * Math.PI / 180, u = [Math.sin(t), Math.cos(t)], n = [u[1], -u[0]];
+  D.circle(l, x, y, r); D.pline(l, [[x + u[0] * r, y + u[1] * r], [x - u[0] * 0.6 * r + n[0] * 0.5 * r, y - u[1] * 0.6 * r + n[1] * 0.5 * r], [x, y], [x - u[0] * 0.6 * r - n[0] * 0.5 * r, y - u[1] * 0.6 * r - n[1] * 0.5 * r]], true);
+  D.text(l, x + u[0] * (r + 0.8 * h), y + u[1] * (r + 0.8 * h) - 0.5 * h, 1.1 * h, 'N', 1); }
+/* ---------- wind load diagrams: roof plans per wind case ---------- */
+function dxfWind(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, A = C.A, len = C.three ? C.L3 : Math.max(s.B_trib, 4), hid = D.ltype('HIDDEN');
+  const ly = { ro: D.layer('ROOF', 8), w: D.layer('WIND', 4), t: D.layer('ANNO-TEXT', 7), d: D.layer('DIMS', 7) };
+  const W = X(len), Hh = X(g.L), arrows = (pts) => pts.forEach(p => dxfArrow(D, ly.w, ...p));
+  const blocks = [() => { D.text(ly.t, 0, 0, 1.6 * h, 'WIND LOAD DIAGRAMS'); D.text(ly.t, 0, -1.8 * h, 0.9 * h, 'ROOF PLANS: X ACROSS THE FRAME (UP), Y ALONG THE CANOPY (RIGHT).');
+    D.text(ly.t, 0, -3.2 * h, 0.9 * h, `QH = ${f(s.q_h, 2)} PSF, G = ${s.G}, ${s.flow === 'clear' ? 'CLEAR' : 'OBSTRUCTED'} FLOW.`);
+    D.text(ly.t, 0, -4.6 * h, 0.9 * h, '+ = NET PRESSURE TOWARD THE ROOF, - = SUCTION.'); }];
+  const part = C.part || 0, wcs = part === 2 ? [] : (A.loads.wcases || []), lcs = part === 1 ? [] : (A.loads.lcases || []);
+  wcs.forEach(wc => blocks.push(() => { const up = wc.gamma === 180;
+    D.rect(ly.ro, 0, 0, W, Hh); D.line(ly.ro, 0, Hh / 2, W, Hh / 2, hid);
+    D.text(ly.w, W / 2, Hh * 0.25 - 0.5 * h, 1.1 * h, `LOWER HALF  ${f(wc.pLower, 1)} PSF`, 1); D.text(ly.w, W / 2, Hh * 0.75 - 0.5 * h, 1.1 * h, `UPPER HALF  ${f(wc.pUpper, 1)} PSF`, 1);
+    arrows([0.2, 0.5, 0.8].map(fr => up ? [W * fr, -7 * h, W * fr, -1.5 * h] : [W * fr, Hh + 7 * h, W * fr, Hh + 1.5 * h]));
+    D.text(ly.t, 0, Hh + 10.5 * h, 1.1 * h, `${wc.name.toUpperCase()} (GAMMA = ${wc.gamma}%%d)`);
+    D.text(ly.t, 0, Hh + 9 * h, 0.8 * h, `TOWARD THE ${up ? 'HIGH' : 'LOW'} SIDE. CNW ${f(wc.cnw, 3)}, CNL ${f(wc.cnl, 3)}.`); }));
+  lcs.forEach(lc => blocks.push(() => { const fwd = lc.gamma === 90, yOf = d => fwd ? d : len - d;
+    D.rect(ly.ro, 0, 0, W, Hh);
+    lc.zones.forEach((z, i) => { const d0 = Math.min(z.d0, len), d1 = Math.min(z.d1, len); if (d1 <= d0 + 1e-9) return;
+      const ya = X(yOf(d0)), yb = X(yOf(d1)); if (i) D.line(ly.ro, ya, 0, ya, Hh, hid);
+      const xm = (ya + yb) / 2; D.text(ly.w, xm, Hh / 2 + 0.6 * h, 0.9 * h, `CN ${f(z.cn, 2)}`, 1); D.text(ly.w, xm, Hh / 2 - 1.0 * h, 0.9 * h, `${f(lc.qhG * z.cn, 1)} PSF`, 1); });
+    arrows([0.25, 0.5, 0.75].map(fr => fwd ? [-7 * h, Hh * fr, -1.5 * h, Hh * fr] : [W + 7 * h, Hh * fr, W + 1.5 * h, Hh * fr]));
+    D.text(ly.t, 0, Hh + 4.5 * h, 1.1 * h, `${lc.name.toUpperCase()} (GAMMA = ${lc.gamma}%%d)`);
+    D.text(ly.t, 0, Hh + 3 * h, 0.8 * h, `ENTERING AT THE ${fwd ? 'FRONT' : 'BACK'} EDGE. ZONES AT H, 2H (H = ${f(lc.h, 1)} FT).`); }));
+  blocks.push(() => dxfNotes(D, ly.t, 0, 0, 'WIND NOTES', [
+    `FASCIA: ${f(s.p_lat, 1)} PSF ON THE ${f(s.d_roof, 2)} FT FASCIA DEPTH. COLUMNS: ${f(s.p_col, 1)} PSF ON THE COLUMN FACE.${s.screen !== 'none' ? ` WINDSCREEN: ${f(s.p_screen, 1)} PSF.` : ''}`,
+    'ROOF NET PRESSURES ACT NORMAL TO THE ROOF. STRIP-AVERAGED FRAME VALUES FOR THE ALONG-LENGTH CASES ARE TABULATED ON THE DESIGN LOADS SHEET.',
+    'ACROSS THE FRAMES: ASCE 7-16 FIG. 27.3-4. ALONG THE LENGTH: FIG. 27.3-7.'], C.paper === 'B' ? 55 : 110));
+  dxfFlow(D, C, blocks);
+}
+/* ---------- isometric view of the 3D model ---------- */
+function dxfIso(D, C) { const h = D.h, mesh = buildMCT(state).mesh; if (!mesh.is3D) return;
+  const ly = { bm: D.layer('STL-BEAM', 5), co: D.layer('STL-COLS', 3), lg: D.layer('STL-LONG', 30), pu: D.layer('STL-PURL', 6), t: D.layer('ANNO-TEXT', 7), gr: D.layer('GRID', 8) };
+  const c30 = Math.cos(Math.PI / 6), P = (x, y, z) => [(y - x) * 12 * c30, z * 12 + (x + y) * 12 * 0.5];   // ft -> isometric inches (Y to the right-up, X to the left-up)
+  const lay = { 1: ly.co, 2: ly.bm, 3: ly.lg, 4: ly.pu };
+  mesh.elements.forEach(e => { const a = mesh.nodes[e.n1 - 1], b = mesh.nodes[e.n2 - 1]; D.line(lay[e.sec] || ly.bm, ...P(a.x, a.y, a.z), ...P(b.x, b.y, b.z)); });
+  const g = C.g;
+  mesh.frames.forEach(F => { const tip = P(g.L + 1.5, F.y, g.yAt(g.L) + 1.5); D.text(ly.t, tip[0], tip[1], 1.1 * h, `FRAME ${F.j + 1}`, 1); });
+  mesh.frames[0].keyNodes.cols.forEach((c, i) => { const n = mesh.nodes[c.base - 1], q = P(n.x, n.y - 2, n.z); D.text(ly.gr, q[0], q[1] - 1.5 * h, 1.1 * h, dxfLetter(i), 1); });
+  if (anchorInUse()) mesh.frames.forEach(F => F.keyNodes.cols.forEach(c => { const id = anchorGroupOf(anchorKey(F.j, c.i)), gr = id && anchorGroup(id); if (!gr || !gr.bp || !gr.bp.plate) return;
+    const n = mesh.nodes[c.base - 1], bx = gr.bp.plate.N / 24, by = gr.bp.plate.B / 24;
+    D.pline(ly.co, [[-bx, -by], [bx, -by], [bx, by], [-bx, by]].map(([dx, dy]) => P(n.x + dx, n.y + dy, n.z)), true); }));
+  const bb = D.bbox(0); D.text(ly.t, bb[0], bb[3] + 3 * h, 1.6 * h, 'ISOMETRIC VIEW');
+  D.text(ly.t, bb[0], bb[3] + 1.3 * h, 0.9 * h, 'ISOMETRIC PROJECTION OF THE ANALYSIS MODEL (MEMBER CENTERLINES), TRUE LENGTH ALONG X, Y AND Z. FOR INFORMATION ONLY.');
+}
+// title block cells on a 34 in sheet: [x, width, label, lines, kind]; optional firm, revisions and seal cells
+function dxfTitleCells(S, k) { const o = dxfOpts(), mt = dxfMeta(), big = (DXF_PAPER[S.paper] || DXF_PAPER.D)[0] > 20, cells = [];
+  const no = dxfSheetNo(S.n), revs = String(o.revs || '').split('\n').map(r => r.split('|').map(q => q.trim())).filter(r => r.join('').length);
+  const firm = String(o.firm || '').split('\n').map(q => q.trim()).filter(Boolean);
+  const spec = [[6, 'PROJECT', [mt.name]], [2.5, 'PROJECT NO.', [mt.no]]];
+  if (firm.length) spec.push([4, 'FIRM', firm.slice(0, big ? 5 : 3)]);
+  if (revs.length) spec.push([5.5, 'REVISIONS', revs.slice(-(big ? 6 : 3)).map(r => `${r[0] || ''}  ${r[1] || ''}  ${r.slice(2).join(' ')}`)]);
+  spec.push([0, 'SHEET TITLE', [S.title]], [3, 'SCALE', [dxfScaleName(k)]], [3, 'DESIGNED / CHECKED', [`${mt.by || '-'} / ${mt.chk || '-'}`]]);
+  if (o.seal) spec.push([2.6, 'SEAL', [], 'seal']);
+  spec.push([2.4, 'SHEET', no ? [no, `${S.n} OF ${S.of}`] : [`${S.n} OF ${S.of}`]]);
+  const fixed = spec.reduce((a, c) => a + c[0], 0), flex = Math.max(4, 32.75 - fixed); let x = 0.75;
+  spec.forEach(c => { const w = c[0] || flex; cells.push([x, w, c[1], c[2].map(v => dxfStr(String(v)).toUpperCase()), c[3] || '']); x += w; });
+  return cells; }
+function dxfSheetNo(n) { const o = dxfOpts(), p = String(o.snPfx || '').trim(), s0 = parseInt(o.sn0, 10); return (p || (isFinite(s0) && s0 !== 1)) ? `${p}${(isFinite(s0) ? s0 : 1) + n - 1}` : ''; }
 /* ---------- 6: design loads, wind cases, combinations, member schedule ---------- */
 function dxfLoads(D, C) { const h = D.h, s = C.s, g = C.g, l = D.layer('ANNO-TEXT', 7), tb = D.layer('TABL', 7), A = C.A, part = C.part || 0;
   const crit = [['CODE', 'ASCE 7-16 (LOADS), AISC 360 (STEEL)'], ['RISK CATEGORY', s.riskCat],
@@ -7170,19 +7252,24 @@ function dxfSheet(D, S, drawFn, ctx, ox) {
   if (!k) { k = D.k; D.over = (D.over || []).concat(S.title); }   // did not fit even at the largest allowed scale
   // place the content in the drawing area (top left), then the border and title block around it
   const W = pw * k, H = ph * k, mx = (vp[0] + 0.125) * k, my = (vp[3] - 0.125) * k; D.move(i0, ox + mx - b[0], my - b[3]);
-  const mt = dxfMeta(), cells = [[0.75, 'PROJECT', mt.name], [9, 'PROJECT NO.', mt.no], [13, 'SHEET TITLE', S.title], [24, 'SCALE', dxfScaleName(k)], [28, 'DESIGNED / CHECKED', `${mt.by || '-'} / ${mt.chk || '-'}`], [31, 'SHEET', `${S.n} OF ${S.of}`]];
+  const cells = dxfTitleCells(S, k), no = dxfSheetNo(S.n);
   const foot = `GENERATED BY CANOPY MCT GENERATOR ${new Date().toISOString().slice(0, 10)}. VIEWPORT SCALE ${k === 1 ? 'FULL SIZE' : '1:' + k}; MODEL SPACE IS FULL SIZE IN INCHES.`;
-  if (S.lay) { D.sheets.push({ title: S.title, k, W: pw, H: ph, vp, cells: cells.map(c => [c[0], c[1], dxfStr(c[2])]), foot, m0: [ox + mx, my], p0: [vp[0] + 0.125, vp[3] - 0.125] }); return { k, W }; }
+  if (S.lay) { D.sheets.push({ title: S.title, no, k, W: pw, H: ph, vp, cells, foot, m0: [ox + mx, my], p0: [vp[0] + 0.125, vp[3] - 0.125] }); return { k, W }; }
   const tb = D.layer('TBLK', 7), bd = D.layer('BRDR', 7), big = pw > 20, th = (big ? 2.6 : 1.6) * k, ty = 0.5 * k;
   D.rect(bd, ox, 0, ox + W, H); D.rect(bd, ox + 0.75 * k, 0.5 * k, ox + W - 0.5 * k, H - 0.5 * k);
   const x1 = ox + W - 0.5 * k; D.line(tb, ox + 0.75 * k, ty + th, x1, ty + th);
-  const sx = (pw - 1.25) / (34 - 1.25); cells.forEach(([cx, lab, val], i) => { const xx = ox + (0.75 + (cx - 0.75) * sx) * k; if (i) D.line(tb, xx, ty, xx, ty + th); D.text(tb, xx + 0.15 * k * sx, ty + th - 0.35 * th / 2.6, (big ? 0.1 : 0.07) * k, lab); D.text(tb, xx + 0.15 * k * sx, ty + th * 0.38, (big ? 0.18 : 0.11) * k, String(val).toUpperCase()); });
+  const sx = (pw - 1.25) / (34 - 1.25);
+  cells.forEach(([cx, cw, lab, lines, kind], i) => { const xx = ox + (0.75 + (cx - 0.75) * sx) * k; if (i) D.line(tb, xx, ty, xx, ty + th);
+    D.text(tb, xx + 0.15 * k * sx, ty + th - 0.35 * th / 2.6, (big ? 0.1 : 0.07) * k, lab);
+    if (lines.length === 1) D.text(tb, xx + 0.15 * k * sx, ty + th * 0.38, (big ? 0.18 : 0.11) * k, lines[0]);
+    else lines.forEach((ln, j) => D.text(tb, xx + 0.15 * k * sx, ty + th - (0.35 * th / 2.6) - (j + 1) * (big ? 0.24 : 0.16) * k, (big ? 0.11 : 0.075) * k, ln)); });
   D.text(tb, ox + 0.9 * k, ty + 0.1 * th, (big ? 0.08 : 0.06) * k, `GENERATED BY CANOPY MCT GENERATOR ${new Date().toISOString().slice(0, 10)}. FULL-SIZE GEOMETRY IN INCHES; PLOT THIS SHEET AT ${k === 1 ? 'FULL SIZE' : '1:' + k}.`);
   return { k, W };
 }
 function dxfBuild(lay) {
   const o = dxfOpts(), C = dxfCtx(), D = new DxfW(o.prefix), sheets = [], add = (title, fn, kmin, kmax, part) => sheets.push({ title, fn, kmin, kmax, part });
   if (o.draw.cover) add('COVER, SHEET INDEX AND NOTES', dxfCover, 1, 1);
+  if (o.draw.iso && C.three) add('ISOMETRIC VIEW', dxfIso, 12);
   if (o.draw.plan && C.three) add('ROOF FRAMING PLAN', dxfPlan, 12);
   if (o.draw.frame) { C.fsets = dxfFrameSets(C); C.fsets.forEach((fs, k) => add(!C.three ? 'FRAME ELEVATION' : C.fsets.length > 1 ? `FRAME ELEVATION - FRAME${fs.js.length > 1 ? 'S' : ''} ${dxfRange(fs.js.map(j => j + 1))}` : 'TYPICAL FRAME ELEVATION', dxfFrame, 6, undefined, k)); }
   if (o.draw.long && C.three) add('LONGITUDINAL ELEVATION', dxfLong, 12);
@@ -7191,10 +7278,11 @@ function dxfBuild(lay) {
   if (o.draw.setting && anchOn) add('ANCHOR ROD SETTING PLAN', dxfSetting, 12);
   if (o.draw.anchor && anchOn) { const nch = dxfAnchorChunks(o.paper).length; for (let k = 0; k < nch; k++) add('BASE PLATE AND ANCHORAGE DETAILS' + (nch > 1 ? ` ${k + 1} OF ${nch}` : ''), dxfAnchor, 4, undefined, k); }
   if (o.draw.react && RESULT_ROWS.length) add('FOUNDATION REACTIONS PLAN', dxfReact, 12);
+  if (o.draw.wind) { if (o.paper === 'B' && (C.A.loads.lcases || []).length) { add('WIND LOAD DIAGRAMS - ACROSS THE FRAMES', dxfWind, 12, undefined, 1); add('WIND LOAD DIAGRAMS - ALONG THE LENGTH', dxfWind, 12, undefined, 2); } else add('WIND LOAD DIAGRAMS', dxfWind, 12); }
   if (o.draw.loads && o.paper === 'B') { add('DESIGN LOADS', dxfLoads, 1, 1, 1); add('MEMBER SCHEDULE AND LOAD COMBINATIONS', dxfLoads, 1, 1, 2); }
   else if (o.draw.loads) add('DESIGN LOADS AND MEMBER SCHEDULE', dxfLoads, 1, 1);
   if (!sheets.length) throw new Error('No sheets selected.');
-  C.nums = {}; C.list = []; sheets.forEach((S, i) => { C.nums[S.title] = i + 1; C.list.push(S.title); });
+  C.nums = {}; C.list = []; sheets.forEach((S, i) => { C.nums[S.title] = dxfSheetNo(i + 1) || i + 1; C.list.push(S.title); });
   let ox = 0; const done = [];
   sheets.forEach((S, i) => { const r = dxfSheet(D, { ...S, paper: o.paper, txt: o.txt, n: i + 1, of: sheets.length, lay }, S.fn, C, ox); done.push(`${S.title} (1:${r.k})`); ox += r.W + 2 * r.k * 12; });
   if (lay) { const base = n => n ? n.replace(/_\d+(\.\d+)?$/, '') : n;   // per-scale linetypes are not needed: viewports scale linetypes
@@ -7232,9 +7320,11 @@ function dxfDownloadR12() {
 function dxfStart() { if (anchorInUse() && RESULT_ROWS.length) anchorEvaluateAll().catch(() => {});  // anchorage ratios for the base layout sheet
 
   const o = dxfOpts(), three = is3D(state), dlg = document.getElementById('dxfDlg');
-  const items = [['cover', 'Cover, sheet index and general notes', true], ['plan', 'Roof framing plan (3D)', three], ['frame', three ? 'Frame elevations (one sheet per distinct set of column base elevations)' : 'Frame elevation', true], ['long', 'Longitudinal elevation (3D)', three], ['base', 'Column and base layout, with MIDAS reactions when pasted', true], ['setting', 'Anchor rod setting plan and schedule (Anchorage tab groups)', anchorInUse()], ['anchor', 'Base plate and anchorage details (Anchorage tab groups)', anchorInUse()], ['react', 'Foundation reactions plan (needs analysis results)', RESULT_ROWS.length > 0], ['loads', 'Design loads, wind cases, combinations, member schedule', true]];
+  const items = [['cover', 'Cover, sheet index and general notes', true], ['iso', 'Isometric view (3D)', three], ['plan', 'Roof framing plan (3D)', three], ['frame', three ? 'Frame elevations (one sheet per distinct set of column base elevations)' : 'Frame elevation', true], ['long', 'Longitudinal elevation (3D)', three], ['base', 'Column and base layout, with MIDAS reactions when pasted', true], ['setting', 'Anchor rod setting plan and schedule (Anchorage tab groups)', anchorInUse()], ['anchor', 'Base plate and anchorage details (Anchorage tab groups)', anchorInUse()], ['react', 'Foundation reactions plan (needs analysis results)', RESULT_ROWS.length > 0], ['wind', 'Wind load diagrams (roof plans per wind case)', true], ['loads', 'Design loads, wind cases, combinations, member schedule', true]];
   document.getElementById('dxfItems').innerHTML = items.map(([k, l, ok]) => `<label style="display:block;margin:3px 0;${ok ? '' : 'color:var(--muted)'}"><input type="checkbox" id="dx_${k}" ${o.draw[k] && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}> ${l}</label>`).join('');
   document.getElementById('dx_px').value = o.prefix; document.getElementById('dx_tx').value = o.txt; document.getElementById('dx_fm').value = o.fmt; document.getElementById('dx_pp').value = o.paper;
+  document.getElementById('dx_snp').value = o.snPfx || ''; document.getElementById('dx_sn0').value = o.sn0 ?? 1; document.getElementById('dx_na').value = o.north ?? '';
+  document.getElementById('dx_firm').value = o.firm || ''; document.getElementById('dx_rev').value = o.revs || ''; document.getElementById('dx_seal').checked = !!o.seal;
   dxfMsg(''); dlg.showModal();
 }
 document.getElementById('dxfBtn').addEventListener('click', dxfStart);
@@ -7242,6 +7332,7 @@ document.getElementById('dxfClose').addEventListener('click', () => document.get
 document.getElementById('dxfGo').addEventListener('click', () => { const o = dxfOpts(), v = id => document.getElementById(id).value;
   Object.keys(DXF_DEF.draw).forEach(k => { const c = document.getElementById('dx_' + k); if (c && !c.disabled) o.draw[k] = c.checked; });
   o.prefix = v('dx_px').replace(/[^\w\-$]/g, '').toUpperCase(); const t = parseFloat(v('dx_tx')); o.txt = t > 0 ? t : 0.1; o.paper = v('dx_pp'); o.fmt = v('dx_fm');
+  o.snPfx = v('dx_snp').trim(); o.sn0 = parseInt(v('dx_sn0'), 10); if (!isFinite(o.sn0)) o.sn0 = 1; o.north = v('dx_na').trim(); o.firm = v('dx_firm'); o.revs = v('dx_rev'); o.seal = document.getElementById('dx_seal').checked;
   if (o.fmt === 'r12') dxfDownloadR12(); else dxfDownloadLayouts(); });
 
 
