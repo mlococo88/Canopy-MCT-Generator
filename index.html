@@ -5796,7 +5796,7 @@ function midasData(){
     return gov.map((g,ci)=>{
       const c=all?full.frames[g.fj].keyNodes.cols[g.ci]:mesh.keyNodes.cols[ci];
       const lng=full.is3D;
-      return {ci,label:g.label,x:c.x,reaction:Object.assign({N:g.N.v,V:g.V.v,M:g.M.v},lng?{VL:g.VL.v,ML:g.ML.v}:{}),
+      return {ci:all?g.ci:ci,fj:full.is3D?(all?g.fj:fj):null,label:g.label,x:c.x,reaction:Object.assign({N:g.N.v,V:g.V.v,M:g.M.v},lng?{VL:g.VL.v,ML:g.ML.v}:{}),
         member:Object.assign({N:-g.N.v,V:-g.V.v,M:-g.M.v},lng?{VL:-g.VL.v,ML:-g.ML.v}:{}),
         gov:Object.assign({N:g.N.load,V:g.V.load,M:g.M.load},lng?{VL:g.VL.load,ML:g.ML.load}:{})};
     });
@@ -5844,8 +5844,14 @@ function drawFBDInto(plotId,data){
   const byRow=[]; const frames=[...new Set(ok.map(d=>d.fj))];
   if(frames.length>1 && frames[0]!=null) frames.forEach(fj=>byRow.push(ok.filter(d=>d.fj===fj)));
   else for(let i=0;i<ok.length;i+=4) byRow.push(ok.slice(i,i+4));
-  const W=360, H=lng?330:296, cols=Math.max(...byRow.map(r=>r.length));
-  const VW=Math.max(cols*W,560), VH=byRow.length*H+58;
+  const W=360, H=lng?346:312, cols=Math.max(...byRow.map(r=>r.length));
+  // base elevation and length of each column; bases step down by elevation within a row
+  // (the drawing scale caps the largest step at 48 px; the column top stays level)
+  const gm=computeModel(state).geom, zOf=d=>gm.colBaseF[d.fj!=null?d.fj:0][d.ci], hOf=d=>gm.colHF[d.fj!=null?d.fj:0][d.ci];
+  const rowStep=byRow.map(r=>{ const zs=r.map(zOf), zt=Math.max(...zs), rg=zt-Math.min(...zs);
+    const k=rg>1e-6?Math.min(10,48/rg):0; return {zt,k,max:rg*k}; });
+  const rowTop=[]; let acc=34; byRow.forEach((r,ri)=>{ rowTop.push(acc); acc+=H+rowStep[ri].max; });
+  const VW=Math.max(cols*W,560), VH=acc+36;
   const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
   const T=(x,y,t,o={})=>`<text x="${x}" y="${y}" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="${o.s||13}" font-weight="${o.w||400}" fill="${o.c||INK}" text-anchor="${o.a||'middle'}"${o.b?' dominant-baseline="'+o.b+'"':''}>${esc(t)}</text>`;
   const arrow=(x1,y1,x2,y2,c,w)=>`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="${w||3}" marker-end="url(#ah${c===RED?'r':'b'})"/>`;
@@ -5856,19 +5862,22 @@ function drawFBDInto(plotId,data){
   <defs>
     <marker id="ahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${BLUE}"/></marker>
     <marker id="ahr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${RED}"/></marker>
+    <marker id="tk" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="8" markerHeight="8" orient="auto"><line x1="5" y1="0" x2="5" y2="10" stroke="${MUTED}" stroke-width="1.6"/></marker>
     <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" stroke="#a49d8f" stroke-width="1.4"/></pattern>
   </defs>
   <rect x="0" y="0" width="${VW}" height="${VH}" fill="#fcfbf8"/>`;
   // legend
   svg+=`<g transform="translate(14,20)">${arrow(0,0,26,0,BLUE,2.6)}${T(32,0,'Support reaction on the column',{a:'start',s:12,c:BLUE,b:'middle'})}`+
        (fbdShowMember?`${arrow(250,0,276,0,RED,2.6)}${T(282,0,'Column member force at the base (equal and opposite)',{a:'start',s:12,c:RED,b:'middle'})}`:'')+`</g>`+
-       T(VW/2,VH-12,'Front elevation (X to the right, Z up): +N acts upward, +V toward +X, +M counter-clockwise. Arrow lengths scale with magnitude.',{s:11,c:MUTED});
+       T(VW/2,VH-26,'Front elevation (X to the right, Z up): +N acts upward, +V toward +X, +M counter-clockwise.',{s:11,c:MUTED})+
+       T(VW/2,VH-11,'Arrow lengths scale with magnitude. Lower bases are drawn stepped down (steps not to scale).',{s:11,c:MUTED});
   byRow.forEach((row,ri)=>row.forEach((d,ci)=>{
-    const ox=(VW-row.length*W)/2+ci*W, oy=34+ri*H, cx=ox+W/2, base=oy+160, top=oy+58, R=d.reaction, Mf=d.member;
+    const st=rowStep[ri], z=zOf(d), dz=st.zt-z, step=dz*st.k, Hc=H+st.max;
+    const ox=(VW-row.length*W)/2+ci*W, oy=rowTop[ri], cx=ox+W/2, base=oy+160+step, top=oy+58, R=d.reaction, Mf=d.member;
     svg+=`<g>`;
-    svg+=`<rect x="${ox+6}" y="${oy+4}" width="${W-12}" height="${H-12}" rx="8" fill="#fff" stroke="#e2ddd0"/>`;
+    svg+=`<rect x="${ox+6}" y="${oy+4}" width="${W-12}" height="${Hc-12}" rx="8" fill="#fff" stroke="#e2ddd0"/>`;
     svg+=T(cx,oy+26,d.label||('Col '+(d.ci+1)),{s:15,w:700});
-    if(d.x!=null) svg+=T(cx,oy+44,`x = ${f(d.x,1)} ft`,{s:11,c:MUTED});
+    svg+=T(cx,oy+44,`${d.x!=null?`x = ${f(d.x,1)} ft · `:''}column length ${f(hOf(d),2)} ft`,{s:11,c:MUTED});
     // column (break line at top), base plate, foundation
     svg+=`<rect x="${cx-9}" y="${top}" width="18" height="${base-top-6}" fill="${STEEL}"/>`;
     svg+=`<path d="M${cx-15},${top+2} l7,-6 l8,10 l8,-10 l7,6" fill="none" stroke="${STEEL}" stroke-width="2"/>`;
@@ -5876,6 +5885,14 @@ function drawFBDInto(plotId,data){
     if(pinned) svg+=`<path d="M${cx},${base} l-16,20 h32 z" fill="#fff" stroke="${INK}" stroke-width="1.6"/><rect x="${cx-38}" y="${base+20}" width="76" height="9" fill="url(#hatch)"/><line x1="${cx-38}" y1="${base+20}" x2="${cx+38}" y2="${base+20}" stroke="${INK}" stroke-width="1.6"/>`;
     else svg+=`<rect x="${cx-46}" y="${base}" width="92" height="12" fill="url(#hatch)"/><line x1="${cx-46}" y1="${base}" x2="${cx+46}" y2="${base}" stroke="${INK}" stroke-width="1.8"/>`;
     const fy=pinned?base+30:base+12;
+    // base elevation, and how far this base sits below the highest base in the row
+    const ely=base+(pinned?44:30);
+    svg+=T(cx-50,ely,`base EL ${z>=0?'+':''}${f(z,2)} ft`,{s:12,w:600,c:INK,a:'end'});
+    if(step>0.5){ const yr=base-step, xd=ox+22;
+      svg+=T(cx-50,ely+15,`${f(dz,2)} ft lower`,{s:10.5,c:MUTED,a:'end'});
+      svg+=`<line x1="${xd-8}" y1="${yr}" x2="${cx-30}" y2="${yr}" stroke="${MUTED}" stroke-width="1" stroke-dasharray="4 3"/>`;
+      svg+=`<line x1="${xd}" y1="${base}" x2="${cx-30}" y2="${base}" stroke="${MUTED}" stroke-width="1" stroke-dasharray="4 3"/>`;
+      svg+=`<line x1="${xd}" y1="${yr}" x2="${xd}" y2="${base}" stroke="${MUTED}" stroke-width="1.2" marker-start="url(#tk)" marker-end="url(#tk)"/>`; }
     // N: vertical reaction below the base
     const lN=lenN(R.N);
     if(Math.abs(R.N)>1e-6){ if(R.N>0) svg+=arrow(cx,fy+lN,cx,fy+2,BLUE); else svg+=arrow(cx,fy+2,cx,fy+lN,BLUE); }
@@ -5895,7 +5912,7 @@ function drawFBDInto(plotId,data){
       svg+=T(cx+40,my+6,`N ${uForce(Mf.N)}`,{s:11,c:RED,a:'start'})+T(cx+40,my+22,`M ${uMom(Mf.M)}`,{s:11,c:RED,a:'start'})+T(cx-20,my+36,`V ${uForce(Mf.V)}`,{s:11,c:RED,a:'end'});
     }
     // out-of-plane (3D) and governing combinations
-    let ly=oy+H-(lng?56:34);
+    let ly=oy+Hc-(lng?56:34);
     if(lng){ svg+=T(cx,ly,`V long = ${uForce(R.VL||0)} ${fu} · M long = ${uMom(R.ML||0)} ${mu}`,{s:12,c:BLUE}); ly+=16;
       svg+=T(cx,ly,'out of plane: along the canopy length',{s:10,c:MUTED}); ly+=18; }
     if(d.gov) svg+=T(cx,ly,`N: ${d.gov.N} · V: ${d.gov.V} · M: ${d.gov.M}`,{s:10.5,c:MUTED});
