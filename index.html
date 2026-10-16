@@ -540,6 +540,20 @@
 <!-- ============ TAB 5: RESULTS ============ -->
 <section class="tabpage" id="tab-results">
   <div class="onecol">
+    <div class="panel" id="resUnitsBar">
+      <div class="panel-body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px">
+        <b style="font-size:12px">Result units</b>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span class="ctl-label">Preset</span>
+          <select id="ruPreset"><option value="">—</option><option value="lbf|ft-lbf|in">US: lbf, ft·lbf, in</option><option value="kip|kip-ft|in">US: kip, kip·ft, in</option><option value="kip|kip-in|in">US: kip, kip·in, in</option><option value="kN|kN-m|mm">SI: kN, kN·m, mm</option><option value="N|N-m|mm">SI: N, N·m, mm</option></select></span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span class="ctl-label">Force</span>
+          <select id="ruF"><option value="lbf">lbf</option><option value="kip">kip</option><option value="N">N</option><option value="kN">kN</option></select></span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span class="ctl-label">Moment</span>
+          <select id="ruM"><option value="ft-lbf">ft·lbf</option><option value="kip-ft">kip·ft</option><option value="in-lbf">in·lbf</option><option value="kip-in">kip·in</option><option value="N-m">N·m</option><option value="kN-m">kN·m</option></select></span>
+        <span style="display:inline-flex;align-items:center;gap:6px"><span class="ctl-label">Deflection</span>
+          <select id="ruD"><option value="in">in</option><option value="ft">ft</option><option value="mm">mm</option></select></span>
+        <span class="hint" style="margin:0">Applies to every result: tables, diagrams, 3D views, the report, Excel and the DXF reaction table. Saved with the project. Inputs and the MCT stay in lbf and ft.</span>
+      </div>
+    </div>
     <div id="staleWarn" style="display:none;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--rust);line-height:1.5">
       <b>⚠ Pasted MIDAS results are out of date.</b> An input has changed since these results were pasted, so they no longer match the current model. Re-run the analysis in MIDAS with the updated MCT and paste the new beam forces, or clear the results.
     </div>
@@ -623,8 +637,6 @@
       <div class="panel-head">
         <h2>Moment &amp; shear diagrams — all combinations</h2>
         <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <span class="ctl-label">Units</span>
-          <span class="seg" id="segUnit" style="margin-bottom:0;width:130px"><button data-v="lbf" class="on">lbf · ft·lbf</button><button data-v="kip">kip · k·ft</button></span>
           <label class="t3d"><input type="checkbox" id="resShowM" checked> <span class="ctl-label">Moment</span></label>
           <label class="t3d"><input type="checkbox" id="resShowV" checked> <span class="ctl-label">Shear</span></label>
         </span>
@@ -859,6 +871,7 @@ const DEFAULTS = {
   OH_front: 5, OH_back: 5
 };
 const state = Object.assign({}, DEFAULTS, {
+  resUnits: {F:'lbf', M:'ft-lbf', D:'in'},   // display units for analysis results (results tab, report, Excel, DXF)
   nCol: 2,                       // integer column count (>=1)
   baySpacings: [8],              // length nCol-1; per-bay center-to-center (ft)
   colBases: [],                  // per-column base elevation (ft); null/missing entry = datum El_base
@@ -1796,16 +1809,25 @@ function updateCfgTag(){const t=document.getElementById('cfgTag');const n=nCols(
 
 function f(v,d=2){if(Math.abs(v)<1e-9)v=0;return(+v).toFixed(d);}
 
-// ---- post-processing display units (MIDAS paste is always lbf & ft·lbf) ----
-// resUnit toggles how pasted reactions/forces are DISPLAYED. It does not affect
-// parsing or the MCT (which stay in lbf / ft·lbf).
-let resUnit='lbf';                 // 'lbf' or 'kip'
-function uForceVal(lbf){ return resUnit==='kip' ? lbf/1000 : lbf; }
-function uMomVal(ftlbf){ return resUnit==='kip' ? ftlbf/1000 : ftlbf; }
-function uForce(lbf){ return f(uForceVal(lbf), resUnit==='kip'?2:0); }
-function uMom(ftlbf){ return f(uMomVal(ftlbf), resUnit==='kip'?2:0); }
-function uForceLbl(){ return resUnit==='kip'?'kip':'lbf'; }
-function uMomLbl(){ return resUnit==='kip'?'kip·ft':'ft·lbf'; }
+// ---- display units for analysis results (state.resUnits) ----
+// Results are always computed and stored in lbf, ft·lbf and ft (the MCT units); these
+// only change how forces, moments and displacements are SHOWN (results tab, 3D views,
+// report, Excel, DXF). k = factor from the base unit, d = decimals shown.
+const LBF_N=4.4482216152605, FTLBF_NM=1.3558179483314004;
+const RU_F={lbf:{k:1,d:0,l:'lbf'}, kip:{k:1e-3,d:2,l:'kip'}, N:{k:LBF_N,d:0,l:'N'}, kN:{k:LBF_N/1000,d:2,l:'kN'}};
+const RU_M={'ft-lbf':{k:1,d:0,l:'ft·lbf'}, 'kip-ft':{k:1e-3,d:2,l:'kip·ft'}, 'in-lbf':{k:12,d:0,l:'in·lbf'}, 'kip-in':{k:0.012,d:1,l:'kip·in'},
+            'N-m':{k:FTLBF_NM,d:0,l:'N·m'}, 'kN-m':{k:FTLBF_NM/1000,d:2,l:'kN·m'}};
+const RU_D={in:{k:12,d:3,l:'in'}, ft:{k:1,d:4,l:'ft'}, mm:{k:304.8,d:1,l:'mm'}};
+function ru(){ const u=state.resUnits||{}; return {F:RU_F[u.F]||RU_F.lbf, M:RU_M[u.M]||RU_M['ft-lbf'], D:RU_D[u.D]||RU_D.in}; }
+function uForceVal(lbf){ return lbf*ru().F.k; }
+function uMomVal(ftlbf){ return ftlbf*ru().M.k; }
+function uDispVal(ft){ return ft*ru().D.k; }
+function uForce(lbf){ return f(uForceVal(lbf), ru().F.d); }
+function uMom(ftlbf){ return f(uMomVal(ftlbf), ru().M.d); }
+function uDisp(ft){ return f(uDispVal(ft), ru().D.d); }
+function uForceLbl(){ return ru().F.l; }
+function uMomLbl(){ return ru().M.l; }
+function uDispLbl(){ return ru().D.l; }
 
 // ---- LaTeX derivation renderer for the input-tab panels ----
 // items: array of either a section header {h:'Title'} or an equation
@@ -2930,8 +2952,8 @@ function renderAnaPanel(){
     ` Equilibrium: largest force imbalance ${imb<1e-3?'&lt; 0.001':f(imb,3)} lbf.`+(R.autoFix?` ${R.autoFix} DOF${R.autoFix>1?'s':''} with no stiffness restrained.`:'')+(R.warn.length?`<br><span style="color:var(--rust)">${R.warn.join(' ')}</span>`:'')+
     (RES_SRC!=='app'?`<br><span style="color:var(--muted)">Showing pasted MIDAS results; switch to In-app analysis to show these.</span>`:'');
   // displacement summary per load case
-  const rows=Object.entries(R.cases).map(([c,v])=>`<tr><td>${c}</td><td>${f(v.umax*12,3)}</td><td>${v.unode}</td></tr>`).join('');
-  disp.innerHTML=`<details><summary style="cursor:pointer;font-size:12px;font-weight:600">Maximum displacement by load case (unfactored)</summary><table class="rpt" style="max-width:520px"><thead><tr><th>Load case</th><th>Max |displacement| (in)</th><th>Node</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+  const rows=Object.entries(R.cases).map(([c,v])=>`<tr><td>${c}</td><td>${uDisp(v.umax)}</td><td>${v.unode}</td></tr>`).join('');
+  disp.innerHTML=`<details><summary style="cursor:pointer;font-size:12px;font-weight:600">Maximum displacement by load case (unfactored)</summary><table class="rpt" style="max-width:520px"><thead><tr><th>Load case</th><th>Max |displacement| (${uDispLbl()})</th><th>Node</th></tr></thead><tbody>${rows}</tbody></table></details>`;
   cmp.innerHTML=compareSourcesHTML();
 }
 // in-app vs MIDAS base reactions, for every load present in both
@@ -3291,9 +3313,9 @@ async function buildCalcWorkbook(s, A, meta, H){
   const gov=H.governing?H.governing():null;
   if(gov&&gov.length){
     sect('Design Summary \u2014 Governing Base Reactions');
-    const rows=[['Column','Max |N| (lbf)','Max |V| (lbf)','Max |M| (ft-lbf)','Driving case']];
-    gov.forEach((c,i)=>rows.push([c.label||('Col '+(i+1)),Math.round(c.N.v),Math.round(c.V.v),Math.round(c.M.v),c.N.load]));
-    tbl(rows,{numFmt:'#,##0',bold:true,leftFirst:true});
+    const rows=[['Column',`Max |N| (${uForceLbl()})`,`Max |V| (${uForceLbl()})`,`Max |M| (${uMomLbl()})`,'Driving case']];
+    gov.forEach((c,i)=>rows.push([c.label||('Col '+(i+1)),xlRF(c.N.v),xlRF(c.V.v),xlRM(c.M.v),c.N.load]));
+    tbl(rows,{numFmt:xlRFmt(),bold:true,leftFirst:true});
     note((RES_SRC==='app'?'Reactions are from the in-app linear elastic analysis and are not recomputed by this workbook. ':'Reactions are imported from the MIDAS analysis and are not recomputed by this workbook. ')
         +'Maxima are taken independently and need not act concurrently.');
     r++;
@@ -3476,21 +3498,21 @@ async function buildCalcWorkbook(s, A, meta, H){
     let rows;
     if(cr.colNames.length>3){
       // many supports (3D): one row per load case and support keeps the table narrow
-      rows=[['Load case','Support','N','V','M']];
+      rows=[['Load case','Support',`N (${uForceLbl()})`,`V (${uForceLbl()})`,`M (${uMomLbl()})`]];
       caseList.forEach(lc=>{ if(!cr.byCase[lc]) return;
-        cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rows.push([lc,cn,Math.round(v[0]),Math.round(v[1]),Math.round(v[2])]); }); });
+        cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rows.push([lc,cn,xlRF(v[0]),xlRF(v[1]),xlRM(v[2])]); }); });
     } else {
       const hdr=['Load case'];
-      cr.colNames.forEach(cn=>hdr.push(cn+' N',cn+' V',cn+' M'));
+      cr.colNames.forEach(cn=>hdr.push(`${cn} N (${uForceLbl()})`,`${cn} V (${uForceLbl()})`,`${cn} M (${uMomLbl()})`));
       rows=[hdr];
       caseList.forEach(lc=>{
         if(!cr.byCase[lc]) return;
         const rw=[lc];
-        cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rw.push(Math.round(v[0]),Math.round(v[1]),Math.round(v[2])); });
+        cr.colNames.forEach((cn,ci)=>{ const v=cr.byCase[lc][ci]||[0,0,0]; rw.push(xlRF(v[0]),xlRF(v[1]),xlRM(v[2])); });
         rows.push(rw);
       });
     }
-    tbl(rows,{numFmt:'#,##0',leftFirst:true});
+    tbl(rows,{numFmt:xlRFmt(),leftFirst:true});
     note(RES_SRC==='app'?'Values come from the in-app linear elastic analysis and are not recomputed here.':'Values come directly from the MIDAS analysis and are not recomputed here.');
   }
 
@@ -3601,6 +3623,10 @@ function xlCollectFigures(){
   return figs;
 }
 
+// reaction values in the selected result units, rounded to the shown decimals
+function xlRF(v){ const u=ru().F; return +(v*u.k).toFixed(u.d); }
+function xlRM(v){ const u=ru().M; return +(v*u.k).toFixed(u.d); }
+function xlRFmt(){ const d=Math.max(ru().F.d,ru().M.d); return d?'#,##0.'+'0'.repeat(d):'#,##0'; }
 function xlCaseReactions(){
   const out={have:false,colNames:[],byCase:{},byCombo:{}};
   if(typeof RESULT_ROWS==='undefined'||!RESULT_ROWS.length) return out;
@@ -5907,7 +5933,7 @@ function wsTables(mesh){
   const P={}; ['momentY','shearZ','axial','momentZ','shearY'].forEach(q=>{ P[q]=wsPeaks(wsLoad,q); });
   const nodesOf=els=>{ const s=new Set(); els.forEach(e=>{ s.add(e.n1); s.add(e.n2); }); return s; };
   const cell=(o,fn)=>`${fn(o.v)}<br><span class="sm">${o.load}</span>`;
-  const dcell=o=>o?`${f(o.v*12,3)}<br><span class="sm">${o.load}</span>`:'—';
+  const dcell=o=>o?`${uDisp(o.v)}<br><span class="sm">${o.load}</span>`:'—';
   // ---- frames ----
   const cols=[['beam','momentY','Beam |M|',uMom],['beam','shearZ','Beam |V|',uForce],['col','momentY','Column |M|',uMom],
     ['col','shearZ','Column |V|',uForce],['col','axial','Column |N|',uForce],['col','momentZ','Column |M<sub>long</sub>|',uMom]];
@@ -5917,7 +5943,7 @@ function wsTables(mesh){
   });
   const top=cols.map((c,k)=>Math.max(...fr.map(r=>r.vals[k].v))), topD=app?Math.max(...fr.map(r=>r.defl?r.defl.v:0)):0;
   const hi=(v,t)=>t>0&&v>=t*(1-1e-9)?' style="background:#fbeee9;font-weight:600"':'';
-  let h=`<table class="rpt ws-frames"><thead><tr><th>Frame</th>${cols.map(c=>`<th>${c[2]} (${wsIsMom(c[1])?ml:fl})</th>`).join('')}${app?'<th>Max deflection (in)</th>':''}</tr></thead><tbody>`;
+  let h=`<table class="rpt ws-frames"><thead><tr><th>Frame</th>${cols.map(c=>`<th>${c[2]} (${wsIsMom(c[1])?ml:fl})</th>`).join('')}${app?`<th>Max deflection (${uDispLbl()})</th>`:''}</tr></thead><tbody>`;
   fr.forEach(r=>{ const cur=r.F.j===Math.min(resFrame,mesh.frames.length-1);
     h+=`<tr data-fj="${r.F.j}" style="cursor:pointer${cur?';outline:2px solid var(--steel,#1d4e6b);outline-offset:-2px':''}" title="Show frame ${r.F.j+1} in the diagrams below"><td>${cur?'▸ ':''}Frame ${r.F.j+1}<br><span class="sm">y = ${f(r.F.y,1)} ft</span></td>`+
       r.vals.map((v,k)=>`<td${hi(v.v,top[k])}>${cell(v,cols[k][3])}</td>`).join('')+(app?`<td${hi(r.defl?r.defl.v:0,topD)}>${dcell(r.defl)}</td>`:'')+'</tr>'; });
@@ -5929,7 +5955,7 @@ function wsTables(mesh){
   const ln=mesh.longLines.map(L=>{ const els=mesh.elements.filter(e=>e.member==='long'+L.li);
     return {L, vals:lq.map(([q])=>wsMax(P[q],els)), defl:app?wsDefl(nodesOf(els),wsLoad):null}; });
   const topL=lq.map((c,k)=>Math.max(...ln.map(r=>r.vals[k].v)));
-  let g=`<table class="rpt"><thead><tr><th>Line</th><th>Section</th>${lq.map(c=>`<th>${c[1]} (${wsIsMom(c[0])?ml:fl})</th>`).join('')}${app?'<th>Max deflection (in)</th>':''}</tr></thead><tbody>`;
+  let g=`<table class="rpt"><thead><tr><th>Line</th><th>Section</th>${lq.map(c=>`<th>${c[1]} (${wsIsMom(c[0])?ml:fl})</th>`).join('')}${app?`<th>Max deflection (${uDispLbl()})</th>`:''}</tr></thead><tbody>`;
   ln.forEach(r=>{ g+=`<tr><td>${wsLongName(r.L,mesh)}<br><span class="sm">x = ${f(r.L.x,2)} ft</span></td><td>${r.L.sec===4?state.purlinSect:state.longSect}</td>`+
     r.vals.map((v,k)=>`<td${hi(v.v,topL[k])}>${cell(v,lq[k][2])}</td>`).join('')+(app?`<td>${dcell(r.defl)}</td>`:'')+'</tr>'; });
   g+=`</tbody></table><div class="hint" style="margin-top:4px">Vertical = bending in the roof's vertical plane (Moment-y, Shear-z: roof loads); horizontal = bending about the member's vertical axis (Moment-z, Shear-y: wind along the length, bracing action). Deflection includes the frame movement at the supports.</div>`;
@@ -5971,7 +5997,7 @@ function drawWhole(mesh){
   const zt=Math.max(...zs0)+0.12*zr;
   traces.push({type:'scatter3d',mode:'text',x:mesh.frames.map(()=>mesh.geom.L/2),y:mesh.frames.map(F=>F.y),z:mesh.frames.map(()=>zt),
     text:mesh.frames.map(F=>`F${F.j+1}`),textfont:{size:11,color:COL.ink},hoverinfo:'skip',showlegend:false});
-  const ann=U?[{text:`Deformed shape × ${f(sc,0)} (max ${f(umax*12,3)} in)`,x:0.01,y:0.99,xref:'paper',yref:'paper',showarrow:false,xanchor:'left',yanchor:'top',font:{size:11,color:COL.ink}}]:[];
+  const ann=U?[{text:`Deformed shape × ${f(sc,0)} (max ${uDisp(umax)} ${uDispLbl()})`,x:0.01,y:0.99,xref:'paper',yref:'paper',showarrow:false,xanchor:'left',yanchor:'top',font:{size:11,color:COL.ink}}]:[];
   Plotly.react('plotWhole',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,uirevision:'ws',annotations:ann,
     scene:Object.assign(diag?{aspectmode:'data'}:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr}},{camera:{eye:diag?{x:1.45,y:-1.6,z:0.85}:{x:0.95,y:-1.05,z:0.55}},
       xaxis:{title:'X (ft)'},yaxis:{title:'Y (ft)'},zaxis:{title:'Z (ft)'}})},PLOT_CFG);
@@ -6213,20 +6239,15 @@ document.getElementById('segResSrc').addEventListener('click',e=>{ const b=e.tar
 document.getElementById('clearResBtn').onclick=clearResults;
 document.getElementById('resShowM').addEventListener('change',drawResultsPlot);
 document.getElementById('resShowV').addEventListener('change',drawResultsPlot);
-document.getElementById('segUnit').addEventListener('click',e=>{
-  const btn=e.target.closest('button[data-v]'); if(!btn)return;
-  resUnit=btn.dataset.v;
-  document.getElementById('segUnit').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===resUnit));
-  // re-render everything that displays pasted forces/reactions in the new unit
-  if(RESULT_ROWS.length){
-    try{ drawResultsPlot(); }catch(_){}
-    try{ buildResultsTable(); }catch(_){}
-    buildReactTableInto('reactTable', midasData(), reactShowCase==='__gov__');
-    drawFBDInto('plotReact', midasData());
-    buildReactAllTable();
-    renderWhole();
-  }
-});
+function syncResUnitsUI(){ const u=state.resUnits||{}; ['F','M','D'].forEach(k=>{ const el=document.getElementById('ru'+k); if(el) el.value=u[k]; });
+  const pr=document.getElementById('ruPreset'); if(pr){ const v=`${u.F}|${u.M}|${u.D}`; pr.value=[...pr.options].some(o=>o.value===v)?v:''; } }
+function setResUnits(u){ state.resUnits=Object.assign({F:'lbf',M:'ft-lbf',D:'in'},state.resUnits,u); syncResUnitsUI();
+  // re-render everything that shows results; the report rebuilds when its tab opens
+  const rep=document.getElementById('reportInline'); if(rep) delete rep.dataset.built;
+  showResults(); if(document.getElementById('tab-threed').classList.contains('active')) draw3D(); }
+['F','M','D'].forEach(k=>document.getElementById('ru'+k).addEventListener('change',e=>setResUnits({[k]:e.target.value})));
+document.getElementById('ruPreset').addEventListener('change',e=>{ if(!e.target.value) return; const [F,M,D]=e.target.value.split('|'); setResUnits({F,M,D}); });
+syncResUnitsUI();
 document.getElementById('threedCaseSel').addEventListener('change',e=>{threedCase=e.target.value;draw3D();});
 document.getElementById('threedDims').addEventListener('change',()=>draw3D());
 document.getElementById('threedReact').addEventListener('change',()=>draw3D());
@@ -6512,9 +6533,9 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   let yT = -ext - 10 * h; const T = dxfTable(D, ly.tb, 0, yT, ['MARK', 'GRID', 'X', 'Y', 'SECTION', 'BASE EL.', 'COL. LENGTH'], rows, 'COLUMN SCHEDULE (X FROM THE LOW ROOF TIP, Y FROM THE FRONT EDGE)');
   // reactions from MIDAS, when pasted
   if (typeof RESULT_ROWS !== 'undefined' && RESULT_ROWS.length) { let gov = null; try { gov = midasGoverning(); } catch (e) {}
-    if (gov && gov.length) { const kf = v => f((v || 0) / 1000, 2), lbl = (gg, k) => { const m = /F(\d+)-C(\d+)/.exec(gg.label || ''); return m ? dxfMarkOf(+m[1] - 1, +m[2] - 1) : dxfMarkOf(0, k); };
-      const rr = gov.map((gg, k) => [lbl(gg, k), kf(gg.N.v), kf(gg.V.v), kf(gg.M.v)].concat(C.three ? [kf(gg.VL.v), kf(gg.ML.v)] : []).concat([dxfStr(gg.N.load).toUpperCase()]));
-      dxfTable(D, ly.tb, 0, T.y - 2 * h, ['MARK', 'N (KIP)', 'V (KIP)', 'M (KIP-FT)'].concat(C.three ? ['V LONG (KIP)', 'M LONG (KIP-FT)'] : []).concat(['FROM']), rr,
+    if (gov && gov.length) { const kf = v => uForce(v || 0), km = v => uMom(v || 0), FU = uForceLbl().toUpperCase().replace('·', '-'), MU = uMomLbl().toUpperCase().replace('·', '-'), lbl = (gg, k) => { const m = /F(\d+)-C(\d+)/.exec(gg.label || ''); return m ? dxfMarkOf(+m[1] - 1, +m[2] - 1) : dxfMarkOf(0, k); };
+      const rr = gov.map((gg, k) => [lbl(gg, k), kf(gg.N.v), kf(gg.V.v), km(gg.M.v)].concat(C.three ? [kf(gg.VL.v), km(gg.ML.v)] : []).concat([dxfStr(gg.N.load).toUpperCase()]));
+      dxfTable(D, ly.tb, 0, T.y - 2 * h, ['MARK', `N (${FU})`, `V (${FU})`, `M (${MU})`].concat(C.three ? [`V LONG (${FU})`, `M LONG (${MU})`] : []).concat(['FROM']), rr,
         `GOVERNING BASE REACTIONS FROM ${RES_SRC === 'app' ? 'THE IN-APP LINEAR ANALYSIS' : 'MIDAS'} (${gov.noEnvelope ? 'MAX OVER ALL PASTED CASES' : 'STRENGTH ENVELOPE'}; INDEPENDENT MAXIMA, NOT CONCURRENT). + N = COMPRESSION.${typeof resultsStale === 'function' && resultsStale() ? ' WARNING: RESULTS ARE OUT OF DATE WITH THE MODEL.' : ''}`); } }
   else D.text(ly.t, 0, T.y - 2 * h, 0.9 * h, 'BASE REACTIONS: RUN THE IN-APP ANALYSIS OR PASTE MIDAS BEAM FORCES IN THE RESULTS TAB TO ADD THE REACTION TABLE TO THIS SHEET.');
 }
@@ -6807,7 +6828,7 @@ function anaRun(text){
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','resSrc','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','resSrc','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste','resUnits']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
@@ -6857,8 +6878,9 @@ function applyProject(obj){
   if(!('colBases' in obj)) state.colBases=[];   // older projects: every base at the datum
   if(!('modelDim' in obj)) state.modelDim='2d'; // older projects are 2D frames
   if(!('purlins' in obj)) state.purlins=[];     // older projects have no purlins
-  if(!('frameColBases' in obj)) state.frameColBases=null;   // older 3D projects: seeded from the per-column bases
-  refreshAllInputs(); updateCfgTag(); recompute();
+  if(!('frameColBases' in obj)) state.frameColBases=null;
+  if(!obj.resUnits) state.resUnits={F:'lbf',M:'ft-lbf',D:'in'};   // older 3D projects: seeded from the per-column bases
+  refreshAllInputs(); updateCfgTag(); syncResUnitsUI(); recompute();
   // restore pasted MIDAS results (if any) and re-derive reactions/comparison
   const pasteEl=document.getElementById('resPaste');
   if(pasteEl){
