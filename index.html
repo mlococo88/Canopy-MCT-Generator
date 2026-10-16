@@ -565,9 +565,40 @@
         <div class="toolbar" style="margin:10px 0 0">
           <button class="btn primary" id="parseBtn">Parse &amp; plot</button>
           <button class="btn" id="clearResBtn">Clear</button>
-          <span id="resFrameWrap" style="display:none;margin-left:auto;align-items:center;gap:6px"><span class="ctl-label">Frame shown</span><select id="resFrameSel"></select></span>
         </div>
-        <div class="hint" id="resFrameHint" style="display:none;margin-top:6px">3D model: the diagrams, member key and free-body below show one frame at a time. Pick it here. The table under the free-body lists the governing base reactions for every frame.</div>
+      </div>
+    </div>
+    <div class="panel" id="resWholePanel" style="display:none">
+      <div class="panel-head">
+        <h2>Whole structure — every frame, eave beam and purlin</h2>
+        <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="ctl-label">Result</span>
+          <select id="wsQty">
+            <option value="momentY">Moment, strong axis (Moment-y)</option>
+            <option value="shearZ">Shear, strong axis (Shear-z)</option>
+            <option value="axial">Axial (N)</option>
+            <option value="momentZ">Moment, weak axis (Moment-z)</option>
+            <option value="shearY">Shear, weak axis (Shear-y)</option>
+            <option value="torsion">Torsion</option>
+          </select>
+          <span class="ctl-label">Load</span><select id="wsLoad"></select>
+          <label class="t3d" id="wsDefWrap"><input type="checkbox" id="wsDef"> <span class="ctl-label">Deformed shape</span></label>
+        </span>
+      </div>
+      <div class="panel-body">
+        <div class="hint" style="margin-bottom:6px">Every member is coloured by the largest magnitude of the chosen result at either end of each element, for the chosen load (Envelope = the governing value across all strength combinations). Hover a member for its frame, element and value. Click a row in the frame table to show that frame in the diagrams below.</div>
+        <div id="plotWhole" class="plot" style="height:520px"></div>
+        <div class="subhead-lbl" style="margin-top:12px">Frames — peak values <span class="sm" id="wsLoadLbl"></span></div>
+        <div id="wsFrameTable"></div>
+        <div class="subhead-lbl" style="margin-top:12px">Eave beams &amp; purlins — peak values</div>
+        <div id="wsLongTable"></div>
+      </div>
+    </div>
+    <div class="panel" id="resFrameBar" style="display:none">
+      <div class="panel-body" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px">
+        <span id="resFrameWrap" style="display:inline-flex;align-items:center;gap:6px"><span class="ctl-label">Frame shown below</span>
+          <button class="btn" id="resFramePrev" title="Previous frame">◀</button><select id="resFrameSel"></select><button class="btn" id="resFrameNext" title="Next frame">▶</button></span>
+        <span class="hint" id="resFrameHint" style="margin:0">The member key, diagrams and free-body below show one frame. The whole-structure view above covers every frame.</span>
       </div>
     </div>
     <div class="panel" id="resKeyPanel" style="display:none">
@@ -5803,12 +5834,145 @@ function drawFBDInto(plotId,data){
   Plotly.react(plotId,traces,layout,PLOT_CFG);
 }
 
+// ---- 3D: whole-structure results (every frame, eave beam and purlin) ----
+let wsLoad='__env__';
+const WS_QTY={momentY:'Moment-y',shearZ:'Shear-z',axial:'Axial',momentZ:'Moment-z',shearY:'Shear-y',torsion:'Torsion'};
+const wsIsMom=q=>q==='momentY'||q==='momentZ'||q==='torsion';
+// loads offered: the envelope (as one entry) plus every case and combination
+function wsLoads(){ return [...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))].filter(l=>!/envelope/i.test(l)); }
+// peak |field| per element over both ends for load ld. '__env__' reads the envelope rows,
+// or every load when the results carry no envelope.
+function wsPeaks(ld,q){
+  let set;
+  if(ld==='__env__'){ const env=envelopeLoads(); set=new Set(env.length?env:RESULT_ROWS.map(r=>r.load)); }
+  else set=new Set([ld]);
+  const pk=new Map();
+  RESULT_ROWS.forEach(r=>{ if(!set.has(r.load)) return; const v=Math.abs(r[q]||0), p=pk.get(r.elem);
+    if(!p||v>p.v) pk.set(r.elem,{v,load:r.load,elem:r.elem,q}); });
+  return pk;
+}
+// name the combination behind an envelope value (the case / combination row that matches it)
+function wsGovName(p){
+  if(!p||!/envelope/i.test(p.load)) return p?p.load:'—';
+  const r=RESULT_ROWS.find(r=>r.elem===p.elem && !/envelope/i.test(r.load) && Math.abs(Math.abs(r[p.q]||0)-p.v)<=1e-6*Math.max(1,p.v));
+  return r?r.load:'Envelope';
+}
+// nodal displacement vector (in-app analysis only) for a load case or combination
+function wsDisp(ld){
+  if(RES_SRC!=='app'||!APP_RES||!APP_RES.nodeIdx||ld==='__env__') return null;
+  return (APP_RES.cases[ld]&&APP_RES.cases[ld].u)||(APP_RES.combU&&APP_RES.combU[ld])||null;
+}
+// largest translation (ft) over a set of node ids; for the envelope, the largest over the load cases
+function wsDefl(nodeIds,ld){
+  if(RES_SRC!=='app'||!APP_RES||!APP_RES.nodeIdx) return null;
+  const one=u=>{ let m=0; nodeIds.forEach(id=>{ const i=APP_RES.nodeIdx.get(id); if(i==null) return; m=Math.max(m,Math.hypot(u[6*i],u[6*i+1],u[6*i+2])); }); return m; };
+  if(ld!=='__env__'){ const u=wsDisp(ld); return u?{v:one(u),load:ld}:null; }
+  let best={v:0,load:'—'}; Object.entries(APP_RES.cases).forEach(([c,cs])=>{ const v=one(cs.u); if(v>best.v) best={v,load:c}; });
+  return best;
+}
+function wsMax(pk,els){ let b=null; els.forEach(e=>{ const p=pk.get(e.id); if(p&&(!b||p.v>b.v)) b=p; }); return b?{v:b.v,load:b.v>0?wsGovName(b):'—'}:{v:0,load:'—'}; }
+function wsLongName(ln,mesh){
+  if(ln.kind!=='purlin') return (ln.kind==='low eave'?'Low eave':'High eave')+' beam';
+  const k=mesh.longLines.filter(l=>l.kind==='purlin').indexOf(ln)+1; return `Purlin ${k}`;
+}
+function renderWhole(){
+  const panel=document.getElementById('resWholePanel'); if(!panel) return;
+  const on=is3D(state)&&RESULT_ROWS.length>0;
+  panel.style.display=on?'block':'none'; if(!on) return;
+  const mesh=buildMCT(state).mesh;
+  // load selector
+  const sel=document.getElementById('wsLoad'), loads=wsLoads(), hasEnv=envelopeLoads().length>0;
+  if(wsLoad!=='__env__'&&!loads.includes(wsLoad)) wsLoad='__env__';
+  sel.innerHTML=`<option value="__env__">${hasEnv?'Envelope (governing)':'All loads (no envelope pasted)'}</option>`+loads.map(l=>`<option value="${l.replace(/"/g,'&quot;')}">${l}</option>`).join('');
+  sel.value=wsLoad;
+  const defOK=!!wsDisp(wsLoad);
+  document.getElementById('wsDefWrap').style.display=(RES_SRC==='app')?'':'none';
+  const defCb=document.getElementById('wsDef'); defCb.disabled=!defOK;
+  document.getElementById('wsDefWrap').title=defOK?'':'Pick a load case or combination (the envelope has no single deflected shape)';
+  document.getElementById('wsLoadLbl').textContent=`· ${wsLoad==='__env__'?(hasEnv?'envelope':'all loads'):wsLoad} · ${resSrcName()}`;
+  wsTables(mesh);
+  if(document.getElementById('tab-results').classList.contains('active')) drawWhole(mesh);
+}
+function wsTables(mesh){
+  const fl=uForceLbl(), ml=uMomLbl(), app=RES_SRC==='app';
+  const P={}; ['momentY','shearZ','axial','momentZ','shearY'].forEach(q=>{ P[q]=wsPeaks(wsLoad,q); });
+  const nodesOf=els=>{ const s=new Set(); els.forEach(e=>{ s.add(e.n1); s.add(e.n2); }); return s; };
+  const cell=(o,fn)=>`${fn(o.v)}<br><span class="sm">${o.load}</span>`;
+  const dcell=o=>o?`${f(o.v*12,3)}<br><span class="sm">${o.load}</span>`:'—';
+  // ---- frames ----
+  const cols=[['beam','momentY','Beam |M|',uMom],['beam','shearZ','Beam |V|',uForce],['col','momentY','Column |M|',uMom],
+    ['col','shearZ','Column |V|',uForce],['col','axial','Column |N|',uForce],['col','momentZ','Column |M<sub>long</sub>|',uMom]];
+  const fr=mesh.frames.map(F=>{
+    const els=mesh.elements.filter(e=>e.frame===F.j), beam=els.filter(e=>e.member==='beam'), col=els.filter(e=>/^col/.test(e.member));
+    return {F, vals:cols.map(([g,q])=>wsMax(P[q],g==='beam'?beam:col)), defl:app?wsDefl(nodesOf(els),wsLoad):null};
+  });
+  const top=cols.map((c,k)=>Math.max(...fr.map(r=>r.vals[k].v))), topD=app?Math.max(...fr.map(r=>r.defl?r.defl.v:0)):0;
+  const hi=(v,t)=>t>0&&v>=t*(1-1e-9)?' style="background:#fbeee9;font-weight:600"':'';
+  let h=`<table class="rpt ws-frames"><thead><tr><th>Frame</th>${cols.map(c=>`<th>${c[2]} (${wsIsMom(c[1])?ml:fl})</th>`).join('')}${app?'<th>Max deflection (in)</th>':''}</tr></thead><tbody>`;
+  fr.forEach(r=>{ const cur=r.F.j===Math.min(resFrame,mesh.frames.length-1);
+    h+=`<tr data-fj="${r.F.j}" style="cursor:pointer${cur?';outline:2px solid var(--steel,#1d4e6b);outline-offset:-2px':''}" title="Show frame ${r.F.j+1} in the diagrams below"><td>${cur?'▸ ':''}Frame ${r.F.j+1}<br><span class="sm">y = ${f(r.F.y,1)} ft</span></td>`+
+      r.vals.map((v,k)=>`<td${hi(v.v,top[k])}>${cell(v,cols[k][3])}</td>`).join('')+(app?`<td${hi(r.defl?r.defl.v:0,topD)}>${dcell(r.defl)}</td>`:'')+'</tr>'; });
+  h+=`</tbody></table><div class="hint" style="margin-top:4px">Shaded = the frame that governs that column. M<sub>long</sub> is the column weak-axis moment from wind along the length.${app?(wsLoad==='__env__'?' Deflection: largest translation of any node in the frame over the unfactored load cases.':' Deflection: largest translation of any node in the frame.'):''}</div>`;
+  const ft=document.getElementById('wsFrameTable'); ft.innerHTML=h;
+  ft.querySelectorAll('tr[data-fj]').forEach(tr=>tr.addEventListener('click',()=>{ setResFrame(+tr.dataset.fj); document.getElementById('resFrameBar').scrollIntoView({behavior:'smooth',block:'start'}); }));
+  // ---- longitudinal lines ----
+  const lq=[['momentY','|M| vertical',uMom],['shearZ','|V| vertical',uForce],['momentZ','|M| horizontal',uMom],['shearY','|V| horizontal',uForce],['axial','|N|',uForce]];
+  const ln=mesh.longLines.map(L=>{ const els=mesh.elements.filter(e=>e.member==='long'+L.li);
+    return {L, vals:lq.map(([q])=>wsMax(P[q],els)), defl:app?wsDefl(nodesOf(els),wsLoad):null}; });
+  const topL=lq.map((c,k)=>Math.max(...ln.map(r=>r.vals[k].v)));
+  let g=`<table class="rpt"><thead><tr><th>Line</th><th>Section</th>${lq.map(c=>`<th>${c[1]} (${wsIsMom(c[0])?ml:fl})</th>`).join('')}${app?'<th>Max deflection (in)</th>':''}</tr></thead><tbody>`;
+  ln.forEach(r=>{ g+=`<tr><td>${wsLongName(r.L,mesh)}<br><span class="sm">x = ${f(r.L.x,2)} ft</span></td><td>${r.L.sec===4?state.purlinSect:state.longSect}</td>`+
+    r.vals.map((v,k)=>`<td${hi(v.v,topL[k])}>${cell(v,lq[k][2])}</td>`).join('')+(app?`<td>${dcell(r.defl)}</td>`:'')+'</tr>'; });
+  g+=`</tbody></table><div class="hint" style="margin-top:4px">Vertical = bending in the roof's vertical plane (Moment-y, Shear-z: roof loads); horizontal = bending about the member's vertical axis (Moment-z, Shear-y: wind along the length, bracing action). Deflection includes the frame movement at the supports.</div>`;
+  document.getElementById('wsLongTable').innerHTML=g;
+}
+function drawWhole(mesh){
+  if(typeof Plotly==='undefined') return;
+  const q=document.getElementById('wsQty').value, pk=wsPeaks(wsLoad,q), mom=wsIsMom(q);
+  const U=document.getElementById('wsDef').checked?wsDisp(wsLoad):null;
+  const xr=mesh.geom.L+2, yr=mesh.L3+2, zs0=mesh.nodes.map(n=>n.z), zr=Math.max(...zs0)-Math.min(...zs0)+2, mr=Math.max(xr,yr,zr);
+  let sc=0, umax=0;
+  if(U){ mesh.nodes.forEach(n=>{ const i=APP_RES.nodeIdx.get(n.id); if(i!=null) umax=Math.max(umax,Math.hypot(U[6*i],U[6*i+1],U[6*i+2])); }); sc=umax>0?0.06*mr/umax:0; }
+  const P=n=>{ if(!sc) return [n.x,n.y,n.z]; const i=APP_RES.nodeIdx.get(n.id); return i==null?[n.x,n.y,n.z]:[n.x+sc*U[6*i],n.y+sc*U[6*i+1],n.z+sc*U[6*i+2]]; };
+  let vmax=0; pk.forEach(p=>{ vmax=Math.max(vmax,p.v); });
+  const conv=v=>mom?uMomVal(v):uForceVal(v), unit=mom?uMomLbl():uForceLbl(), fmt=v=>mom?uMom(v):uForce(v);
+  const cs=[[0,'#d5dde2'],[0.35,'#8fb0c0'],[0.65,'#d9973f'],[1,'#a3401f']];
+  const traces=[];
+  if(U){ const xs=[],ys=[],zs=[]; mesh.elements.forEach(e=>{ const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1]; xs.push(a.x,b.x,null); ys.push(a.y,b.y,null); zs.push(a.z,b.z,null); });
+    traces.push({type:'scatter3d',mode:'lines',x:xs,y:ys,z:zs,line:{color:'#b8b2a7',width:1.5,dash:'dot'},name:'undeformed',hoverinfo:'skip',showlegend:false}); }
+  const xs=[],ys=[],zs=[],cc=[], mx=[],my=[],mz=[],mc=[],mt=[];
+  const memName=e=>e.frame!=null?(e.member==='beam'?`Frame ${e.frame+1} beam`:`Frame ${e.frame+1} column ${+e.member.slice(3)+1}`):wsLongName(mesh.longLines[+e.member.slice(4)],mesh);
+  mesh.elements.forEach(e=>{ const a=P(mesh.nodes[e.n1-1]), b=P(mesh.nodes[e.n2-1]), p=pk.get(e.id), v=p?conv(p.v):0;
+    xs.push(a[0],b[0],null); ys.push(a[1],b[1],null); zs.push(a[2],b[2],null); cc.push(v,v,v);
+    mx.push((a[0]+b[0])/2); my.push((a[1]+b[1])/2); mz.push((a[2]+b[2])/2); mc.push(v);
+    mt.push(`${memName(e)} · elem ${e.id}<br>|${WS_QTY[q]}| = ${p?fmt(p.v):'—'} ${unit}${p&&wsLoad==='__env__'?`<br>${wsGovName(p)}`:''}`); });
+  const cmax=Math.max(conv(vmax),1e-9);
+  traces.push({type:'scatter3d',mode:'lines',x:xs,y:ys,z:zs,hoverinfo:'skip',showlegend:false,
+    line:{color:cc,colorscale:cs,cmin:0,cmax,width:6,showscale:true,colorbar:{title:{text:`|${WS_QTY[q]}|<br>(${unit})`,font:{size:10}},thickness:12,len:0.6,tickfont:{size:9}}}});
+  traces.push({type:'scatter3d',mode:'markers',x:mx,y:my,z:mz,text:mt,hoverinfo:'text',showlegend:false,
+    marker:{size:2.5,color:mc,colorscale:cs,cmin:0,cmax,opacity:0.9}});
+  // supports and frame labels
+  const bases=[]; mesh.frames.forEach(F=>F.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
+  traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),marker:{size:4,color:COL.ink,symbol:'square'},hoverinfo:'skip',showlegend:false});
+  const zt=Math.max(...zs0)+0.12*zr;
+  traces.push({type:'scatter3d',mode:'text',x:mesh.frames.map(()=>mesh.geom.L/2),y:mesh.frames.map(F=>F.y),z:mesh.frames.map(()=>zt),
+    text:mesh.frames.map(F=>`F${F.j+1}`),textfont:{size:11,color:COL.ink},hoverinfo:'skip',showlegend:false});
+  const ann=U?[{text:`Deformed shape × ${f(sc,0)} (max ${f(umax*12,3)} in)`,x:0.01,y:0.99,xref:'paper',yref:'paper',showarrow:false,xanchor:'left',yanchor:'top',font:{size:11,color:COL.ink}}]:[];
+  Plotly.react('plotWhole',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,uirevision:'ws',annotations:ann,
+    scene:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr},camera:{eye:{x:0.95,y:-1.05,z:0.55}},
+      xaxis:{title:'X (ft)'},yaxis:{title:'Y (ft)'},zaxis:{title:'Z (ft)'}}},PLOT_CFG);
+}
+function setResFrame(j){
+  resFrame=j; const sel=document.getElementById('resFrameSel'); if(sel) sel.value=String(j);
+  if(RESULT_ROWS.length) drawResultsPlot(); refreshReactionPanel();
+}
+
 // 3D: frame picker for the results tab + all-frames governing table
 function refreshResFrameSel(){
-  const wrap=document.getElementById('resFrameWrap'), hint=document.getElementById('resFrameHint'), sel=document.getElementById('resFrameSel');
-  if(!wrap) return;
+  const bar=document.getElementById('resFrameBar'), sel=document.getElementById('resFrameSel');
+  if(!bar) return;
   const on=is3D(state);
-  wrap.style.display=on?'inline-flex':'none'; if(hint) hint.style.display=on?'block':'none';
+  bar.style.display=(on&&RESULT_ROWS.length>0)?'block':'none';
   if(!on){ resFrame=0; return; }
   const n=frameYs(state).length; resFrame=Math.min(resFrame,n-1);
   const ys=frameYs(state);
@@ -5828,6 +5992,7 @@ function buildReactAllTable(){
 function refreshReactionPanel(){
   refreshResFrameSel();
   buildReactAllTable();
+  renderWhole();
   const hasMidas=RESULT_ROWS.length>0;
   document.getElementById('reactSrcTag').textContent=hasMidas?`${resSrcName()} design values`:'awaiting results';
   const rh=document.getElementById('reactSrcHead'); if(rh) rh.textContent=`${RES_SRC==='app'?'In-app analysis':'MIDAS'} results — design values`;
@@ -5943,6 +6108,7 @@ document.getElementById('segUnit').addEventListener('click',e=>{
     buildReactTableInto('reactTable', midasData(), reactShowCase==='__gov__');
     drawFBDInto('plotReact', midasData());
     buildReactAllTable();
+    renderWhole();
   }
 });
 document.getElementById('threedCaseSel').addEventListener('change',e=>{threedCase=e.target.value;draw3D();});
@@ -5957,7 +6123,12 @@ document.getElementById('threedReact').addEventListener('change',()=>draw3D());
     b.classList.add('on'); threedView=b.dataset.v; _view3dRev++; _apply3dCam=true; draw3D();
   }));
 })();
-document.getElementById('resFrameSel').addEventListener('change',e=>{resFrame=+e.target.value; if(RESULT_ROWS.length) drawResultsPlot(); refreshReactionPanel();});
+document.getElementById('resFrameSel').addEventListener('change',e=>setResFrame(+e.target.value));
+document.getElementById('resFramePrev').onclick=()=>{ if(resFrame>0) setResFrame(resFrame-1); };
+document.getElementById('resFrameNext').onclick=()=>{ if(resFrame<frameYs(state).length-1) setResFrame(resFrame+1); };
+document.getElementById('wsQty').addEventListener('change',()=>renderWhole());
+document.getElementById('wsLoad').addEventListener('change',e=>{ wsLoad=e.target.value; renderWhole(); });
+document.getElementById('wsDef').addEventListener('change',()=>renderWhole());
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
@@ -6497,6 +6668,9 @@ function anaRun(text){
   const combEnds={}, combCase={};
   M.combos.filter(cb=>!cb.env).forEach(cb=>{ const m=new Map(); elemIds.forEach(id=>{ const f=new Float64Array(12); cb.terms.forEach(([k,lc,fac])=>{ const src=k==='ST'?CASE[lc]&&CASE[lc].ends.get(id):combEnds[lc]&&combEnds[lc].get(id); if(src) for(let r=0;r<12;r++) f[r]+=fac*src[r]; }); m.set(id,f); });
     combEnds[cb.name]=m; pushRows(cb.name,id=>m.get(id)); });
+  // nodal displacements of the combinations (linear superposition, like the end forces)
+  const combU={};
+  M.combos.filter(cb=>!cb.env).forEach(cb=>{ const u=new Float64Array(6*N); cb.terms.forEach(([k,lc,fac])=>{ const src=k==='ST'?CASE[lc]&&CASE[lc].u:combU[lc]; if(src) for(let d=0;d<6*N;d++) u[d]+=fac*src[d]; }); combU[cb.name]=u; });
   const envs=M.combos.filter(cb=>cb.env);
   envs.forEach(cb=>{ const mx=new Map(), mn=new Map(); elemIds.forEach(id=>{ const a=new Float64Array(12).fill(-Infinity), b=new Float64Array(12).fill(Infinity);
       cb.terms.forEach(([k,lc])=>{ const src=k==='CBS'?combEnds[lc]&&combEnds[lc].get(id):CASE[lc]&&CASE[lc].ends.get(id); if(src) for(let r=0;r<12;r++){ // internal-force sign per end: I-end is -f
@@ -6504,7 +6678,7 @@ function anaRun(text){
       mx.set(id,a.map((v,r)=>r<6?-v:v)); mn.set(id,b.map((v,r)=>r<6?-v:v)); });
     pushRows(`${cb.name}(max)`,id=>mx.get(id)); pushRows(`${cb.name}(min)`,id=>mn.get(id)); });
   const ms=performance.now()-t0;
-  return {rows, cases:CASE, combos:Object.keys(combEnds), planar, autoFix, n, bw, nodes:N, elems:M.elems.size, ms, warn:[...new Set(warn)], model:M};
+  return {rows, cases:CASE, combos:Object.keys(combEnds), combU, nodeIdx:idx, planar, autoFix, n, bw, nodes:N, elems:M.elems.size, ms, warn:[...new Set(warn)], model:M};
 }
 
 // ============================================================================
