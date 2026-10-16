@@ -6,21 +6,23 @@ builds a linear 3D frame model with MIDAS conventions, and for every static load
   * solves K u = F and recovers support reactions,
   * checks global force and moment equilibrium (reactions + applied = 0),
 and validates cross references (element/node/section/load-case names in combos).
-Usage: python3 tools/mctcheck.py index.html model.mct [--json] [--forces out.tsv]
-  --forces writes a MIDAS-style Beam Forces table (cases, combinations, envelope) that
-  can be pasted into the Results tab to exercise it. Section weak-axis inertia and
-  torsion constants are approximated (the app's AISC table carries A, Ix, d, b only),
-  so use those forces for testing, not design. Requires numpy.
+Usage: mctcheck.py index.html model.mct [--json]
 """
 import sys, re, json
 import numpy as np
 
 def aisc_table(html):
+    extra = {}
+    for blk in ('AISC_W2', 'AISC_HSS2'):
+        body = html.split('const %s = {' % blk)[1].split('};')[0]
+        for m in re.finditer(r"'([^']+)':\[([^\]]+)\]", body):
+            extra[m.group(1)] = [float(x) for x in m.group(2).split(',')]
     tab = {}
     for m in re.finditer(r"'([WH][^']*?)':\[([^\]]+)\]", html):
         name = m.group(1)
         if not (name.startswith('W') or name.startswith('HSS')): continue
         v = [float(x) for x in m.group(2).split(',')]
+        if len(v) < 6 or name in tab: continue   # the 4-value Iy/J table is read separately
         d, b, A, w, Ix, Sx = v[:6]
         if name.startswith('W'):
             Iy = max(0.05 * Ix, A * b * b / 24.0)   # approximate weak axis
@@ -28,8 +30,28 @@ def aisc_table(html):
         else:
             Iy = Ix * (b / d) ** 2
             J = 2.0 * Ix * Iy / (Ix + Iy) * 1.6
-        tab[name] = dict(A=A, Iy=Ix, Iz=Iy, J=J, d=d, b=b)  # MIDAS local y = strong axis
+        ex = extra[name]
+        if name.startswith('W'):
+            Iy, J, tw, tf = ex; Asz = d * tw; Asy = 5 / 6 * 2 * b * tf
+        else:
+            Iy, J, t = ex; Asz = 2 * d * t; Asy = 2 * b * t
+        tab[name] = dict(A=A, Iy=Ix, Iz=Iy, J=J, d=d, b=b, Asy=Asy, Asz=Asz)  # MIDAS local y = strong axis
     return tab
+
+def sections_of(text):
+    blocks = {}
+    cur = None
+    for raw in text.split('\n'):
+        line = raw.split(';', 1)[0].rstrip() if not raw.lstrip().startswith(';') else ''
+        if raw.startswith('*'):
+            cur = raw.split()[0].split(';')[0].strip().rstrip(',')
+            arg = raw.split(',', 1)[1].strip() if cur == '*USE-STLD' else None
+            blocks.setdefault('__order', []).append((cur, arg))
+            continue
+        if line.strip():
+            blocks.setdefault('__order', [])[-1:]  # noop
+            blocks.setdefault(len(blocks['__order']) - 1, []).append(line.strip())
+    return blocks
 
 def parse(text):
     order = []
@@ -158,13 +180,14 @@ def main():
         if abs(beta) > 1e-12: raise SystemExit('beta != 0 not supported')
         ey = np.cross(ez, ex)
         return L, np.vstack([ex, ey, ez])
-    def kloc(L, A, Iy, Iz, J):
+    def kloc(L, A, Iy, Iz, J, Asy, Asz):
         k = np.zeros((12, 12))
         a = E * A / L; t = G * J / L
         k[0,0]=k[6,6]=a; k[0,6]=k[6,0]=-a
         k[3,3]=k[9,9]=t; k[3,9]=k[9,3]=-t
-        for (v, th, I, s) in ((1, 5, Iz, 1), (2, 4, Iy, -1)):
-            c1 = 12*E*I/L**3; c2 = 6*E*I/L**2; c3 = 4*E*I/L; c4 = 2*E*I/L
+        for (v, th, I, s, As) in ((1, 5, Iz, 1, Asy), (2, 4, Iy, -1, Asz)):
+            ph = 12*E*I/(G*As*L*L); c = 1 + ph
+            c1 = 12*E*I/L**3/c; c2 = 6*E*I/L**2/c; c3 = (4+ph)*E*I/L/c; c4 = (2-ph)*E*I/L/c
             k[v,v]=k[v+6,v+6]=c1; k[v,v+6]=k[v+6,v]=-c1
             k[v,th]=k[th,v]=s*c2; k[v,th+6]=k[th+6,v]=s*c2
             k[v+6,th]=k[th,v+6]=-s*c2; k[v+6,th+6]=k[th+6,v+6]=-s*c2
@@ -175,7 +198,7 @@ def main():
         p1, p2 = nodes[e['n1']], nodes[e['n2']]
         L, R = axes(p1, p2, e['beta'])
         sp = secs[e['sec']]
-        k = kloc(L, sp['A']/144, sp['Iy']/20736, sp['Iz']/20736, sp['J']/20736)
+        k = kloc(L, sp['A']/144, sp['Iy']/20736, sp['Iz']/20736, sp['J']/20736, sp['Asy']/144, sp['Asz']/144)
         rel = np.zeros(12, bool)
         if eid in releases:
             ri, rj = releases[eid]; rel[:6] = ri; rel[6:] = rj
@@ -258,7 +281,8 @@ def main():
             rf += r[:3]; rm += np.cross(nodes[n], r[:3]) + r[3:]
         resid_free = float(np.abs(Rv[free]).max()) if free.any() else 0.0
         scaleF = max(1.0, float(np.abs(applied).max()))
-        out['results'][c] = dict(applied=applied.round(3).tolist(), reactions=rf.round(3).tolist(),
+        perR = {str(nd): Rv[6*idx[nd]:6*idx[nd]+6].tolist() for nd in supports}
+        out['results'][c] = dict(perR=perR, umax=float(np.max(np.linalg.norm(u.reshape(-1, 6)[:, :3], axis=1))), applied=applied.round(3).tolist(), reactions=rf.round(3).tolist(),
                                  force_balance=float(np.abs(applied + rf).max()),
                                  moment_balance=float(np.abs(mom + rm).max()),
                                  free_dof_residual=resid_free,
