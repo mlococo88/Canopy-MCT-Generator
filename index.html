@@ -604,11 +604,13 @@
         <div class="toolbar" style="margin:0 0 6px;gap:10px;flex-wrap:wrap;align-items:center">
           <span class="ctl-label">Display</span>
           <span class="seg" id="segWsMode" style="margin:0;width:230px"><button data-v="colour" class="on">Coloured members</button><button data-v="diagram">Diagrams</button></span>
+          <span style="display:inline-flex;align-items:center;gap:6px"><span class="ctl-label">Text size</span><input type="range" id="wsTxt" min="8" max="24" step="1" value="12" style="width:100px"><span id="wsTxtV" style="font-size:11px;min-width:18px">12</span></span>
           <label class="t3d"><input type="checkbox" id="wsReact"> <span class="ctl-label">Reactions</span></label>
           <label class="t3d" id="wsReactMWrap" style="display:none"><input type="checkbox" id="wsReactM" checked> <span class="ctl-label">incl. moments</span></label>
           <span id="wsDiagCtl" style="display:none;align-items:center;gap:8px">
             <span class="ctl-label">Scale</span><input type="range" id="wsScale" min="0.2" max="3" step="0.1" value="1" style="width:110px">
-            <label class="t3d"><input type="checkbox" id="wsVals" checked> <span class="ctl-label">Peak values</span></label>
+            <span class="ctl-label">Values</span>
+            <select id="wsVals"><option value="ext" selected>Member ends + every peak and dip</option><option value="peak">Largest + / − per member</option><option value="all">Every node</option><option value="off">Off</option></select>
           </span>
         </div>
         <div id="plotWhole" class="plot" style="height:560px"></div>
@@ -5990,16 +5992,20 @@ function drawWhole(mesh){
   traces.push({type:'scatter3d',mode:'markers',x:mx,y:my,z:mz,text:mt,hoverinfo:'text',showlegend:false,
     marker:{size:2.5,color:mc,colorscale:cs,cmin:0,cmax,opacity:0.9}});
   }
-  if(document.getElementById('wsReact').checked) traces.push(...wsReactionTraces(mesh,wsLoad,mr,{moments:document.getElementById('wsReactM').checked,labels:true}));
+  if(document.getElementById('wsReact').checked) traces.push(...wsReactionTraces(mesh,wsLoad,mr,{moments:document.getElementById('wsReactM').checked,labels:true,size:Math.max(8,wsTxtSize()-1)}));
   // supports and frame labels
   const bases=[]; mesh.frames.forEach(F=>F.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
   traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),marker:{size:4,color:COL.ink,symbol:'square'},hoverinfo:'skip',showlegend:false});
   const zt=Math.max(...zs0)+0.12*zr;
   traces.push({type:'scatter3d',mode:'text',x:mesh.frames.map(()=>mesh.geom.L/2),y:mesh.frames.map(F=>F.y),z:mesh.frames.map(()=>zt),
-    text:mesh.frames.map(F=>`F${F.j+1}`),textfont:{size:11,color:COL.ink},hoverinfo:'skip',showlegend:false});
+    text:mesh.frames.map(F=>`F${F.j+1}`),textfont:{size:wsTxtSize()+1,color:COL.ink},hoverinfo:'skip',showlegend:false});
   const ann=U?[{text:`Deformed shape × ${f(sc,0)} (max ${uDisp(umax)} ${uDispLbl()})`,x:0.01,y:0.99,xref:'paper',yref:'paper',showarrow:false,xanchor:'left',yanchor:'top',font:{size:11,color:COL.ink}}]:[];
-  Plotly.react('plotWhole',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,uirevision:'ws',annotations:ann,
-    scene:Object.assign(diag?{aspectmode:'data'}:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr}},{camera:{eye:diag?{x:1.45,y:-1.6,z:0.85}:{x:0.95,y:-1.05,z:0.55}},
+  // Plotly's 3D text keeps stale glyph sizes when a plot is updated in place (labels come out
+  // mixed sizes), so redraw from scratch, carrying over the camera the user has orbited to
+  const gd=document.getElementById('plotWhole'), cam=(gd._fullLayout&&gd._fullLayout.scene&&gd._wsDiag===diag)?gd._fullLayout.scene.camera:null;
+  Plotly.purge(gd); gd._wsDiag=diag;
+  Plotly.newPlot(gd,traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:false,annotations:ann,hoverlabel:{font:{size:wsTxtSize()}},
+    scene:Object.assign(diag?{aspectmode:'data'}:{aspectmode:'manual',aspectratio:{x:xr/mr,y:yr/mr,z:zr/mr}},{camera:cam||{eye:diag?{x:1.45,y:-1.6,z:0.85}:{x:0.95,y:-1.05,z:0.55}},
       xaxis:{title:'X (ft)'},yaxis:{title:'Y (ft)'},zaxis:{title:'Z (ft)'}})},PLOT_CFG);
 }
 // MIDAS-style force diagrams on every member: ordinates offset along the member's local z
@@ -6021,10 +6027,10 @@ function wsDiagramTraces(mesh,q,mr,memName){
   // undeformed members
   { const xs=[],ys=[],zs=[]; mesh.elements.forEach(e=>{ const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1]; xs.push(a.x,b.x,null); ys.push(a.y,b.y,null); zs.push(a.z,b.z,null); });
     traces.push({type:'scatter3d',mode:'lines',x:xs,y:ys,z:zs,line:{color:'#6a665d',width:3},hoverinfo:'skip',showlegend:false}); }
-  const labels={x:[],y:[],z:[],t:[]};
+  const labels={x:[],y:[],z:[],t:[],pos:[]}, seen=new Set(), vmode=document.getElementById('wsVals').value;
   series.forEach((sk,si)=>{
     const vx=[],vy=[],vz=[],vi=[],I=[],J=[],K=[], lx=[],ly=[],lz=[],lc=[], hx=[],hy=[],hz=[],hc=[],ht=[];
-    const peak=new Map();   // member group -> {v,pos,txt}
+    const grp=new Map();    // member group -> diagram points in order along the member
     mesh.elements.forEach(e=>{
       const oI=ev.get(e.id+'|I'), oJ=ev.get(e.id+'|J'); if(!oI||!oJ) return;
       const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1], A=[a.x,a.y,a.z], B=[b.x,b.y,b.z];
@@ -6037,21 +6043,48 @@ function wsDiagramTraces(mesh,q,mr,memName){
       [[dI,pI,'I',e.n1],[dJ,pJ,'J',e.n2]].forEach(([p,o,end,nd])=>{
         hx.push(p[0]); hy.push(p[1]); hz.push(p[2]); hc.push(conv(o.v));
         ht.push(`${nm} · elem ${e.id} · ${end}-end (node ${nd})<br><b>${WS_QTY[q]} = ${fmt(o.v)} ${unit}</b><br>${env?(sk==='max'?'max: ':'min: '):''}${gov(o)}`);
-        const g=peak.get(nm); if(!g||Math.abs(o.v)>Math.abs(g.v)) peak.set(nm,{v:o.v,p});
+        if(!grp.has(nm)) grp.set(nm,[]); grp.get(nm).push({v:o.v,p,q:[(end==='I'?a:b).x,(end==='I'?a:b).y,(end==='I'?a:b).z]});
       });
     });
     traces.push({type:'mesh3d',x:vx,y:vy,z:vz,i:I,j:J,k:K,intensity:vi,intensitymode:'vertex',colorscale:cs,cmin:-cmax,cmax,
       opacity:0.45,flatshading:true,lighting:{ambient:1,diffuse:0,specular:0,roughness:1,fresnel:0},hoverinfo:'skip',
-      showscale:si===0,colorbar:{title:{text:`${WS_QTY[q]}<br>(${unit})`,font:{size:10}},thickness:12,len:0.6,tickfont:{size:9}}});
+      showscale:si===0,colorbar:{title:{text:`${WS_QTY[q]}<br>(${unit})`,font:{size:wsTxtSize()-1}},thickness:12,len:0.6,tickfont:{size:wsTxtSize()-2}}});
     traces.push({type:'scatter3d',mode:'lines',x:lx,y:ly,z:lz,line:{color:lc,colorscale:cs,cmin:-cmax,cmax,width:3},hoverinfo:'skip',showlegend:false});
     traces.push({type:'scatter3d',mode:'markers',x:hx,y:hy,z:hz,text:ht,hoverinfo:'text',showlegend:false,
       marker:{size:2.5,color:hc,colorscale:cs,cmin:-cmax,cmax}});
-    peak.forEach(g=>{ if(Math.abs(g.v)<0.1*vmax) return; labels.x.push(g.p[0]); labels.y.push(g.p[1]); labels.z.push(g.p[2]); labels.t.push(fmt(g.v)); });
+    grp.forEach(pts=>wsPickLabels(pts,vmode,vmax).forEach(g=>{ const key=g.p.map(c=>c.toFixed(2)).join(',')+'|'+fmt(g.v); if(seen.has(key)) return; seen.add(key);
+      labels.x.push(g.p[0]); labels.y.push(g.p[1]); labels.z.push(g.p[2]); labels.t.push(fmt(g.v)); labels.pos.push(g.v>=0?'top center':'bottom center'); }));
   });
-  if(document.getElementById('wsVals').checked && labels.t.length)
-    traces.push({type:'scatter3d',mode:'text',x:labels.x,y:labels.y,z:labels.z,text:labels.t,textposition:'top center',
-      textfont:{size:10,color:COL.ink},hoverinfo:'skip',showlegend:false});
+  if(labels.t.length)
+    traces.push({type:'scatter3d',mode:'text',x:labels.x,y:labels.y,z:labels.z,text:labels.t,textposition:labels.pos,
+      textfont:{size:wsTxtSize(),color:COL.ink},hoverinfo:'skip',showlegend:false});
   return traces;
+}
+function wsTxtSize(){ const el=document.getElementById('wsTxt'); return el?+el.value:12; }
+// Which diagram values to label along one member (points in order, I then J of each element).
+// Points at the same node merge unless the value jumps there (shear under a point load / at a
+// column), where both sides are labelled. 'ext': both member ends plus every significant peak
+// and dip; 'peak': the largest positive and the largest negative; 'all': every node.
+function wsPickLabels(pts,mode,vmax){
+  if(mode==='off'||!pts.length) return [];
+  const tol=1e-3*vmax, m=[];
+  pts.forEach(pt=>{ const l=m[m.length-1];
+    if(l && Math.hypot(l.q[0]-pt.q[0],l.q[1]-pt.q[1],l.q[2]-pt.q[2])<1e-6 && Math.abs(l.v-pt.v)<=tol){ if(Math.abs(pt.v)>Math.abs(l.v)) m[m.length-1]=pt; }
+    else m.push(pt); });
+  const tiny=v=>Math.abs(v)<5e-3*vmax;
+  if(mode==='all') return m.filter(x=>!tiny(x.v));
+  if(mode==='peak'){ let hi=null, lo=null; m.forEach(x=>{ if(x.v>0&&(!hi||x.v>hi.v)) hi=x; if(x.v<0&&(!lo||x.v<lo.v)) lo=x; }); return [hi,lo].filter(x=>x&&!tiny(x.v)); }
+  // significant peaks and dips: a turning point counts once the diagram has come back from it
+  // by more than h (6% of this member's largest value), so mesh-level wiggles are ignored
+  const mmax=Math.max(...m.map(x=>Math.abs(x.v))), h=Math.max(0.06*mmax,0.004*vmax), keep=new Set([0,m.length-1]);
+  let dir=0, hi=0, lo=0;
+  for(let i=1;i<m.length;i++){ const v=m[i].v;
+    if(v>m[hi].v) hi=i; if(v<m[lo].v) lo=i;
+    if(dir>=0 && m[hi].v-v>h){ if(dir===1||hi>0) keep.add(hi); dir=-1; lo=i; }
+    else if(dir<=0 && v-m[lo].v>h){ if(dir===-1||lo>0) keep.add(lo); dir=1; hi=i; } }
+  // both sides of a real jump (shear at a column or a purlin point load)
+  for(let i=1;i<m.length;i++) if(Math.hypot(m[i-1].q[0]-m[i].q[0],m[i-1].q[1]-m[i].q[1],m[i-1].q[2]-m[i].q[2])<1e-6 && Math.abs(m[i].v-m[i-1].v)>h){ keep.add(i-1); keep.add(i); }
+  return [...keep].sort((a,b)=>a-b).map(i=>m[i]).filter(x=>!tiny(x.v));
 }
 // Support reactions in global axes at every column base, from the base element's end forces:
 // the support force on the structure equals the element's end force at the base (local),
@@ -6101,7 +6134,7 @@ function wsReactionTraces(mesh,ld,mr,opt){
     lab.x.push(P[0]+s.side*mr*0.03); lab.y.push(P[1]); lab.z.push(P[2]-mr*0.12); lab.pos.push(s.side<0?'bottom left':s.side>0?'bottom right':'bottom center'); lab.t.push([`<b>${s.label}</b>`,tf.join(' · '),tm.join(' · ')].filter(Boolean).join('<br>'));
   });
   if(opt.labels && lab.t.length) traces.push({type:'scatter3d',mode:'text',x:lab.x,y:lab.y,z:lab.z,text:lab.t,textposition:lab.pos,
-    textfont:{size:9,color:COL.steel},hoverinfo:'skip',showlegend:false});
+    textfont:{size:opt.size||9,color:COL.steel},hoverinfo:'skip',showlegend:false});
   return traces;
 }
 function setResFrame(j){
@@ -6269,6 +6302,7 @@ document.getElementById('wsDef').addEventListener('change',()=>renderWhole());
 document.getElementById('segWsMode').addEventListener('click',e=>{ const b=e.target.closest('button[data-v]'); if(!b) return; wsMode=b.dataset.v; renderWhole(); });
 document.getElementById('wsScale').addEventListener('input',()=>drawWhole(buildMCT(state).mesh));
 document.getElementById('wsVals').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
+document.getElementById('wsTxt').addEventListener('input',e=>{ document.getElementById('wsTxtV').textContent=e.target.value; drawWhole(buildMCT(state).mesh); });
 document.getElementById('wsReact').addEventListener('change',()=>renderWhole());
 document.getElementById('wsReactM').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
