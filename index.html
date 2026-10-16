@@ -6722,7 +6722,7 @@ document.getElementById('downloadReportBtn').onclick=downloadReport;
 // needs internet), or R12 with each sheet's border and title block in model space (offline).
 // ============================================================================
 const DXF_DEF = { prefix: 'S-', txt: 0.10, paper: 'D', fmt: 'layouts',
-  draw: { cover: true, plan: true, frame: true, long: true, base: true, loads: true } };
+  draw: { cover: true, plan: true, frame: true, long: true, base: true, anchor: true, loads: true } };
 const DXF_PAPER = { D: [34, 22], B: [17, 11] }, DXF_SC = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 120, 240, 360, 480, 600, 720, 960, 1200];
 // drawing area inside the border, above the title block (paper inches): [x0, y0, x1, y1]
 const DXF_VP = { D: [1.0, 3.3, 33.25, 21.25], B: [0.95, 2.25, 16.4, 10.4] };
@@ -6957,7 +6957,11 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   const yOf = y => C.three ? X(y) : X(len / 2);
   D.rect(ly.ro, 0, 0, X(len), X(g.L), hid);
   C.ys.forEach((y, j) => { D.line(ly.gr, yOf(y), -ext, yOf(y), X(g.L) + ext, cl); dxfBubble(D, ly.gr, yOf(y), X(g.L) + ext + 1.3 * h, String(j + 1));
-    g.colX.forEach((cx, i) => { D.rect(ly.co, yOf(y) - cb / 2, X(cx) - cd / 2, yOf(y) + cb / 2, X(cx) + cd / 2); D.rect(ly.co, yOf(y) - cb / 2 - 3, X(cx) - cd / 2 - 3, yOf(y) + cb / 2 + 3, X(cx) + cd / 2 + 3, hid);
+    g.colX.forEach((cx, i) => { D.rect(ly.co, yOf(y) - cb / 2, X(cx) - cd / 2, yOf(y) + cb / 2, X(cx) + cd / 2);
+      const agid = anchorInUse() ? anchorGroupOf(anchorKey(j, i)) : null, agr = agid && anchorGroup(agid);
+      if (agr && agr.bp && agr.bp.plate) { const G = dxfAnchorGeo(agr), pyc = yOf(y) + G.ex, pxc = X(cx) - G.ey;   // plate centre: designer x = -Y, y = X
+        D.rect(ly.co, pyc - G.P.B / 2, pxc - G.P.N / 2, pyc + G.P.B / 2, pxc + G.P.N / 2); G.ys.forEach(yy => G.xs.forEach(xx => D.circle(ly.co, pyc - xx, pxc + yy, (G.R.dia || 1) / 2))); }
+      else D.rect(ly.co, yOf(y) - cb / 2 - 3, X(cx) - cd / 2 - 3, yOf(y) + cb / 2 + 3, X(cx) + cd / 2 + 3, hid);
       D.text(ly.t, yOf(y) + cb / 2 + 0.6 * h, X(cx) + cd / 2 + 0.5 * h, 0.9 * h, dxfMarkOf(j, i)); }); });
   g.colX.forEach((cx, i) => { D.line(ly.gr, -ext, X(cx), X(len) + ext, X(cx), cl); dxfBubble(D, ly.gr, -ext - 1.3 * h, X(cx), dxfLetter(i)); });
   if (C.three) { D.chainH(ly.d, C.ys.map(X), -ext - 5 * h, 0); }
@@ -6980,6 +6984,88 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
       dxfTable(D, ly.tb, 0, yA - 2 * h, ['MARK', `N (${FU})`, `V (${FU})`, `M (${MU})`].concat(C.three ? [`V LONG (${FU})`, `M LONG (${MU})`] : []).concat(['FROM']), rr,
         `GOVERNING BASE REACTIONS FROM ${RES_SRC === 'app' ? 'THE IN-APP LINEAR ANALYSIS' : 'MIDAS'} (${gov.noEnvelope ? 'MAX OVER ALL PASTED CASES' : 'STRENGTH ENVELOPE'}; INDEPENDENT MAXIMA, NOT CONCURRENT). + N = COMPRESSION.${typeof resultsStale === 'function' && resultsStale() ? ' WARNING: RESULTS ARE OUT OF DATE WITH THE MODEL.' : ''}`); } }
   else D.text(ly.t, 0, yA - 2 * h, 0.9 * h, 'BASE REACTIONS: RUN THE IN-APP ANALYSIS OR PASTE MIDAS BEAM FORCES IN THE RESULTS TAB TO ADD THE REACTION TABLE TO THIS SHEET.');
+}
+/* ---------- 7: base plate and anchorage details (one per anchorage group) ---------- */
+// a group's detail geometry in inches, in the designer's plate coordinates: x along B
+// (canopy length), y along N (the frame plane, column depth), origin at the plate centre
+function dxfAnchorGeo(gr) {
+  const b = gr.bp || {}, P = b.plate || {}, R = b.anchor || {}, Cn = b.conc || {}, so = b.standoff || {}, gt = b.grout || {}, cp = sectProps(state.colSect);
+  const nx = Math.max(1, Math.round(R.nx || 1)), ny = Math.max(1, Math.round(R.ny || 1)), xe = P.B / 2 - R.edx, ye = P.N / 2 - R.edy;
+  const xs = [...Array(nx)].map((_, i) => nx === 1 ? 0 : -xe + 2 * xe * i / (nx - 1)), ys = [...Array(ny)].map((_, j) => ny === 1 ? 0 : -ye + 2 * ye * j / (ny - 1));
+  const stand = so.type && so.type !== 'none', gap = stand ? (so.z || 0) : (gt.present ? (gt.tg || 0) : 0);
+  return { P, R, Cn, so, gt, cp, xs, ys, nx, ny, stand, gap, ex: P.exc_x || 0, ey: P.exc_y || 0, px: Cn.plate_off_x || 0, py: Cn.plate_off_y || 0 };
+}
+const DXF_HEAD = { heavyhex: 'HEX HEAD', hvyhexhead: 'HEAVY HEX HEAD', sqhead: 'SQUARE HEAD', hvysqhead: 'HEAVY SQUARE HEAD', stud: 'WELDED HEADED STUD', platewasher: 'NUT AND PLATE WASHER', plainrod: 'PLAIN ROD (NO HEAD)' };
+// column outline in plan: W as an I-shape (flanges along x), HSS as a tube; centred at (cx, cy)
+function dxfColPlan(D, l, cp, cx, cy) { const b = cp.b / 2, d = cp.d / 2;
+  if (cp.shape === 'H' && cp.tf && cp.tw) { const tf = cp.tf, tw = cp.tw / 2;
+    D.pline(l, [[-b, d], [b, d], [b, d - tf], [tw, d - tf], [tw, -d + tf], [b, -d + tf], [b, -d], [-b, -d], [-b, -d + tf], [-tw, -d + tf], [-tw, d - tf], [-b, d - tf]].map(p => [cx + p[0], cy + p[1]]), true); }
+  else { D.rect(l, cx - b, cy - d, cx + b, cy + d); const t = cp.tdes || 0; if (t > 0 && t < b) D.rect(l, cx - b + t, cy - d + t, cx + b - t, cy + d - t); } }
+function dxfAnchorDetail(D, C, gr, ly, hid, cl) { const h = D.h, G = dxfAnchorGeo(gr), P = G.P, R = G.R, Cn = G.Cn, dia = R.dia || 1, B = P.B, N = P.N;
+  const cols = anchorColumnsOf(gr.id).map(c => c.label), name = dxfStr(gr.name).toUpperCase();
+  // ---- plan (x right = B, y up = N) ----
+  const pxl = -G.px - Cn.Bx / 2, pxr = -G.px + Cn.Bx / 2, pyb = -G.py - Cn.By / 2, pyt = -G.py + Cn.By / 2;
+  D.rect(ly.cn, pxl, pyb, pxr, pyt, hid);
+  D.rect(ly.pl, -B / 2, -N / 2, B / 2, N / 2);
+  dxfColPlan(D, ly.co, G.cp, G.ex, G.ey);
+  D.line(ly.t, G.ex - B / 2 - 2, G.ey, G.ex + B / 2 + 2, G.ey, cl); D.line(ly.t, G.ex, G.ey - N / 2 - 2, G.ex, G.ey + N / 2 + 2, cl);
+  G.ys.forEach(y => G.xs.forEach(x => { D.circle(ly.an, x, y, dia / 2); D.circle(ly.an, x, y, (P.holeDia > 0 ? P.holeDia : dia + 0.3125) / 2); }));
+  const left = Math.min(-B / 2, pxl), bot = Math.min(-N / 2, pyb), top = Math.max(N / 2, pyt), right = Math.max(B / 2, pxr);
+  D.chainH(ly.d, [-B / 2, ...G.xs, B / 2], bot - 2.5 * h, -N / 2); D.dimH(ly.d, -B / 2, B / 2, bot - 5 * h, -N / 2, 'B = <>');
+  D.chainV(ly.d, [-N / 2, ...G.ys, N / 2], left - 2.5 * h, -B / 2); D.dimV(ly.d, -N / 2, N / 2, left - 5 * h, -B / 2, 'N = <>');
+  D.dimH(ly.d, pxl, pxr, top + 2.5 * h, pyt, 'PEDESTAL <>'); D.dimV(ly.d, pyb, pyt, right + 2.5 * h, pxr, 'PEDESTAL <>');
+  D.text(ly.t, 0, bot - 8 * h, 1.1 * h, 'PLAN', 1);
+  D.text(ly.t, 0, bot - 9.6 * h, 0.8 * h, 'B ALONG THE CANOPY LENGTH (Y), N ALONG THE FRAME (X)', 1);
+  // ---- section looking along the canopy (x right = N / frame X, y up = elevation; top of concrete at 0) ----
+  const sx = right + 14 * h + Math.max(Cn.By, N) / 2, gap = G.gap, t = P.t, hef = R.hef || 0, H = Cn.H || hef + 6, X = y => sx + y;
+  const cl0 = X(-G.py - Cn.By / 2), cr0 = X(-G.py + Cn.By / 2);
+  D.line(ly.cn, cl0, 0, cr0, 0); D.line(ly.cn, cl0, 0, cl0, -H); D.line(ly.cn, cr0, 0, cr0, -H); D.line(ly.cn, cl0, -H, cr0, -H);
+  if (gap > 0) { D.rect(ly.cn, X(-N / 2), 0, X(N / 2), gap, G.stand && G.so.type !== 'grout' ? hid : undefined); }
+  D.rect(ly.pl, X(-N / 2), gap, X(N / 2), gap + t);
+  const ch = Math.max(1.2 * N, 12), d = G.cp.d, tf = G.cp.tf || G.cp.tdes || 0.5, ct = gap + t, cy0 = X(G.ey);
+  D.line(ly.co, cy0 - d / 2, ct, cy0 - d / 2, ct + ch); D.line(ly.co, cy0 + d / 2, ct, cy0 + d / 2, ct + ch);
+  D.line(ly.co, cy0 - d / 2 + tf, ct, cy0 - d / 2 + tf, ct + ch, G.cp.shape === 'H' ? undefined : hid); D.line(ly.co, cy0 + d / 2 - tf, ct, cy0 + d / 2 - tf, ct + ch, G.cp.shape === 'H' ? undefined : hid);
+  D.pline(ly.co, [[cy0 - d / 2 - 1, ct + ch], [cy0 - d / 4, ct + ch], [cy0 - d / 8, ct + ch + 1.2], [cy0 + d / 8, ct + ch - 1.2], [cy0 + d / 4, ct + ch], [cy0 + d / 2 + 1, ct + ch]], false);
+  const nutH = 0.875 * dia, nutW = 1.5 * dia, headH = R.head === 'plainrod' ? 0 : 0.6 * dia, rodTop = ct + nutH + 1.0 * dia;
+  G.ys.forEach(y => { const xr = X(y);
+    D.line(ly.an, xr - dia / 2, -hef, xr - dia / 2, rodTop); D.line(ly.an, xr + dia / 2, -hef, xr + dia / 2, rodTop); D.line(ly.an, xr - dia / 2, rodTop, xr + dia / 2, rodTop);
+    D.rect(ly.an, xr - nutW / 2, ct, xr + nutW / 2, ct + nutH);
+    if (G.stand && G.so.type !== 'grout') D.rect(ly.an, xr - nutW / 2, gap - nutH, xr + nutW / 2, gap);
+    if (headH) { const hw = R.head === 'platewasher' ? Math.max(R.washer_od || 3, 2 * dia) : (R.head === 'hvyhexhead' || R.head === 'hvysqhead' ? 1.625 * dia : 1.5 * dia); D.rect(ly.an, xr - hw / 2, -hef - headH, xr + hw / 2, -hef); } });
+  const yl = X(-N / 2), yr = X(N / 2), lx = Math.min(cl0, yl) - 3 * h, rx = yr + 3 * h, xr0 = X(G.ys[0]);
+  D.dimV(ly.d, -hef, 0, lx, xr0, 'h ef = <>'); D.dimV(ly.d, -H, 0, lx - 3 * h, cl0, '<>');
+  // plate and grout are only an inch or so thick: label them with notes beside the plate rather than dimensions
+  D.line(ly.t, yr, gap + t / 2, rx, gap + t / 2); D.text(ly.t, rx + 0.4 * h, gap + t / 2 - 0.4 * h, 0.8 * h, `PL ${dxfFrac(t, 16)}"`);
+  if (gap > 0) { const gy = gap / 2 - 1.6 * h; D.line(ly.t, yr, gap / 2, rx, gy); D.text(ly.t, rx + 0.4 * h, gy - 0.4 * h, 0.8 * h, `${dxfFrac(gap, 16)}" ${G.stand ? (G.so.type === 'grout' ? 'GROUTED STAND-OFF' : 'STAND-OFF, LEVELING NUTS') : 'GROUT'}`); }
+  D.chainH(ly.d, [-N / 2, ...G.ys, N / 2].map(X), rodTop + 2.5 * h, rodTop);
+  D.text(ly.t, X(N / 2) + 1.2 * h, ct + ch - 1.5 * h, 0.8 * h, dxfStr(state.colSect).toUpperCase() + ' COLUMN');
+  D.text(ly.t, cl0 + 0.8 * h, 0.5 * h, 0.8 * h, 'TOP OF CONCRETE');
+  D.text(ly.t, sx, -H - 3 * h, 1.1 * h, 'SECTION', 1);
+  // ---- title and schedule ----
+  const topY = Math.max(top + 5 * h, ct + ch + 3 * h, rodTop + 5 * h);
+  D.text(ly.t, left - 6 * h, topY + 1.5 * h, 1.3 * h, `${name}: BASE PLATE AND ANCHORAGE`);
+  D.text(ly.t, left - 6 * h, topY, 0.9 * h, `COLUMNS ${cols.join(', ')}`);
+  const lib = _bpadLib || {}, w = anchorWorst(_anchorEval[gr.id]), n = G.nx * G.ny;
+  const rows = [['BASE PLATE', `${dxfFI(B)} x ${dxfFI(N)} x ${dxfFrac(t, 16)}" ${dxfStr(((lib.plateGrades || {})[P.grade] || P.grade || '')).toUpperCase()}`],
+    ['ANCHOR RODS', `${n} - ${dxfFrac(dia, 16)}" DIA. ${dxfStr(((lib.anchorGrades || {})[R.grade] || R.grade || '')).toUpperCase()} (${G.nx} x ${G.ny}), ${DXF_HEAD[R.head] || 'HEADED'}`],
+    ['EMBEDMENT', `h ef = ${dxfFI(hef)} BELOW TOP OF CONCRETE`],
+    ['GROUT / STAND-OFF', G.stand ? `${G.so.type === 'grout' ? 'GROUTED' : 'LEVELING NUTS, NOT GROUTED'} STAND-OFF ${dxfFI(G.so.z || 0)}` : (G.gt.present ? `${dxfFI(G.gt.tg || 0)} NON-SHRINK GROUT, ${f(G.gt.fc_grout || 0, 1)} KSI` : 'NONE')],
+    ['CONCRETE', `F'C = ${f(Cn.fc, 1)} KSI, ${Cn.cracked ? 'CRACKED' : 'UNCRACKED'}; PEDESTAL ${dxfFI(Cn.Bx)} x ${dxfFI(Cn.By)} x ${dxfFI(Cn.H)} DEEP`],
+    ['GOVERNING RATIO', w && isFinite(w.v) ? `${f(w.v, 2)} ${w.v <= 1 ? 'OK' : 'NG'} - ${dxfStr(w.label).toUpperCase()} (${dxfStr(w.combo || '').toUpperCase()})` : 'NOT CHECKED']];
+  dxfTable(D, ly.tb, left - 6 * h, Math.min(bot - 11.5 * h, -H - 5 * h), ['ITEM', 'VALUE'], rows, null);
+}
+function dxfAnchor(D, C) { const h = D.h, hid = D.ltype('HIDDEN'), cl = D.ltype('CENTER');
+  const ly = { pl: D.layer('STL-BPLT', 4), co: D.layer('STL-COLS', 3), an: D.layer('ANCH', 1), cn: D.layer('CONC', 8), d: D.layer('DIMS', 7), t: D.layer('ANNO-TEXT', 7), tb: D.layer('TABL', 7) };
+  const groups = anchorState().groups.filter(gr => anchorColumnsOf(gr.id).length);
+  const blocks = [() => D.text(ly.t, 0, 0, 1.6 * h, 'BASE PLATE AND ANCHORAGE DETAILS')];
+  groups.forEach(gr => blocks.push(() => dxfAnchorDetail(D, C, gr, ly, hid, cl)));
+  const commit = (document.getElementById('bpadGz') || { dataset: {} }).dataset.commit || '';
+  blocks.push(() => dxfNotes(D, ly.t, 0, 0, 'ANCHORAGE NOTES', [
+    'BASE PLATES AND ANCHOR RODS ARE CHECKED FOR EVERY LRFD COMBINATION AT EVERY COLUMN ASSIGNED TO THE DETAIL: AISC DESIGN GUIDE 1 (BEARING, PLATE BENDING), AISC 360 J3.10, ACI 318-19 CHAPTER 17 (CAST-IN ANCHORS).',
+    `CALCULATIONS: BASE PLATE AND ANCHOR BOLT DESIGNER (ALL-STRUCTURAL, ${dxfStr(commit).toUpperCase()}). SEE THE CALCULATION PACKAGE FOR EACH DETAIL.`,
+    'PEDESTAL, FOOTING AND THEIR REINFORCEMENT ARE NOT DESIGNED HERE. ANCHOR REINFORCEMENT IS NOT SHOWN.',
+    'COLUMN TO BASE PLATE WELD IS NOT DESIGNED HERE.']));
+  dxfFlow(D, C, blocks);
 }
 /* ---------- 6: design loads, wind cases, combinations, member schedule ---------- */
 function dxfLoads(D, C) { const h = D.h, s = C.s, g = C.g, l = D.layer('ANNO-TEXT', 7), tb = D.layer('TABL', 7), A = C.A, part = C.part || 0;
@@ -7031,6 +7117,7 @@ function dxfBuild(lay) {
   if (o.draw.frame) add(C.three ? 'TYPICAL FRAME ELEVATION' : 'FRAME ELEVATION', dxfFrame, 6);
   if (o.draw.long && C.three) add('LONGITUDINAL ELEVATION', dxfLong, 12);
   if (o.draw.base) add('COLUMN AND BASE LAYOUT', dxfBase, 12);
+  if (o.draw.anchor && anchorInUse() && anchorState().groups.some(gr => anchorColumnsOf(gr.id).length)) add('BASE PLATE AND ANCHORAGE DETAILS', dxfAnchor, 4);
   if (o.draw.loads && o.paper === 'B') { add('DESIGN LOADS', dxfLoads, 1, 1, 1); add('MEMBER SCHEDULE AND LOAD COMBINATIONS', dxfLoads, 1, 1, 2); }
   else if (o.draw.loads) add('DESIGN LOADS AND MEMBER SCHEDULE', dxfLoads, 1, 1);
   if (!sheets.length) throw new Error('No sheets selected.');
@@ -7072,7 +7159,7 @@ function dxfDownloadR12() {
 function dxfStart() { if (anchorInUse() && RESULT_ROWS.length) anchorEvaluateAll().catch(() => {});  // anchorage ratios for the base layout sheet
 
   const o = dxfOpts(), three = is3D(state), dlg = document.getElementById('dxfDlg');
-  const items = [['cover', 'Cover, sheet index and general notes', true], ['plan', 'Roof framing plan (3D)', three], ['frame', three ? 'Typical frame elevation' : 'Frame elevation', true], ['long', 'Longitudinal elevation (3D)', three], ['base', 'Column and base layout, with MIDAS reactions when pasted', true], ['loads', 'Design loads, wind cases, combinations, member schedule', true]];
+  const items = [['cover', 'Cover, sheet index and general notes', true], ['plan', 'Roof framing plan (3D)', three], ['frame', three ? 'Typical frame elevation' : 'Frame elevation', true], ['long', 'Longitudinal elevation (3D)', three], ['base', 'Column and base layout, with MIDAS reactions when pasted', true], ['anchor', 'Base plate and anchorage details (Anchorage tab groups)', anchorInUse()], ['loads', 'Design loads, wind cases, combinations, member schedule', true]];
   document.getElementById('dxfItems').innerHTML = items.map(([k, l, ok]) => `<label style="display:block;margin:3px 0;${ok ? '' : 'color:var(--muted)'}"><input type="checkbox" id="dx_${k}" ${o.draw[k] && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}> ${l}</label>`).join('');
   document.getElementById('dx_px').value = o.prefix; document.getElementById('dx_tx').value = o.txt; document.getElementById('dx_fm').value = o.fmt; document.getElementById('dx_pp').value = o.paper;
   dxfMsg(''); dlg.showModal();
