@@ -543,6 +543,20 @@
     <div id="staleWarn" style="display:none;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--rust);line-height:1.5">
       <b>⚠ Pasted MIDAS results are out of date.</b> An input has changed since these results were pasted, so they no longer match the current model. Re-run the analysis in MIDAS with the updated MCT and paste the new beam forces, or clear the results.
     </div>
+    <div class="panel" id="anaPanel">
+      <div class="panel-head"><h2>Structural analysis</h2><span class="tag" id="anaTag">linear elastic · in-app</span></div>
+      <div class="panel-body">
+        <div class="hint" style="margin-bottom:8px">First-order linear elastic analysis of the generated MCT model, run in the browser: 3D beam elements with shear deformation (AISC shear areas), the same supports, end releases, load cases, combinations and envelope written to MIDAS. A 2D frame is solved as a plane frame. Results appear in the diagrams, reactions, report, Excel and DXF below, and update automatically when the model changes. No second-order (P-Delta) effects and no member design checks.</div>
+        <div class="toolbar" style="margin:0;flex-wrap:wrap;gap:10px">
+          <button class="btn primary" id="anaRunBtn">▶ Run in-app analysis</button>
+          <span style="display:flex;align-items:center;gap:6px"><span class="ctl-label">Results shown</span>
+            <span class="seg" id="segResSrc" style="margin:0;width:260px"><button data-v="app">In-app analysis</button><button data-v="midas">Pasted MIDAS</button></span></span>
+        </div>
+        <div id="anaStatus" style="margin-top:8px;font-size:12px"></div>
+        <div id="anaDisp" style="margin-top:8px"></div>
+        <div id="anaCompare" style="margin-top:8px"></div>
+      </div>
+    </div>
     <div class="panel">
       <div class="panel-head"><h2>Paste MIDAS beam forces</h2><span class="tag" id="resTag">no data</span></div>
       <div class="panel-body">
@@ -587,12 +601,12 @@
 
         <!-- EMPTY STATE — shown until MIDAS results are pasted -->
         <div id="reactEmpty" class="placeholder" style="padding:30px 20px">
-          Paste the MIDAS beam-force results below to read the column base reactions and free-body diagram.
+          Run the in-app analysis above, or paste the MIDAS beam-force results, to read the column base reactions and free-body diagram.
         </div>
 
         <!-- MIDAS — shown only when results pasted -->
         <div id="midasBlock" style="display:none">
-          <div class="subhead-lbl" style="display:flex;align-items:center;gap:8px">MIDAS results — design values
+          <div class="subhead-lbl" style="display:flex;align-items:center;gap:8px"><span id="reactSrcHead">MIDAS results — design values</span>
             <span style="display:flex;gap:6px;align-items:center;margin-left:auto"><span class="ctl-label">Show</span><select id="reactCaseSelect"></select></span>
           </div>
           <div id="noEnvNote" style="display:none;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:8px 12px;margin-bottom:8px;font-size:11.5px;color:var(--rust)">No <b>Envelope</b> combination was found in the pasted results. Governing values below fall back to the maximum across all pasted cases, which may include individual unfactored load cases. Paste the envelope combination results for correct governing design reactions.</div>
@@ -874,9 +888,43 @@ const AISC_HSS = {  // d, b, A, w(plf), Ix, Sx  — AISC 15th ed. values
   'HSS16X4X.250':[16,4,8.96,32.63,253,31.6],'HSS16X4X.375':[16,4,13.2,47.9,360,45],'HSS16X4X.500':[16,4,17.2,62.46,455,56.9],
   'HSS16X8X.250':[16,8,10.8,39.43,368,46.1],'HSS16X8X.375':[16,8,16,58.1,531,66.3],'HSS16X8X.500':[16,8,20.9,76.07,679,84.9]
 };
+// Additional AISC Shapes Database v15.0 properties used by the in-app analysis (read from
+// AISC's v15.0 spreadsheet; A, d, b, Ix and Sx of every shape above were checked against it).
+// W: [Iy (in^4), J (in^4), tw (in), tf (in)]    HSS: [Iy (in^4), J (in^4), t design (in)]
+const AISC_W2 = {
+  'W6X9':[2.2,0.0405,0.17,0.215], 'W6X12':[2.99,0.0903,0.23,0.28], 'W6X15':[9.32,0.101,0.23,0.26], 'W6X16':[4.43,0.223,0.26,0.405],
+  'W6X20':[13.3,0.24,0.26,0.365], 'W6X25':[17.1,0.461,0.32,0.455], 'W8X10':[2.09,0.0426,0.17,0.205], 'W8X13':[2.73,0.0871,0.23,0.255],
+  'W8X15':[3.41,0.137,0.245,0.315], 'W8X18':[7.97,0.172,0.23,0.33], 'W8X21':[9.77,0.282,0.25,0.4], 'W8X24':[18.3,0.346,0.245,0.4],
+  'W8X28':[21.7,0.537,0.285,0.465], 'W8X31':[37.1,0.536,0.285,0.435], 'W8X35':[42.6,0.769,0.31,0.495], 'W8X40':[49.1,1.12,0.36,0.56],
+  'W10X12':[2.18,0.0547,0.19,0.21], 'W10X15':[2.89,0.104,0.23,0.27], 'W10X17':[3.56,0.156,0.24,0.33], 'W10X19':[4.29,0.233,0.25,0.395],
+  'W10X22':[11.4,0.239,0.24,0.36], 'W10X26':[14.1,0.402,0.26,0.44], 'W10X30':[16.7,0.622,0.3,0.51], 'W10X33':[36.6,0.583,0.29,0.435],
+  'W10X39':[45,0.976,0.315,0.53], 'W10X45':[53.4,1.51,0.35,0.62], 'W12X14':[2.36,0.0704,0.2,0.225], 'W12X16':[2.82,0.103,0.22,0.265],
+  'W12X19':[3.76,0.18,0.235,0.35], 'W12X22':[4.66,0.293,0.26,0.425], 'W12X26':[17.3,0.3,0.23,0.38], 'W12X30':[20.3,0.457,0.26,0.44],
+  'W12X35':[24.5,0.741,0.3,0.52], 'W12X40':[44.1,0.906,0.295,0.515], 'W12X45':[50,1.26,0.335,0.575], 'W12X50':[56.3,1.71,0.37,0.64]
+};
+const AISC_HSS2 = {
+  'HSS4X4X.250':[7.8,12.8,0.233], 'HSS4X4X.375':[10.3,17.5,0.349], 'HSS4X4X.500':[11.9,21,0.465], 'HSS5X5X.250':[16,25.8,0.233],
+  'HSS5X5X.375':[21.7,36.1,0.349], 'HSS5X5X.500':[26,44.6,0.465], 'HSS6X4X.250':[11.1,23.6,0.233], 'HSS6X4X.375':[14.9,32.8,0.349],
+  'HSS6X4X.500':[17.8,40.3,0.465], 'HSS6X6X.250':[28.6,45.6,0.233], 'HSS6X6X.375':[39.5,64.6,0.349], 'HSS6X6X.500':[48.3,81.1,0.465],
+  'HSS7X5X.250':[21.3,42.9,0.233], 'HSS7X5X.375':[29.3,60.6,0.349], 'HSS7X5X.500':[35.6,75.8,0.465], 'HSS8X4X.250':[14.4,35.3,0.233],
+  'HSS8X4X.375':[19.6,49.3,0.349], 'HSS8X4X.500':[23.6,61.1,0.465], 'HSS8X6X.250':[36.4,70.3,0.233], 'HSS8X6X.375':[50.6,100,0.349],
+  'HSS8X6X.500':[62.5,127,0.465], 'HSS8X8X.250':[70.7,111,0.233], 'HSS8X8X.375':[100,160,0.349], 'HSS8X8X.500':[125,204,0.465],
+  'HSS9X7X.250':[57.2,107,0.233], 'HSS9X7X.375':[80.4,154,0.349], 'HSS9X7X.500':[100,197,0.465], 'HSS10X4X.250':[17.7,47.4,0.233],
+  'HSS10X4X.375':[24.3,66.5,0.349], 'HSS10X4X.500':[29.5,82.6,0.465], 'HSS10X6X.250':[44.1,96.7,0.233], 'HSS10X6X.375':[61.8,139,0.349],
+  'HSS10X6X.500':[76.8,176,0.465], 'HSS10X8X.250':[84.7,155,0.233], 'HSS10X8X.375':[120,224,0.349], 'HSS10X8X.500':[151,288,0.465],
+  'HSS10X10X.250':[141,220,0.233], 'HSS10X10X.375':[202,320,0.349], 'HSS10X10X.500':[256,412,0.465], 'HSS12X4X.250':[21,59.8,0.233],
+  'HSS12X4X.375':[28.9,84.1,0.349], 'HSS12X4X.500':[35.3,105,0.465], 'HSS12X6X.250':[51.9,124,0.233], 'HSS12X6X.375':[72.9,178,0.349],
+  'HSS12X6X.500':[91.1,227,0.465], 'HSS12X8X.250':[98.8,202,0.233], 'HSS12X8X.375':[140,293,0.349], 'HSS12X8X.500':[178,377,0.465],
+  'HSS12X10X.250':[164,289,0.233], 'HSS12X10X.375':[234,421,0.349], 'HSS12X10X.500':[298,545,0.465], 'HSS12X12X.250':[248,384,0.233],
+  'HSS12X12X.375':[357,561,0.349], 'HSS12X12X.500':[457,728,0.465], 'HSS14X4X.250':[24.4,72.4,0.233], 'HSS14X4X.375':[33.6,102,0.349],
+  'HSS14X4X.500':[41.2,127,0.465], 'HSS14X6X.250':[59.6,152,0.233], 'HSS14X6X.375':[84.1,219,0.349], 'HSS14X6X.500':[105,279,0.465],
+  'HSS14X10X.250':[186,362,0.233], 'HSS14X10X.375':[267,528,0.349], 'HSS14X10X.500':[341,685,0.465], 'HSS16X4X.250':[27.7,85.2,0.233],
+  'HSS16X4X.375':[38.3,120,0.349], 'HSS16X4X.500':[47,150,0.465], 'HSS16X8X.250':[127,300,0.233], 'HSS16X8X.375':[181,436,0.349],
+  'HSS16X8X.500':[230,563,0.465]
+};
 function sectProps(desig){
-  if(AISC_W[desig]){const[d,bf,A,w,Ix,Sx]=AISC_W[desig];return{shape:'H',d,b:bf,A,w,Ix,Sx,desig,found:true};}
-  if(AISC_HSS[desig]){const[d,b,A,w,Ix,Sx]=AISC_HSS[desig];return{shape:'B',d,b,A,w,Ix,Sx,desig,found:true};}
+  if(AISC_W[desig]){const[d,bf,A,w,Ix,Sx]=AISC_W[desig];const[Iy,J,tw,tf]=AISC_W2[desig]||[];return{shape:'H',d,b:bf,A,w,Ix,Sx,Iy,J,tw,tf,desig,found:true};}
+  if(AISC_HSS[desig]){const[d,b,A,w,Ix,Sx]=AISC_HSS[desig];const[Iy,J,tdes]=AISC_HSS2[desig]||[];return{shape:'B',d,b,A,w,Ix,Sx,Iy,J,tdes,desig,found:true};}
   // fallback — unknown designation (e.g. from a stale imported project)
   return{shape:'B',d:8,b:4,A:3.0,w:10,Ix:30,Sx:7,desig:desig||'W12X26',found:false};
 }
@@ -2787,32 +2835,83 @@ function resultPoints(load, field){
 function modelSignature(){ try{ return buildMCT(state).text; }catch(e){ return ''; } }
 let _resultsModelSig='';   // model signature captured when results were parsed
 
+// Two sources of beam-force results: the in-app analysis (APP_RES) and pasted MIDAS output
+// (MIDAS_ROWS). RESULT_ROWS points at the one shown (RES_SRC); every results consumer reads it.
+let MIDAS_ROWS=[], _midasSig='', APP_RES=null, RES_SRC='midas';
+function resSrcName(){ return RES_SRC==='app'?'in-app analysis':'MIDAS'; }
+function selectResults(){
+  RESULT_ROWS = RES_SRC==='app' ? ((APP_RES&&APP_RES.rows)||[]) : MIDAS_ROWS;
+  _resultsModelSig = RES_SRC==='app' ? ((APP_RES&&APP_RES.sig)||'') : _midasSig;
+}
+function showResults(){
+  selectResults();
+  const loads=[...new Set(MIDAS_ROWS.map(r=>r.load).filter(Boolean))];
+  document.getElementById('resTag').textContent=MIDAS_ROWS.length?`${MIDAS_ROWS.length} rows · ${loads.length} cases`:(state.midasPaste&&state.midasPaste.trim()?'no data — check format':'no data');
+  const hasData=RESULT_ROWS.length>0, onTab=document.getElementById('tab-results').classList.contains('active');
+  document.getElementById('resPlotPanel').style.display=hasData?'block':'none';
+  document.getElementById('resKeyPanel').style.display=hasData?'block':'none';
+  if(!hasData) document.getElementById('resTablePanel').style.display='none';
+  if(hasData && onTab){ drawResultsPlot(); buildResultsTable(); }
+  refreshReactionPanel();
+  updateStaleWarning();
+  renderAnaPanel();
+}
 function doParseResults(){
   const text=document.getElementById('resPaste').value;
   state.midasPaste=text;
-  RESULT_ROWS=parseBeamResults(text);
-  _resultsModelSig=modelSignature();   // snapshot the model these results belong to
-  const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
-  document.getElementById('resTag').textContent=RESULT_ROWS.length?`${RESULT_ROWS.length} rows · ${loads.length} cases`:'no data — check format';
-  const hasData=RESULT_ROWS.length>0;
-  document.getElementById('resPlotPanel').style.display=hasData?'block':'none';
-  document.getElementById('resKeyPanel').style.display=hasData?'block':'none';
-  if(hasData){ drawResultsPlot(); buildResultsTable(); }
-  refreshReactionPanel();
-  updateStaleWarning();
+  MIDAS_ROWS=parseBeamResults(text);
+  _midasSig=modelSignature();          // snapshot the model these results belong to
+  if(MIDAS_ROWS.length){ RES_SRC='midas'; state.resSrc='midas'; }
+  showResults();
 }
 function clearResults(){
-  RESULT_ROWS=[];document.getElementById('resPaste').value='';state.midasPaste='';
-  _resultsModelSig='';
-  document.getElementById('resTag').textContent='no data';
-  document.getElementById('resPlotPanel').style.display='none';
-  document.getElementById('resKeyPanel').style.display='none';
-  document.getElementById('resTablePanel').style.display='none';
-  refreshReactionPanel();
-  updateStaleWarning();
+  MIDAS_ROWS=[]; document.getElementById('resPaste').value=''; state.midasPaste=''; _midasSig='';
+  if(RES_SRC==='midas' && APP_RES && APP_RES.rows){ RES_SRC='app'; state.resSrc='app'; }
+  showResults();
+}
+// run (or re-run) the in-app analysis of the current MCT
+function runAnalysis(silent){
+  const sig=modelSignature();
+  try{ const R=anaRun(buildMCT(state).text); APP_RES=Object.assign(R,{sig}); }
+  catch(e){ console.error(e); APP_RES={error:e.message, sig, rows:[]}; }
+  RES_SRC='app'; state.resSrc='app';
+  if(silent) selectResults(); else showResults();
+}
+function renderAnaPanel(){
+  const st=document.getElementById('anaStatus'); if(!st) return;
+  const seg=document.getElementById('segResSrc');
+  seg.querySelectorAll('button').forEach(b=>{ b.classList.toggle('on',b.dataset.v===RES_SRC); b.disabled=(b.dataset.v==='app'?!(APP_RES&&APP_RES.rows&&APP_RES.rows.length):!MIDAS_ROWS.length); });
+  const disp=document.getElementById('anaDisp'), cmp=document.getElementById('anaCompare');
+  if(!APP_RES){ st.innerHTML='<span style="color:var(--muted)">Not run yet.</span>'; disp.innerHTML=''; cmp.innerHTML=''; return; }
+  if(APP_RES.error){ st.innerHTML=`<b style="color:var(--rust)">⚠ Analysis failed:</b> ${APP_RES.error}`+(/unstable/.test(APP_RES.error)?' Check the supports and connections (see any warning at the top of the page).':''); disp.innerHTML=''; cmp.innerHTML=''; return; }
+  const R=APP_RES; let imb=0; Object.values(R.cases).forEach(c=>{ for(let k=0;k<3;k++) imb=Math.max(imb,Math.abs(c.applied[k]+c.sumR[k])); });
+  st.innerHTML=`<b style="color:var(--moss)">✓ Solved</b> ${R.nodes} nodes, ${R.elems} elements, ${R.n} equations (bandwidth ${R.bw}) in ${R.ms.toFixed(0)} ms; ${R.planar?'plane frame (out-of-plane DOFs restrained)':'3D frame'}; ${Object.keys(R.cases).length} load cases, ${R.combos.length} combinations + envelope.`+
+    ` Equilibrium: largest force imbalance ${imb<1e-3?'&lt; 0.001':f(imb,3)} lbf.`+(R.autoFix?` ${R.autoFix} DOF${R.autoFix>1?'s':''} with no stiffness restrained.`:'')+(R.warn.length?`<br><span style="color:var(--rust)">${R.warn.join(' ')}</span>`:'')+
+    (RES_SRC!=='app'?`<br><span style="color:var(--muted)">Showing pasted MIDAS results; switch to In-app analysis to show these.</span>`:'');
+  // displacement summary per load case
+  const rows=Object.entries(R.cases).map(([c,v])=>`<tr><td>${c}</td><td>${f(v.umax*12,3)}</td><td>${v.unode}</td></tr>`).join('');
+  disp.innerHTML=`<details><summary style="cursor:pointer;font-size:12px;font-weight:600">Maximum displacement by load case (unfactored)</summary><table class="rpt" style="max-width:520px"><thead><tr><th>Load case</th><th>Max |displacement| (in)</th><th>Node</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+  cmp.innerHTML=compareSourcesHTML();
+}
+// in-app vs MIDAS base reactions, for every load present in both
+function compareSourcesHTML(){
+  if(!(APP_RES&&APP_RES.rows&&APP_RES.rows.length&&MIDAS_ROWS.length)) return '';
+  const keep=RES_SRC, sets={}; const loadsA=new Set(APP_RES.rows.map(r=>r.load)), loads=[...new Set(MIDAS_ROWS.map(r=>r.load))].filter(l=>loadsA.has(l));
+  if(!loads.length) return '<p class="hint">No load case or combination names in the pasted MIDAS results match the in-app analysis, so they cannot be compared.</p>';
+  ['app','midas'].forEach(src=>{ RES_SRC=src; selectResults(); sets[src]={}; loads.forEach(l=>{ sets[src][l]=midasColumnForces(l); }); });
+  RES_SRC=keep; selectResults();
+  const comps=['N','V','M','VL','ML'];
+  let worst=0; const rows=loads.map(l=>{ const A=sets.app[l], B=sets.midas[l]; let scale=0, d=0, flip=0, n=0;
+    A.forEach((a,i)=>{ const b=B[i]; if(!a.reaction||!b.reaction) return; comps.forEach(k=>{ if(a.reaction[k]==null||b.reaction[k]==null) return; scale=Math.max(scale,Math.abs(a.reaction[k]),Math.abs(b.reaction[k])); d=Math.max(d,Math.abs(a.reaction[k]-b.reaction[k])); if(Math.abs(a.reaction[k]+b.reaction[k])<1e-3*Math.max(1,Math.abs(a.reaction[k]))&&Math.abs(a.reaction[k])>1) flip++; n++; }); });
+    const rel=scale>0?d/scale:0; worst=Math.max(worst,rel);
+    return `<tr${rel>0.02?' style="background:#fbeee9"':''}><td>${l}</td><td>${f(d,0)}</td><td>${f(rel*100,2)}%</td><td>${flip?flip+' sign flips':''}</td></tr>`; }).join('');
+  return `<details${worst>0.02?' open':''}><summary style="cursor:pointer;font-size:12px;font-weight:600">In-app analysis vs pasted MIDAS: base reactions (largest difference ${f(worst*100,2)}%)</summary>
+    <div class="hint" style="margin:4px 0">Largest difference over every support and reaction component (N, V, M${is3D(state)?', V long, M long':''}), relative to the largest reaction in that case. Small differences come from section property databases (MIDAS AISC10 vs AISC v15) and shear deformation; a consistent sign flip would indicate a sign-convention difference.</div>
+    <table class="rpt" style="max-width:640px"><thead><tr><th>Load / combination</th><th>Largest |difference| (lbf or ft·lbf)</th><th>Relative</th><th></th></tr></thead><tbody>${rows}</tbody></table></details>`;
 }
 // show/hide the "results out of date" warning based on whether the model changed
 function resultsStale(){
+  if(RES_SRC==='app') return false;     // the in-app analysis re-runs whenever the model changes
   return RESULT_ROWS.length>0 && _resultsModelSig!=='' && modelSignature()!==_resultsModelSig;
 }
 function updateStaleWarning(){
@@ -3154,7 +3253,7 @@ async function buildCalcWorkbook(s, A, meta, H){
     const rows=[['Column','Max |N| (lbf)','Max |V| (lbf)','Max |M| (ft-lbf)','Driving case']];
     gov.forEach((c,i)=>rows.push([c.label||('Col '+(i+1)),Math.round(c.N.v),Math.round(c.V.v),Math.round(c.M.v),c.N.load]));
     tbl(rows,{numFmt:'#,##0',bold:true,leftFirst:true});
-    note('Reactions are imported from the MIDAS analysis and are not recomputed by this workbook. '
+    note((RES_SRC==='app'?'Reactions are from the in-app linear elastic analysis and are not recomputed by this workbook. ':'Reactions are imported from the MIDAS analysis and are not recomputed by this workbook. ')
         +'Maxima are taken independently and need not act concurrently.');
     r++;
   }
@@ -3331,7 +3430,7 @@ async function buildCalcWorkbook(s, A, meta, H){
   const cr=H.caseReactions();
   if(cr&&cr.have){
     brk();
-    sect('Base Reactions by Load Case','from MIDAS');
+    sect('Base Reactions by Load Case',RES_SRC==='app'?'in-app analysis':'from MIDAS');
     const caseList=['DL','Snow','Wind A-0','Wind B-0','Wind A-180','Wind B-180','Wind A-90','Wind B-90','Wind A-270','Wind B-270'];
     let rows;
     if(cr.colNames.length>3){
@@ -3351,7 +3450,7 @@ async function buildCalcWorkbook(s, A, meta, H){
       });
     }
     tbl(rows,{numFmt:'#,##0',leftFirst:true});
-    note('Values come directly from the MIDAS analysis and are not recomputed here.');
+    note(RES_SRC==='app'?'Values come from the in-app linear elastic analysis and are not recomputed here.':'Values come directly from the MIDAS analysis and are not recomputed here.');
   }
 
   brk();
@@ -3848,13 +3947,13 @@ async function buildReport(){
     imgReactFBD=await snap('plotReact');
     midasReactBlock=`
     ${staleNote}
-    <p>Base reactions below are taken directly from the MIDAS analysis (pasted beam-force results), read at each column base element. Axis map: Axial → vertical reaction (N), Shear-z → horizontal (V), Moment-y → base moment (M). MIDAS reports member forces at the base; the reactions shown are equal and opposite (what the foundation resists). These are the design values, shown in ${uForceLbl()} / ${uMomLbl()}.</p>
+    <p>Base reactions below are taken directly from the ${RES_SRC==='app'?'in-app linear elastic analysis of the MCT model':'MIDAS analysis (pasted beam-force results)'}, read at each column base element. Axis map: Axial → vertical reaction (N), Shear-z → horizontal (V), Moment-y → base moment (M). MIDAS reports member forces at the base; the reactions shown are equal and opposite (what the foundation resists). These are the design values, shown in ${uForceLbl()} / ${uMomLbl()}.</p>
     ${imgTag(imgReactFBD,'Figure 6.1 — Column base free-body: member forces (red) and equal-and-opposite reactions (blue), governing envelope.')}
-    <h3>6.1 Governing base reactions (MIDAS) — all columns</h3>
+    <h3>6.1 Governing base reactions (${RES_SRC==='app'?'in-app analysis':'MIDAS'}) — all columns</h3>
     <table class="rpt"><thead><tr><th>Column</th><th>Max |N| reaction (${uForceLbl()})<br>+ = compression</th><th>Max |V| reaction (${uForceLbl()})</th><th>Max |M| base (${uMomLbl()})</th>${lng3?`<th>Max |V<sub>long</sub>| (${uForceLbl()})<br>Shear-y</th><th>Max |M<sub>long</sub>| (${uMomLbl()})<br>Moment-z</th>`:''}</tr></thead><tbody>${govR}</tbody></table>
     ${lng3?`<p class="note-sm">3D model: supports are labelled F<i>j</i>-C<i>i</i> (frame <i>j</i>, column <i>i</i>). V and M act in the frame plane; V<sub>long</sub> and M<sub>long</sub> act along the canopy length (column weak axis), from the longitudinal wind cases. The free-body figure shows frame ${Math.min(resFrame,frameYs(s).length-1)+1}.</p>`:''}
     <p class="note-sm">Governing = independent maximum of |N|, |V|, |M| ${gov.noEnvelope?`across all pasted load cases (no Envelope combination was found, so individual unfactored cases are included — paste the Envelope results for correct design reactions)`:`taken from the pasted <b>Envelope</b> strength combination, which already brackets the 14 ASCE 7-16 strength combinations`}; the driving ${gov.noEnvelope?'case':'envelope'} is noted beneath each value. Because the maxima are taken independently, the three values for a column may come from different points in the envelope and need not act concurrently.</p>
-    <h3>6.2 Reactions by load case &amp; column (MIDAS)</h3>
+    <h3>6.2 Reactions by load case &amp; column (${RES_SRC==='app'?'in-app analysis':'MIDAS'})</h3>
     <table class="rpt"><thead><tr><th>Load / combo</th><th>Column</th><th>N (${uForceLbl()})</th><th>V (${uForceLbl()})</th><th>M (${uMomLbl()})</th>${lng3?`<th>V<sub>long</sub> (${uForceLbl()})</th><th>M<sub>long</sub> (${uMomLbl()})</th>`:''}</tr></thead><tbody>${caseRows}</tbody></table>`;
   }
 
@@ -3885,16 +3984,17 @@ async function buildReport(){
         </tr></thead><tbody>${statRows}</tbody></table>
       </figure>`;
     }).join('');
-    resultsSection=`<h2>7 · MIDAS Analysis Results</h2>
+    resultsSection=`<h2>7 · Analysis Results (${RES_SRC==='app'?'in-app linear elastic analysis':'MIDAS'})</h2>
+      ${RES_SRC==='app'&&APP_RES&&APP_RES.rows?`<p>First-order linear elastic analysis of the generated MCT model in this tool: 3D beam elements with shear deformation, the MCT supports, releases, load cases and combinations; ${APP_RES.planar?'solved as a plane frame':'solved in 3D'} (${APP_RES.n} equations). Second-order effects are not included.</p>`:''}
       <p>${RESULT_ROWS.length} beam-force rows imported across ${loads.length} load cases / combinations. Peak magnitudes per case (${uForceLbl()} / ${uMomLbl()}):</p>
       <table class="rpt"><thead><tr><th>Load / combo</th><th>|M|max (${uMomLbl()})</th><th>|V|max (${uForceLbl()})</th><th>|N|max (${uForceLbl()})</th></tr></thead><tbody>${govByCase}</tbody></table>
       <h3>7.1 Member &amp; node key</h3>
       ${imgTag(imgKey,'Element (boxed) and node numbering, matching the MIDAS model and the imported Beam Forces table.')}
       <h3>7.2 Moment &amp; shear diagrams by combination</h3>
-      <p class="note-sm">Diagrams plot the imported MIDAS node values directly (straight segments between nodes; refine the mesh for smoother curves). Moment in green, shear in orange, on a common scale across all combinations.</p>
+      <p class="note-sm">Diagrams plot the ${RES_SRC==='app'?'analysis':'imported MIDAS'} node values directly (straight segments between nodes; refine the mesh for smoother curves). Moment in green, shear in orange, on a common scale across all combinations.</p>
       <div style="display:flex;flex-wrap:wrap;gap:12px">${comboFigs}</div>`;
   } else {
-    resultsSection=`<h2>7 · MIDAS Analysis Results</h2><p class="note-sm">No MIDAS results pasted. Run the model in MIDAS, paste the Beam Forces table in the Results tab, then regenerate this report to include analysis force diagrams and peak tables.</p>`;
+    resultsSection=`<h2>7 · Analysis Results</h2><p class="note-sm">No analysis results: run the in-app analysis or paste MIDAS results. Run the model in MIDAS, paste the Beam Forces table in the Results tab, then regenerate this report to include analysis force diagrams and peak tables.</p>`;
   }
 
   // ============ assemble document ============
@@ -3929,9 +4029,9 @@ async function buildReport(){
       <td>${uForce(gg.N.v)}</td><td>${uForce(gg.V.v)}</td><td>${uMom(gg.M.v)}</td></tr>`).join('');
     summaryReactBlock=`
   ${staleNote}
-  <p>Governing column base reactions (MIDAS analysis — design values, per column):</p>
+  <p>Governing column base reactions (${RES_SRC==='app'?'in-app linear elastic analysis':'MIDAS analysis'} — design values, per column):</p>
   <table class="rpt"><thead><tr><th>Support</th><th>Max axial N (${uForceLbl()})<br>+ = compression</th><th>Max shear V (${uForceLbl()})</th><th>Max base moment (${uMomLbl()})</th></tr></thead><tbody>${sumRows}</tbody></table>
-  <p class="note-sm">Values above are the governing column base reactions from the <b>MIDAS analysis</b> (pasted results) — the design values. Per-case and free-body detail is in Section 6.</p>`;
+  <p class="note-sm">Values above are the governing column base reactions from the <b>${RES_SRC==='app'?'in-app analysis':'MIDAS analysis'}</b>${RES_SRC==='app'?'':' (pasted results)'} — the design values. Per-case and free-body detail is in Section 6.</p>`;
   } else {
     summaryReactBlock=`
   <p class="note-sm">No MIDAS results have been pasted yet. Run the model in MIDAS, paste the beam-force results in the Results tab, and regenerate this report to populate the governing column base reactions and free-body diagram.</p>`;
@@ -4004,9 +4104,9 @@ async function buildReport(){
   <table class="rpt"><thead><tr><th>Case</th><th>$C_{NW}$</th><th>$C_{NL}$</th><th>$p_W$ (psf)</th><th>$p_L$ (psf)</th></tr></thead><tbody>${wcRows}</tbody></table>
 
   ${hasMidas?`
-  <h2 id="s6">6 · Base Reactions (from MIDAS)</h2>
+  <h2 id="s6">6 · Base Reactions (${RES_SRC==='app'?'in-app analysis':'from MIDAS'})</h2>
   ${midasReactBlock}` : `
-  <h2 id="s6">6 · Base Reactions (pending MIDAS analysis)</h2>
+  <h2 id="s6">6 · Base Reactions (pending analysis)</h2>
   <p>No MIDAS results have been pasted. Run the model in MIDAS, paste the beam-force results in the Results tab, then regenerate this report to populate the governing base reactions, per-case tables, and the column-base free-body diagram. These are the design values for the foundation.</p>`}
 
   ${resultsSection}
@@ -4511,7 +4611,7 @@ function draw3D(){
           text:[`M ${uMom(gg.M.v)} ${uMomLbl()}`],textfont:{size:10,color:COL.moss},hoverinfo:'skip',name:''});
       }
     });
-    reactNote=` Governing MIDAS base reactions shown (N steel, V rust, M label).`;
+    reactNote=` Governing ${resSrcName()} base reactions shown (N steel, V rust, M label).`;
   }
 
   const cams={
@@ -4677,7 +4777,7 @@ function draw3DFull(){
       if(Math.abs(r.N.v)>1){ const up=r.N.v>0?1:-1; arrow3D(cx,y,zb-up*rLen,0,0,up,rLen,COL.steel,`F${r.fj+1}-C${r.ci+1} N ${uForce(r.N.v)} ${uForceLbl()}`).forEach(t=>traces.push(t)); }
       if(showLabels) label3D(cx+0.8,y,zb-rLen*0.6,`N ${uForce(r.N.v)}`,COL.steel,9);
     });
-    reactNote=' Governing MIDAS axial base reactions shown for every frame (hover for values).';
+    reactNote=` Governing ${resSrcName()} axial base reactions shown for every frame (hover for values).`;
   }
   const xMin=-5, xMax=g.L+4, yMin=-4, yMax=L3+4;
   const zMin=Math.min(s.El_base,...g.colBaseF.flat())-2.0, zMax=Math.max(g.yStart,g.yEnd)+bd/2+5.5;
@@ -5729,7 +5829,8 @@ function refreshReactionPanel(){
   refreshResFrameSel();
   buildReactAllTable();
   const hasMidas=RESULT_ROWS.length>0;
-  document.getElementById('reactSrcTag').textContent=hasMidas?'MIDAS design values':'awaiting MIDAS results';
+  document.getElementById('reactSrcTag').textContent=hasMidas?`${resSrcName()} design values`:'awaiting results';
+  const rh=document.getElementById('reactSrcHead'); if(rh) rh.textContent=`${RES_SRC==='app'?'In-app analysis':'MIDAS'} results — design values`;
   document.getElementById('reactEmpty').style.display=hasMidas?'none':'block';
   document.getElementById('midasBlock').style.display=hasMidas?'block':'none';
   if(hasMidas){
@@ -5753,6 +5854,9 @@ function validateInputs(){
   if(s.H_col<=0) msgs.push('Column height must be positive.');
   else frameColHeights(s).forEach((row,j)=>row.forEach((h,i)=>{ if(h<=0) msgs.push(`${is3D(s)?`Frame ${j+1}, column ${dxfLetter(i)}`:`Column ${i+1}`} base is at or above the roof beam — lower its base elevation.`); }));
   if(s.B_trib<=0) msgs.push('Tributary width is zero or negative — all surface loads will be zero.');
+  if(!is3D(s) && s.baseFixity==='pinned' && (nCols(s)===1 || s.beamConnect==='pinned'))
+    msgs.push(nCols(s)===1 ? 'A single column on a pinned base cannot stand: the frame is a mechanism. Use a fixed base.'
+      : 'Pinned bases with pinned column-to-beam connections leave the frame with no lateral stiffness (a sway mechanism). Fix the bases or the connections.');
   if(s.L_OH<0||s.R_OH<0) msgs.push('Overhang lengths cannot be negative.');
   if(s.slope<0) msgs.push('Roof slope is negative.');
   if(s.slope>1) msgs.push(`Roof slope ${s.slope} (rise/run) is very steep (θ=${(Math.atan(s.slope)*180/Math.PI).toFixed(0)}°); confirm this is intended.`);
@@ -5790,6 +5894,8 @@ function recompute(){
   // always recompute MCT (cheap) for stats + preview
   const {text,mesh}=buildMCT(state);
   _lastMCT=text; _lastMesh=mesh;
+  if(state.resSrc==='app' && (!APP_RES || APP_RES.sig!==modelSignature())) runAnalysis(true);   // keep in-app results current
+  if(document.getElementById('anaStatus')) renderAnaPanel();
   renderMCTPreview(text);
   // mesh stats
   const beamN=mesh.elements.filter(e=>e.member==='beam').length;
@@ -5821,6 +5927,8 @@ function onTabShown(tab){
 document.getElementById('dlBtn').onclick=downloadMCT;
 document.getElementById('copyBtn').onclick=copyMCT;
 document.getElementById('parseBtn').onclick=()=>{doParseResults();};
+document.getElementById('anaRunBtn').onclick=()=>runAnalysis(false);
+document.getElementById('segResSrc').addEventListener('click',e=>{ const b=e.target.closest('button[data-v]'); if(!b||b.disabled) return; RES_SRC=b.dataset.v; state.resSrc=RES_SRC; showResults(); });
 document.getElementById('clearResBtn').onclick=clearResults;
 document.getElementById('resShowM').addEventListener('change',drawResultsPlot);
 document.getElementById('resShowV').addEventListener('change',drawResultsPlot);
@@ -6115,8 +6223,8 @@ function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
     if (gov && gov.length) { const kf = v => f((v || 0) / 1000, 2), lbl = (gg, k) => { const m = /F(\d+)-C(\d+)/.exec(gg.label || ''); return m ? dxfMarkOf(+m[1] - 1, +m[2] - 1) : dxfMarkOf(0, k); };
       const rr = gov.map((gg, k) => [lbl(gg, k), kf(gg.N.v), kf(gg.V.v), kf(gg.M.v)].concat(C.three ? [kf(gg.VL.v), kf(gg.ML.v)] : []).concat([dxfStr(gg.N.load).toUpperCase()]));
       dxfTable(D, ly.tb, 0, T.y - 2 * h, ['MARK', 'N (KIP)', 'V (KIP)', 'M (KIP-FT)'].concat(C.three ? ['V LONG (KIP)', 'M LONG (KIP-FT)'] : []).concat(['FROM']), rr,
-        `GOVERNING BASE REACTIONS FROM MIDAS (${gov.noEnvelope ? 'MAX OVER ALL PASTED CASES' : 'STRENGTH ENVELOPE'}; INDEPENDENT MAXIMA, NOT CONCURRENT). + N = COMPRESSION.${typeof resultsStale === 'function' && resultsStale() ? ' WARNING: RESULTS ARE OUT OF DATE WITH THE MODEL.' : ''}`); } }
-  else D.text(ly.t, 0, T.y - 2 * h, 0.9 * h, 'BASE REACTIONS: RUN THE MCT IN MIDAS AND PASTE THE BEAM FORCES IN THE RESULTS TAB TO ADD THE REACTION TABLE TO THIS SHEET.');
+        `GOVERNING BASE REACTIONS FROM ${RES_SRC === 'app' ? 'THE IN-APP LINEAR ANALYSIS' : 'MIDAS'} (${gov.noEnvelope ? 'MAX OVER ALL PASTED CASES' : 'STRENGTH ENVELOPE'}; INDEPENDENT MAXIMA, NOT CONCURRENT). + N = COMPRESSION.${typeof resultsStale === 'function' && resultsStale() ? ' WARNING: RESULTS ARE OUT OF DATE WITH THE MODEL.' : ''}`); } }
+  else D.text(ly.t, 0, T.y - 2 * h, 0.9 * h, 'BASE REACTIONS: RUN THE IN-APP ANALYSIS OR PASTE MIDAS BEAM FORCES IN THE RESULTS TAB TO ADD THE REACTION TABLE TO THIS SHEET.');
 }
 /* ---------- 6: design loads, wind cases, combinations, member schedule ---------- */
 function dxfLoads(D, C) { const h = D.h, s = C.s, g = C.g, l = D.layer('ANNO-TEXT', 7), tb = D.layer('TABL', 7), A = C.A, part = C.part || 0;
@@ -6222,11 +6330,189 @@ document.getElementById('dxfGo').addEventListener('click', () => { const o = dxf
 
 
 // ============================================================================
+// IN-APP LINEAR ELASTIC ANALYSIS — first-order, small-displacement 3D frame analysis
+// of the generated MCT text itself, so the app and MIDAS analyse the same model.
+//   * 3D beam elements (Timoshenko: bending + shear deformation with AISC shear areas),
+//     MIDAS local axes (beta = 0: vertical member local z = global X; otherwise local z
+//     in the vertical plane, upward), end releases by static condensation
+//   * loads: SELFWEIGHT, CONLOAD, BEAMLOAD UNILOAD in GX/GY/GZ (with bPROJ) and LX/LY/LZ
+//   * supports from *CONSTRAINT; a planar model (every node at Y = 0) is solved as a
+//     plane frame (out-of-plane DOFs restrained), as a 2D frame is meant
+//   * K u = F by a banded Cholesky factorization after reverse Cuthill-McKee ordering,
+//     once for all load cases; combinations and the envelope by superposition
+// Results are produced as beam-force rows in the MIDAS "Beam Forces" layout (internal
+// forces: I-end = -(end force on the element), J-end = +(end force), local axes), so
+// the existing diagrams, reactions, report, Excel and DXF read them unchanged.
+// ============================================================================
+function anaParseMCT(text){
+  const M={nodes:new Map(),elems:new Map(),secs:new Map(),E:0,nu:0.3,den:0,cases:[],sup:new Map(),rel:new Map(),loads:{},combos:[]};
+  let blk=null, arg=null, cur=null, relPend=null, combo=null;
+  text.split('\n').forEach(raw=>{
+    if(raw.startsWith('*')){ const key=raw.split(';')[0].trim(); blk=key.split(',')[0].trim(); arg=key.includes(',')?key.split(',').slice(1).join(',').trim():null;
+      if(blk==='*USE-STLD'){ cur=arg; M.loads[cur]=M.loads[cur]||{sw:null,con:[],beam:[]}; } relPend=null; combo=null; return; }
+    const ln=raw.trim(); if(!ln||ln.startsWith(';')) return;
+    const p=ln.split(',').map(x=>x.trim());
+    if(blk==='*NODE') M.nodes.set(+p[0],[+p[1],+p[2],+p[3]]);
+    else if(blk==='*ELEMENT') M.elems.set(+p[0],{sec:+p[3],n1:+p[4],n2:+p[5],beta:+p[6]});
+    else if(blk==='*MATERIAL'){ M.E=+p[10]; M.nu=+p[11]; M.den=+p[13]; }
+    else if(blk==='*SECTION') M.secs.set(+p[0],p[15]);
+    else if(blk==='*STLDCASE') M.cases.push(p[0]);
+    else if(blk==='*CONSTRAINT') p[0].split(/\s+/).forEach(n=>M.sup.set(+n,[...p[1]].map(c=>c==='1')));
+    else if(blk==='*FRAME-RLS'){ if(!relPend){ relPend={id:+p[0],i:[...p[2]].map(c=>c==='1')}; } else { M.rel.set(relPend.id,{i:relPend.i,j:[...p[0]].map(c=>c==='1')}); relPend=null; } }
+    else if(blk==='*SELFWEIGHT') M.loads[cur].sw=[+p[0],+p[1],+p[2]];
+    else if(blk==='*CONLOAD') p[0].split(/\s+/).forEach(n=>M.loads[cur].con.push([+n,[+p[1],+p[2],+p[3],+p[4],+p[5],+p[6]]]));
+    else if(blk==='*BEAMLOAD') M.loads[cur].beam.push({e:+p[0],dir:p[3],proj:p[4]==='YES',w:+p[11],w2:+p[13]});
+    else if(blk==='*LOADCOMB'){
+      if(ln.startsWith('NAME=')){ combo={name:ln.split(',')[0].slice(5).trim(),env:+p[4]===1,terms:[]}; M.combos.push(combo); }
+      else if(combo){ for(let k=0;k+2<p.length;k+=3) if(p[k]) combo.terms.push([p[k],p[k+1],+p[k+2]]); } }
+  });
+  return M;
+}
+// section properties in ft units; shear areas: W web d*tw (strong-axis shear) and 5/6 of
+// the flanges 2*bf*tf (weak-axis shear); HSS 2*d*t and 2*b*t (t = design wall thickness)
+function anaSect(name){
+  const p=sectProps(name), in2=1/144, in4=1/20736;
+  let Iy=p.Iy, J=p.J, Asz, Asy, approx=false;
+  if(!(Iy>0) || !(J>0)){ approx=true; Iy=Iy>0?Iy:p.Ix*Math.pow(p.b/p.d,2)*0.3; J=J>0?J:p.A*p.A*p.A/300; }
+  if(p.shape==='H'){ const tw=p.tw||p.A/(2*p.d), tf=p.tf||p.A/(4*p.b); Asz=p.d*tw; Asy=(5/6)*2*p.b*tf; }
+  else { const t=p.tdes||p.A/(2*(p.d+p.b)); Asz=2*p.d*t; Asy=2*p.b*t; }
+  return {A:p.A*in2, Iy:p.Ix*in4, Iz:Iy*in4, J:J*in4, Asy:Asy*in2, Asz:Asz*in2, approx, found:p.found, name};
+}
+function anaAxes(p1,p2){
+  const ex=[p2[0]-p1[0],p2[1]-p1[1],p2[2]-p1[2]], L=Math.hypot(...ex); ex[0]/=L; ex[1]/=L; ex[2]/=L;
+  let ez;
+  if(Math.abs(Math.abs(ex[2])-1)<1e-9) ez=[1,0,0];                       // vertical: local z = global X
+  else { const d=ex[2]; ez=[-d*ex[0],-d*ex[1],1-d*ex[2]]; const n=Math.hypot(...ez); ez=ez.map(v=>v/n); }
+  const ey=[ez[1]*ex[2]-ez[2]*ex[1], ez[2]*ex[0]-ez[0]*ex[2], ez[0]*ex[1]-ez[1]*ex[0]];   // y = z x x
+  return {L,R:[ex,ey,ez]};
+}
+function anaKloc(L,S,E,G){
+  const k=Array.from({length:12},()=>new Float64Array(12)), a=E*S.A/L, t=G*S.J/L;
+  k[0][0]=k[6][6]=a; k[0][6]=k[6][0]=-a; k[3][3]=k[9][9]=t; k[3][9]=k[9][3]=-t;
+  // bending in x-y (about z: Iz, shear area Asy) and x-z (about y: Iy, shear area Asz)
+  [[1,5,S.Iz,S.Asy,1],[2,4,S.Iy,S.Asz,-1]].forEach(([v,th,I,As,s])=>{
+    const ph=As>0?12*E*I/(G*As*L*L):0, c=1+ph, c1=12*E*I/(c*L**3), c2=6*E*I/(c*L*L), c3=(4+ph)*E*I/(c*L), c4=(2-ph)*E*I/(c*L);
+    k[v][v]=k[v+6][v+6]=c1; k[v][v+6]=k[v+6][v]=-c1;
+    k[v][th]=k[th][v]=s*c2; k[v][th+6]=k[th+6][v]=s*c2; k[v+6][th]=k[th][v+6]=-s*c2; k[v+6][th+6]=k[th+6][v+6]=-s*c2;
+    k[th][th]=k[th+6][th+6]=c3; k[th][th+6]=k[th+6][th]=c4; });
+  return k;
+}
+// static condensation of released end DOFs (rel: 12 booleans) on k and an end-force vector f
+function anaCondense(k,f,rel){
+  const r=[],q=[]; for(let i=0;i<12;i++) (rel[i]?r:q).push(i);
+  if(!r.length) return {k,f};
+  const n=r.length, Krr=r.map(a=>r.map(b=>k[a][b])), inv=anaInv(Krr);
+  const kc=Array.from({length:12},()=>new Float64Array(12)), fc=new Float64Array(12);
+  q.forEach(a=>{ q.forEach(b=>{ let s=k[a][b]; for(let i=0;i<n;i++) for(let j=0;j<n;j++) s-=k[a][r[i]]*inv[i][j]*k[r[j]][b]; kc[a][b]=s; });
+    let s=f[a]; for(let i=0;i<n;i++) for(let j=0;j<n;j++) s-=k[a][r[i]]*inv[i][j]*f[r[j]]; fc[a]=s; });
+  return {k:kc,f:fc};
+}
+function anaInv(A){ const n=A.length, M=A.map((r,i)=>[...r,...Array.from({length:n},(_,j)=>i===j?1:0)]);
+  for(let c=0;c<n;c++){ let p=c; for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[p][c])) p=r; [M[c],M[p]]=[M[p],M[c]]; const d=M[c][c]; if(Math.abs(d)<1e-300) throw new Error('singular end release');
+    for(let j=0;j<2*n;j++) M[c][j]/=d; for(let r=0;r<n;r++) if(r!==c){ const m=M[r][c]; if(m) for(let j=0;j<2*n;j++) M[r][j]-=m*M[c][j]; } }
+  return M.map(r=>r.slice(n)); }
+// local 12-vector <-> global: g = T^T l, l = T g (T = blockdiag(R,R,R,R))
+const anaToLocal=(R,g)=>{ const l=new Float64Array(12); for(let b=0;b<4;b++) for(let i=0;i<3;i++) l[3*b+i]=R[i][0]*g[3*b]+R[i][1]*g[3*b+1]+R[i][2]*g[3*b+2]; return l; };
+const anaToGlobal=(R,l)=>{ const g=new Float64Array(12); for(let b=0;b<4;b++) for(let i=0;i<3;i++) g[3*b+i]=R[0][i]*l[3*b]+R[1][i]*l[3*b+1]+R[2][i]*l[3*b+2]; return g; };
+function anaRun(text){
+  const t0=performance.now(), M=anaParseMCT(text), warn=[];
+  const E=M.E, G=E/(2*(1+M.nu)), ids=[...M.nodes.keys()].sort((a,b)=>a-b), N=ids.length, idx=new Map(ids.map((n,i)=>[n,i]));
+  const planar=ids.every(n=>Math.abs(M.nodes.get(n)[1])<1e-9);
+  const secs=new Map(); M.secs.forEach((nm,id)=>{ const S=anaSect(nm); secs.set(id,S); if(!S.found) warn.push(`Section ${nm} is not in the AISC table; fallback properties used.`); else if(S.approx) warn.push(`Section ${nm}: Iy/J estimated.`); });
+  // element data
+  const EL=new Map();
+  M.elems.forEach((e,id)=>{ const {L,R}=anaAxes(M.nodes.get(e.n1),M.nodes.get(e.n2)), S=secs.get(e.sec), k=anaKloc(L,S,E,G);
+    const rl=M.rel.get(id), rel=rl?[...rl.i,...rl.j]:null, kc=rel?anaCondense(k,new Float64Array(12),rel).k:k;
+    // KG = T^T kc T, column by column
+    const KG=Array.from({length:12},()=>new Float64Array(12));
+    for(let c=0;c<12;c++){ const ec=new Float64Array(12); ec[c]=1; const lc=anaToLocal(R,ec), kl=new Float64Array(12); for(let r=0;r<12;r++){ let s=0; for(let m=0;m<12;m++) s+=kc[r][m]*lc[m]; kl[r]=s; } const g=anaToGlobal(R,kl); for(let r=0;r<12;r++) KG[r][c]=g[r]; }
+    EL.set(id,{e,L,R,S,k,kc,rel,KG}); });
+  // fixed DOFs: supports, plus out-of-plane DOFs (DY, RX, RZ) everywhere in a planar model
+  const fixed=new Uint8Array(6*N);
+  M.sup.forEach((c,n)=>{ const i=idx.get(n); c.forEach((v,j)=>{ if(v) fixed[6*i+j]=1; }); });
+  if(planar) for(let i=0;i<N;i++){ fixed[6*i+1]=1; fixed[6*i+3]=1; fixed[6*i+5]=1; }
+  // a DOF with no stiffness at all (e.g. the rotation of a node whose only element is released
+  // there) carries nothing and is restrained, as MIDAS does; any other singularity is a mechanism
+  const dg=new Float64Array(6*N), dofsOf=e=>{ const a=idx.get(e.n1), b=idx.get(e.n2); return [0,1,2,3,4,5].map(j=>6*a+j).concat([0,1,2,3,4,5].map(j=>6*b+j)); };
+  EL.forEach(D=>dofsOf(D.e).forEach((q,m)=>{ dg[q]+=Math.abs(D.KG[m][m]); }));
+  let autoFix=0; for(let q=0;q<6*N;q++) if(!fixed[q] && dg[q]===0){ fixed[q]=1; autoFix++; }
+  // reverse Cuthill-McKee node order for a narrow band
+  const adj=Array.from({length:N},()=>new Set()); M.elems.forEach(e=>{ const a=idx.get(e.n1), b=idx.get(e.n2); adj[a].add(b); adj[b].add(a); });
+  const order=[], seen=new Uint8Array(N);
+  const bfsFar=s=>{ const d=new Int32Array(N).fill(-1), q=[s]; d[s]=0; let last=s; for(let h=0;h<q.length;h++){ const u=q[h]; last=u; adj[u].forEach(v=>{ if(d[v]<0){ d[v]=d[u]+1; q.push(v); } }); } return last; };
+  for(let s0=0;s0<N;s0++){ if(seen[s0]) continue; let s=bfsFar(bfsFar(s0)); if(seen[s]) s=s0;
+    const q=[s]; seen[s]=1; for(let h=0;h<q.length;h++){ const u=q[h]; order.push(u); [...adj[u]].filter(v=>!seen[v]).sort((a,b)=>adj[a].size-adj[b].size).forEach(v=>{ seen[v]=1; q.push(v); }); } }
+  order.reverse();
+  const eq=new Int32Array(6*N).fill(-1); let n=0;
+  order.forEach(i=>{ for(let j=0;j<6;j++) if(!fixed[6*i+j]) eq[6*i+j]=n++; });
+  const dofs=e=>{ const a=idx.get(e.n1), b=idx.get(e.n2); return [0,1,2,3,4,5].map(j=>6*a+j).concat([0,1,2,3,4,5].map(j=>6*b+j)); };
+  let bw=0; M.elems.forEach(e=>{ const q=dofs(e).map(d=>eq[d]).filter(v=>v>=0); if(q.length) bw=Math.max(bw,Math.max(...q)-Math.min(...q)); });
+  // assemble the banded lower triangle: B[i*(bw+1) + (i-j)] = K[i][j], j <= i
+  const W1=bw+1, B=new Float64Array(n*W1);
+  EL.forEach(({e,KG})=>{ const d=dofs(e);
+    for(let a=0;a<12;a++){ const ia=eq[d[a]]; if(ia<0) continue; for(let b=0;b<12;b++){ const ib=eq[d[b]]; if(ib<0||ib>ia) continue; B[ia*W1+(ia-ib)]+=KG[a][b]; } } });
+  const diag0=new Float64Array(n); for(let i=0;i<n;i++) diag0[i]=B[i*W1];
+  // banded Cholesky, in place
+  const dofName=q=>{ for(let d=0;d<6*N;d++) if(eq[d]===q) return `node ${ids[Math.floor(d/6)]} ${['DX','DY','DZ','RX','RY','RZ'][d%6]}`; return `equation ${q}`; };
+  for(let i=0;i<n;i++){ const j0=Math.max(0,i-bw);
+    for(let j=j0;j<=i;j++){ let s=B[i*W1+(i-j)]; const k0=Math.max(j0,j-bw); for(let k=k0;k<j;k++) s-=B[i*W1+(i-k)]*B[j*W1+(j-k)];
+      if(i===j){ if(!(s>1e-10*Math.max(1e-30,Math.abs(diag0[i])))) throw new Error(`The structure is unstable (mechanism or missing support) at ${dofName(i)}.`); B[i*W1]=Math.sqrt(s); }
+      else B[i*W1+(i-j)]=s/B[j*W1]; } }
+  const solve=F=>{ const y=Float64Array.from(F);
+    for(let i=0;i<n;i++){ let s=y[i]; for(let k=Math.max(0,i-bw);k<i;k++) s-=B[i*W1+(i-k)]*y[k]; y[i]=s/B[i*W1]; }
+    for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<=Math.min(n-1,i+bw);k++) s-=B[k*W1+(k-i)]*y[k]; y[i]=s/B[i*W1]; }
+    return y; };
+  // load cases: equivalent nodal loads (fixed-end forces condensed for releases)
+  const CASE={};
+  M.cases.forEach(c=>{ const L=M.loads[c]||{sw:null,con:[],beam:[]}, F=new Float64Array(6*N), Fcon=new Float64Array(6*N), fef=new Map(), app=[0,0,0];
+    const addUniform=(id,qg)=>{ const D=EL.get(id), ql=[0,1,2].map(i=>D.R[i][0]*qg[0]+D.R[i][1]*qg[1]+D.R[i][2]*qg[2]), Le=D.L, f=new Float64Array(12);
+      f[0]=f[6]=ql[0]*Le/2; f[1]=f[7]=ql[1]*Le/2; f[5]=ql[1]*Le*Le/12; f[11]=-ql[1]*Le*Le/12; f[2]=f[8]=ql[2]*Le/2; f[4]=-ql[2]*Le*Le/12; f[10]=ql[2]*Le*Le/12;
+      const fc=D.rel?anaCondense(D.k,f,D.rel).f:f; const prev=fef.get(id); fef.set(id,prev?prev.map((v,i)=>v+fc[i]):fc);
+      const g=anaToGlobal(D.R,fc), a=idx.get(D.e.n1), b=idx.get(D.e.n2); for(let j=0;j<6;j++){ F[6*a+j]+=g[j]; F[6*b+j]+=g[6+j]; }
+      app[0]+=qg[0]*Le; app[1]+=qg[1]*Le; app[2]+=qg[2]*Le; };
+    if(L.sw) EL.forEach((D,id)=>addUniform(id,L.sw.map(v=>v*M.den*D.S.A)));
+    L.beam.forEach(b=>{ const D=EL.get(b.e); if(!D) return; if(Math.abs(b.w-b.w2)>1e-9) warn.push(`Non-uniform beam load on element ${b.e} ignored.`);
+      if(b.dir[0]==='G'){ const u=[0,0,0]; u['XYZ'.indexOf(b.dir[1])]=1; const ex=D.R[0], dot=ex[0]*u[0]+ex[1]*u[1]+ex[2]*u[2], sc=b.proj?Math.sqrt(Math.max(0,1-dot*dot)):1; addUniform(b.e,u.map(v=>v*b.w*sc)); }
+      else { const r=D.R['XYZ'.indexOf(b.dir[1])]; addUniform(b.e,r.map(v=>v*b.w)); } });
+    L.con.forEach(([nd,v])=>{ const i=idx.get(nd); if(i==null) return; for(let j=0;j<6;j++){ F[6*i+j]+=v[j]; Fcon[6*i+j]+=v[j]; } app[0]+=v[0]; app[1]+=v[1]; app[2]+=v[2]; });
+    const Ff=new Float64Array(n); for(let d=0;d<6*N;d++) if(eq[d]>=0) Ff[eq[d]]=F[d];
+    const uf=solve(Ff), u=new Float64Array(6*N); for(let d=0;d<6*N;d++) if(eq[d]>=0) u[d]=uf[eq[d]];
+    // element end forces (local) and reactions
+    const ends=new Map(), Rn=new Float64Array(6*N);
+    EL.forEach((D,id)=>{ const d=dofs(D.e), ul=anaToLocal(D.R,Float64Array.from(d.map(q=>u[q]))), fe=fef.get(id), f=new Float64Array(12);
+      for(let r=0;r<12;r++){ let s=0; for(let m=0;m<12;m++) s+=D.kc[r][m]*ul[m]; f[r]=s-(fe?fe[r]:0); }
+      ends.set(id,f); const g=anaToGlobal(D.R,f); d.forEach((q,m)=>{ Rn[q]+=g[m]; }); });
+    // reaction = sum of the element end forces at the node - nodal loads applied there directly
+    // (Rn already carries the distributed-load equivalents through the end forces)
+    const reac=new Map(); M.sup.forEach((cst,nd)=>{ const i=idx.get(nd), r=[0,1,2,3,4,5].map(j=>fixed[6*i+j]?Rn[6*i+j]-Fcon[6*i+j]:0); reac.set(nd,r); });
+    let umax=0, unode=null; for(let i=0;i<N;i++){ const m=Math.hypot(u[6*i],u[6*i+1],u[6*i+2]); if(m>umax){ umax=m; unode=ids[i]; } }
+    let sR=[0,0,0]; reac.forEach(r=>{ sR[0]+=r[0]; sR[1]+=r[1]; sR[2]+=r[2]; });
+    CASE[c]={u,ends,reac,umax,unode,applied:app,sumR:sR}; });
+  // beam-force rows (MIDAS layout) for cases, combinations and the envelope
+  const rows=[], elemIds=[...M.elems.keys()].sort((a,b)=>a-b);
+  const pushRows=(load,get)=>elemIds.forEach(id=>{ const e=M.elems.get(id), f=get(id);
+    rows.push({elem:id,load,end:'I',node:e.n1,axial:-f[0],shearY:-f[1],shearZ:-f[2],torsion:-f[3],momentY:-f[4],momentZ:-f[5]});
+    rows.push({elem:id,load,end:'J',node:e.n2,axial:f[6],shearY:f[7],shearZ:f[8],torsion:f[9],momentY:f[10],momentZ:f[11]}); });
+  M.cases.forEach(c=>pushRows(c,id=>CASE[c].ends.get(id)));
+  const combEnds={}, combCase={};
+  M.combos.filter(cb=>!cb.env).forEach(cb=>{ const m=new Map(); elemIds.forEach(id=>{ const f=new Float64Array(12); cb.terms.forEach(([k,lc,fac])=>{ const src=k==='ST'?CASE[lc]&&CASE[lc].ends.get(id):combEnds[lc]&&combEnds[lc].get(id); if(src) for(let r=0;r<12;r++) f[r]+=fac*src[r]; }); m.set(id,f); });
+    combEnds[cb.name]=m; pushRows(cb.name,id=>m.get(id)); });
+  const envs=M.combos.filter(cb=>cb.env);
+  envs.forEach(cb=>{ const mx=new Map(), mn=new Map(); elemIds.forEach(id=>{ const a=new Float64Array(12).fill(-Infinity), b=new Float64Array(12).fill(Infinity);
+      cb.terms.forEach(([k,lc])=>{ const src=k==='CBS'?combEnds[lc]&&combEnds[lc].get(id):CASE[lc]&&CASE[lc].ends.get(id); if(src) for(let r=0;r<12;r++){ // internal-force sign per end: I-end is -f
+          const v=r<6?-src[r]:src[r]; if(v>a[r]) a[r]=v; if(v<b[r]) b[r]=v; } });
+      mx.set(id,a.map((v,r)=>r<6?-v:v)); mn.set(id,b.map((v,r)=>r<6?-v:v)); });
+    pushRows(`${cb.name}(max)`,id=>mx.get(id)); pushRows(`${cb.name}(min)`,id=>mn.get(id)); });
+  const ms=performance.now()-t0;
+  return {rows, cases:CASE, combos:Object.keys(combEnds), planar, autoFix, n, bw, nodes:N, elems:M.elems.size, ms, warn:[...new Set(warn)], model:M};
+}
+
+// ============================================================================
 // PROJECTS — save/load (localStorage) + JSON export/import
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','resSrc','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
@@ -6282,8 +6568,11 @@ function applyProject(obj){
   const pasteEl=document.getElementById('resPaste');
   if(pasteEl){
     pasteEl.value=state.midasPaste||'';
-    if(state.midasPaste&&state.midasPaste.trim()){ doParseResults(); }
-    else { RESULT_ROWS=[]; refreshReactionPanel(); }
+    const want=obj.resSrc||'midas';
+    MIDAS_ROWS=(state.midasPaste&&state.midasPaste.trim())?parseBeamResults(state.midasPaste):[]; _midasSig=MIDAS_ROWS.length?modelSignature():'';
+    APP_RES=null; RES_SRC='midas';
+    if(want==='app') runAnalysis(true); else { RES_SRC='midas'; state.resSrc='midas'; }
+    showResults();
   }
 }
 document.getElementById('projSaveBtn').onclick=()=>{
