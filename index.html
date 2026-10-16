@@ -586,10 +586,12 @@
         </span>
       </div>
       <div class="panel-body">
-        <div class="hint" style="margin-bottom:6px">Coloured members: each member is coloured by the largest magnitude of the chosen result at either end of each element. Diagrams: the result is drawn along every member as in MIDAS (strong-axis results offset in the member's local z direction, weak-axis results in local y, same sign convention as the frame diagrams below); the envelope shows the max and min curves. Envelope = the governing value across all strength combinations. Hover a member or a diagram for the frame, element, end, value and governing combination. Click a row in the frame table to show that frame in the diagrams below.</div>
+        <div class="hint" style="margin-bottom:6px">Coloured members: each member is coloured by the largest magnitude of the chosen result at either end of each element. Diagrams: the result is drawn along every member as in MIDAS (strong-axis results offset in the member's local z direction, weak-axis results in local y, same sign convention as the frame diagrams below); the envelope shows the max and min curves. Envelope = the governing value across all strength combinations. Hover a member or a diagram for the frame, element, end, value and governing combination. Reactions: support forces FX, FY, FZ (blue, single head, pointing the way the support pushes on the structure) and moments MX, MY, MZ (green, double head, right-hand rule) in global axes at every column base; for the envelope each component is its own governing value. Click a row in the frame table to show that frame in the diagrams below.</div>
         <div class="toolbar" style="margin:0 0 6px;gap:10px;flex-wrap:wrap;align-items:center">
           <span class="ctl-label">Display</span>
           <span class="seg" id="segWsMode" style="margin:0;width:230px"><button data-v="colour" class="on">Coloured members</button><button data-v="diagram">Diagrams</button></span>
+          <label class="t3d"><input type="checkbox" id="wsReact"> <span class="ctl-label">Reactions</span></label>
+          <label class="t3d" id="wsReactMWrap" style="display:none"><input type="checkbox" id="wsReactM" checked> <span class="ctl-label">incl. moments</span></label>
           <span id="wsDiagCtl" style="display:none;align-items:center;gap:8px">
             <span class="ctl-label">Scale</span><input type="range" id="wsScale" min="0.2" max="3" step="0.1" value="1" style="width:110px">
             <label class="t3d"><input type="checkbox" id="wsVals" checked> <span class="ctl-label">Peak values</span></label>
@@ -4810,13 +4812,8 @@ function draw3DFull(){
   // ---- reactions (governing envelope, every frame) ----
   let reactNote='';
   if(tog('threedReact',false) && RESULT_ROWS.length>0 && typeof midasGoverningAll==='function'){
-    const rLen=modelScale*0.14;
-    midasGoverningAll().forEach(r=>{
-      const cx=g.colX[r.ci], y=ys[r.fj], zb=g.colBaseF[r.fj][r.ci];
-      if(Math.abs(r.N.v)>1){ const up=r.N.v>0?1:-1; arrow3D(cx,y,zb-up*rLen,0,0,up,rLen,COL.steel,`F${r.fj+1}-C${r.ci+1} N ${uForce(r.N.v)} ${uForceLbl()}`).forEach(t=>traces.push(t)); }
-      if(showLabels) label3D(cx+0.8,y,zb-rLen*0.6,`N ${uForce(r.N.v)}`,COL.steel,9);
-    });
-    reactNote=` Governing ${resSrcName()} axial base reactions shown for every frame (hover for values).`;
+    traces.push(...wsReactionTraces(buildMCT(state).mesh,'__env__',3*modelScale,{moments:true,labels:false}));
+    reactNote=` Governing ${resSrcName()} base reactions (envelope) shown at every support: forces FX, FY, FZ in blue, moments MX, MY, MZ in green (hover for values and the governing combination).`;
   }
   const xMin=-5, xMax=g.L+4, yMin=-4, yMax=L3+4;
   const zMin=Math.min(s.El_base,...g.colBaseF.flat())-2.0, zMax=Math.max(g.yStart,g.yEnd)+bd/2+5.5;
@@ -5897,6 +5894,7 @@ function renderWhole(){
   const defOK=!!wsDisp(wsLoad);
   document.getElementById('wsDefWrap').style.display=(RES_SRC==='app'&&wsMode==='colour')?'':'none';
   document.getElementById('wsDiagCtl').style.display=wsMode==='diagram'?'inline-flex':'none';
+  document.getElementById('wsReactMWrap').style.display=document.getElementById('wsReact').checked?'':'none';
   document.getElementById('segWsMode').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===wsMode));
   const defCb=document.getElementById('wsDef'); defCb.disabled=!defOK;
   document.getElementById('wsDefWrap').title=defOK?'':'Pick a load case or combination (the envelope has no single deflected shape)';
@@ -5966,6 +5964,7 @@ function drawWhole(mesh){
   traces.push({type:'scatter3d',mode:'markers',x:mx,y:my,z:mz,text:mt,hoverinfo:'text',showlegend:false,
     marker:{size:2.5,color:mc,colorscale:cs,cmin:0,cmax,opacity:0.9}});
   }
+  if(document.getElementById('wsReact').checked) traces.push(...wsReactionTraces(mesh,wsLoad,mr,{moments:document.getElementById('wsReactM').checked,labels:true}));
   // supports and frame labels
   const bases=[]; mesh.frames.forEach(F=>F.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
   traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),marker:{size:4,color:COL.ink,symbol:'square'},hoverinfo:'skip',showlegend:false});
@@ -6026,6 +6025,57 @@ function wsDiagramTraces(mesh,q,mr,memName){
   if(document.getElementById('wsVals').checked && labels.t.length)
     traces.push({type:'scatter3d',mode:'text',x:labels.x,y:labels.y,z:labels.z,text:labels.t,textposition:'top center',
       textfont:{size:10,color:COL.ink},hoverinfo:'skip',showlegend:false});
+  return traces;
+}
+// Support reactions in global axes at every column base, from the base element's end forces:
+// the support force on the structure equals the element's end force at the base (local),
+// i.e. -(I-end row) or +(J-end row). Each local component takes its largest-magnitude value
+// over the load set (envelope: independent governing value per component). Columns are
+// vertical, so each local component maps onto one global component.
+const WS_RCOMP=['FX','FY','FZ','MX','MY','MZ'];
+function wsReactions(mesh,ld){
+  const set=wsLoadSet(ld), out=[], byEl=new Map();
+  const bases=[]; mesh.frames.forEach(F=>F.keyNodes.cols.forEach(c=>{
+    const e=mesh.elements.find(e=>e.frame===F.j&&e.member==='col'+c.i&&(e.n1===c.base||e.n2===c.base)); if(e){ bases.push({F,c,e}); byEl.set(e.id,[]); } }));
+  RESULT_ROWS.forEach(r=>{ const a=byEl.get(r.elem); if(a&&set.has(r.load)) a.push(r); });
+  const loc=[['axial','shearY','shearZ'],['torsion','momentY','momentZ']];
+  bases.forEach(({F,c,e})=>{
+    const end=e.n1===c.base?'I':'J', sg=end==='I'?-1:1, rows=byEl.get(e.id).filter(r=>r.end===end);
+    if(!rows.length) return;
+    const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1], ax=anaAxes([a.x,a.y,a.z],[b.x,b.y,b.z]).R, n=mesh.nodes[c.base-1];
+    const comp=(set3)=>[0,1,2].map(g=>{
+      let k=0; for(let m=1;m<3;m++) if(Math.abs(ax[m][g])>Math.abs(ax[k][g])) k=m;
+      const key=set3[k]; let best=null;
+      rows.forEach(r=>{ const v=sg*(r[key]||0); if(!best||Math.abs(v)>Math.abs(best.v)) best={v,r}; });
+      let load=best.r.load;
+      if(/envelope/i.test(load)){ const m=RESULT_ROWS.find(r=>r.elem===e.id&&r.end===end&&!/envelope/i.test(r.load)&&Math.abs((r[key]||0)-best.r[key])<=1e-6*Math.max(1,Math.abs(best.r[key]))); if(m) load=m.load; }
+      return {g, v:best.v*ax[k][g], load};
+    });
+    out.push({label:`F${F.j+1}-C${c.i+1}`, side:c.i===0?-1:(c.i===F.keyNodes.cols.length-1?1:0), node:c.base, p:[n.x,n.y,n.z], F:comp(loc[0]), M:comp(loc[1])});
+  });
+  return out;
+}
+function wsReactionTraces(mesh,ld,mr,opt){
+  const R=wsReactions(mesh,ld), traces=[], fu=uForceLbl(), mu=uMomLbl();
+  let fmax=0, mmax=0; R.forEach(s=>{ s.F.forEach(c=>{ fmax=Math.max(fmax,Math.abs(c.v)); }); s.M.forEach(c=>{ mmax=Math.max(mmax,Math.abs(c.v)); }); });
+  const lab={x:[],y:[],z:[],t:[],pos:[]};
+  R.forEach(s=>{
+    const P=s.p, tf=[], tm=[];
+    s.F.forEach(c=>{ if(Math.abs(c.v)<Math.max(0.5,1e-3*fmax)) return;
+      const d=[0,0,0]; d[c.g]=Math.sign(c.v); const L=mr*(0.05+0.08*Math.abs(c.v)/fmax), t=P.map((x,i)=>x-d[i]*L);
+      traces.push(...arrow3D(t[0],t[1],t[2],d[0],d[1],d[2],L,COL.steel,`${s.label} · node ${s.node}<br><b>${WS_RCOMP[c.g]} = ${uForce(c.v)} ${fu}</b><br>${c.load}`));
+      tf.push(`${WS_RCOMP[c.g]} ${uForce(c.v)}`); });
+    if(opt.moments) s.M.forEach(c=>{ if(Math.abs(c.v)<Math.max(0.5,1e-3*mmax)) return;
+      const d=[0,0,0]; d[c.g]=Math.sign(c.v); const L=mr*(0.05+0.08*Math.abs(c.v)/mmax), tip=P.map((x,i)=>x+d[i]*L);
+      traces.push(...arrow3D(P[0],P[1],P[2],d[0],d[1],d[2],L,COL.moss,`${s.label} · node ${s.node}<br><b>${WS_RCOMP[3+c.g]} = ${uMom(c.v)} ${mu}</b><br>${c.load}`));
+      const h2=tip.map((x,i)=>x-d[i]*L*0.2);
+      traces.push({type:'cone',x:[h2[0]],y:[h2[1]],z:[h2[2]],u:[d[0]*L],v:[d[1]*L],w:[d[2]*L],sizemode:'absolute',sizeref:L*0.28,anchor:'tip',showscale:false,colorscale:[[0,COL.moss],[1,COL.moss]],hoverinfo:'skip'});
+      tm.push(`${WS_RCOMP[3+c.g]} ${uMom(c.v)}`); });
+    // one value block per support, under the base clear of the arrows
+    lab.x.push(P[0]+s.side*mr*0.03); lab.y.push(P[1]); lab.z.push(P[2]-mr*0.12); lab.pos.push(s.side<0?'bottom left':s.side>0?'bottom right':'bottom center'); lab.t.push([`<b>${s.label}</b>`,tf.join(' · '),tm.join(' · ')].filter(Boolean).join('<br>'));
+  });
+  if(opt.labels && lab.t.length) traces.push({type:'scatter3d',mode:'text',x:lab.x,y:lab.y,z:lab.z,text:lab.t,textposition:lab.pos,
+    textfont:{size:9,color:COL.steel},hoverinfo:'skip',showlegend:false});
   return traces;
 }
 function setResFrame(j){
@@ -6198,6 +6248,8 @@ document.getElementById('wsDef').addEventListener('change',()=>renderWhole());
 document.getElementById('segWsMode').addEventListener('click',e=>{ const b=e.target.closest('button[data-v]'); if(!b) return; wsMode=b.dataset.v; renderWhole(); });
 document.getElementById('wsScale').addEventListener('input',()=>drawWhole(buildMCT(state).mesh));
 document.getElementById('wsVals').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
+document.getElementById('wsReact').addEventListener('change',()=>renderWhole());
+document.getElementById('wsReactM').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
 document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
