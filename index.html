@@ -662,7 +662,8 @@
         <!-- MIDAS — shown only when results pasted -->
         <div id="midasBlock" style="display:none">
           <div class="subhead-lbl" style="display:flex;align-items:center;gap:8px"><span id="reactSrcHead">MIDAS results — design values</span>
-            <span style="display:flex;gap:6px;align-items:center;margin-left:auto"><span class="ctl-label">Show</span><select id="reactCaseSelect"></select></span>
+            <span id="reactFrameWrap" style="display:none;gap:6px;align-items:center;margin-left:auto"><span class="ctl-label">Frame</span><select id="reactFrameSel"></select></span>
+            <span id="reactCaseWrap" style="display:flex;gap:6px;align-items:center;margin-left:auto"><span class="ctl-label">Show</span><select id="reactCaseSelect"></select></span>
           </div>
           <div id="noEnvNote" style="display:none;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:8px 12px;margin-bottom:8px;font-size:11.5px;color:var(--rust)">No <b>Envelope</b> combination was found in the pasted results. Governing values below fall back to the maximum across all pasted cases, which may include individual unfactored load cases. Paste the envelope combination results for correct governing design reactions.</div>
           <div id="plotReact" class="plot" style="height:330px"></div>
@@ -2870,6 +2871,15 @@ function midasGoverning(fj){
     });
   });
   gov.forEach((g,i)=>{ if(!g.label) g.label=full.is3D?'':`Col ${i+1}`; });
+  // name the combination behind each envelope value: the case / combination whose reaction matches it
+  if(!noEnvelope){
+    const others=[...new Set(RESULT_ROWS.map(r=>r.load).filter(l=>l&&!/envelope/i.test(l)))], cache={};
+    const cfOf=ld=>cache[ld]||(cache[ld]=midasColumnForces(ld, fj));
+    gov.forEach((g,ci)=>['N','V','M','VL','ML'].forEach(k=>{
+      if(!/envelope/i.test(g[k].load)) return;
+      const hit=others.find(ld=>{ const c=cfOf(ld)[ci]; return c&&c.reaction&&c.reaction[k]!=null&&Math.abs(c.reaction[k]-g[k].v)<=1e-6*Math.max(1,Math.abs(g[k].v)); });
+      if(hit) g[k].load=hit; }));
+  }
   gov.noEnvelope=noEnvelope;
   return gov;
 }
@@ -4012,7 +4022,9 @@ async function buildReport(){
     }).join('');
     // snapshot the FBD (governing) for the report
     reactShowCase='__gov__';
+    const _rAll=reactAllFrames; reactAllFrames=false;
     try{ drawFBDInto('plotReact', midasData()); }catch(e){}
+    reactAllFrames=_rAll;
     imgReactFBD=await snap('plotReact');
     midasReactBlock=`
     ${staleNote}
@@ -5770,15 +5782,16 @@ function buildResultsTable(){
 
 // ---- column base reactions: MIDAS (from pasted beam-force results) ----
 let reactShowCase='__gov__';      // MIDAS panel selected case
+let reactAllFrames=false;          // 3D: reaction panel lists every frame (table only)
 
 // the results-tab reaction panel shows one frame at a time in 3D (resFrame)
 function midasData(){
-  const full=buildMCT(state).mesh, fj=full.is3D?Math.min(resFrame,full.frames.length-1):undefined;
+  const full=buildMCT(state).mesh, all=full.is3D&&reactAllFrames, fj=(full.is3D&&!all)?Math.min(resFrame,full.frames.length-1):undefined;
   if(reactShowCase==='__gov__'){
     const gov=midasGoverning(fj);
     const mesh=resultsMesh();
     return gov.map((g,ci)=>{
-      const c=mesh.keyNodes.cols[ci];
+      const c=all?full.frames[g.fj].keyNodes.cols[g.ci]:mesh.keyNodes.cols[ci];
       const lng=full.is3D;
       return {ci,label:g.label,x:c.x,reaction:Object.assign({N:g.N.v,V:g.V.v,M:g.M.v},lng?{VL:g.VL.v,ML:g.ML.v}:{}),
         member:Object.assign({N:-g.N.v,V:-g.V.v,M:-g.M.v},lng?{VL:-g.VL.v,ML:-g.ML.v}:{}),
@@ -6180,9 +6193,22 @@ function refreshReactionPanel(){
     sel.value=reactShowCase;
     const note=document.getElementById('noEnvNote');
     if(note) note.style.display=(envelopeLoads().length===0)?'block':'none';
-    buildReactTableInto('reactTable', midasData(), reactShowCase==='__gov__');
-    drawFBDInto('plotReact', midasData());
+    const fw=document.getElementById('reactFrameWrap'), fs=document.getElementById('reactFrameSel'), on3=is3D(state);
+    fw.style.display=on3?'inline-flex':'none';
+    document.getElementById('reactCaseWrap').style.marginLeft=on3?'0':'auto';
+    if(on3){ const ys=frameYs(state);
+      fs.innerHTML=ys.map((y,j)=>`<option value="${j}">Frame ${j+1} (y = ${f(y,1)} ft)</option>`).join('')+`<option value="all">All frames (table)</option>`;
+      fs.value=reactAllFrames?'all':String(Math.min(resFrame,ys.length-1)); }
+    else reactAllFrames=false;
+    renderReactPanelData();
   }
+}
+// reaction table + free-body for the selected case and frame ("All frames": table only)
+function renderReactPanelData(){
+  const data=midasData(), all=is3D(state)&&reactAllFrames;
+  buildReactTableInto('reactTable', data, reactShowCase==='__gov__');
+  const pr=document.getElementById('plotReact'); pr.style.display=all?'none':'';
+  if(!all) drawFBDInto('plotReact', data);
 }
 
 // ============================================================================
@@ -6305,7 +6331,8 @@ document.getElementById('wsVals').addEventListener('change',()=>drawWhole(buildM
 document.getElementById('wsTxt').addEventListener('input',e=>{ document.getElementById('wsTxtV').textContent=e.target.value; drawWhole(buildMCT(state).mesh); });
 document.getElementById('wsReact').addEventListener('change',()=>renderWhole());
 document.getElementById('wsReactM').addEventListener('change',()=>drawWhole(buildMCT(state).mesh));
-document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value;buildReactTableInto('reactTable',midasData(),reactShowCase==='__gov__');drawFBDInto('plotReact',midasData());});
+document.getElementById('reactCaseSelect').addEventListener('change',e=>{reactShowCase=e.target.value; renderReactPanelData();});
+document.getElementById('reactFrameSel').addEventListener('change',e=>{ if(e.target.value==='all'){ reactAllFrames=true; renderReactPanelData(); } else { reactAllFrames=false; setResFrame(+e.target.value); } });
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
 document.getElementById('xlsxBtn').onclick=function(){ exportCalcXlsx(this); };
