@@ -6616,10 +6616,10 @@ function validateInputs(){
     if(purlinXs(s).length && !sectProps(s.purlinSect).found) msgs.push(`Purlin section "${s.purlinSect}" not in the AISC database.`);
     const nBadP=(s.purlins||[]).length-purlinXs(s).length;
     if(nBadP>0) msgs.push(`${nBadP} purlin position${nBadP>1?'s are':' is'} outside the roof (0 to ${f(totalLength(s),2)} ft) or duplicated and ignored.`);
-    // ASCE 7-16 Figs. 27.3-4 to 27.3-7 are stated for 0.25 <= h/L <= 1.0, L measured along the wind
-    const h=roofMeanHeight(s), L3=length3D(s);
-    if(L3>0 && (h/L3<0.25 || h/L3>1.0)) msgs.push(`For wind along the length, h/L = ${f(h,1)}/${f(L3,1)} = ${(h/L3).toFixed(2)} is outside 0.25–1.0, the range stated for ASCE 7-16 Fig. 27.3-7. Confirm the free-roof C_N values apply to this canopy.`);
   }
+  // ASCE 7-16 Fig. 27.3-4 is stated for 0.25 <= h/L <= 1.0, with L the horizontal roof width across the frame
+  { const h=roofMeanHeight(s), Lw=totalLength(s);
+    if(Lw>0 && (h/Lw<0.25 || h/Lw>1.0)) msgs.push(`h/L = ${f(h,1)}/${f(Lw,1)} = ${(h/Lw).toFixed(2)} (L = horizontal roof width across the frame) is outside 0.25–1.0, the range stated for ASCE 7-16 Fig. 27.3-4. Confirm the free-roof C_N values apply to this canopy.`); }
   const el=document.getElementById('globalWarn');
   if(el){
     if(msgs.length){ el.style.display='block'; el.innerHTML='<b>⚠ Check inputs:</b> '+msgs.join(' '); }
