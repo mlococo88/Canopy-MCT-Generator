@@ -288,6 +288,14 @@
             <div class="field"><label>Purlin shape</label><select id="purlinSect" class="inp" style="grid-column:2/4;width:100%"></select></div>
             <div class="field-desc" id="purlinSectDesc"></div>
             <div class="field-desc" id="purlinLoadNote">Purlins run the full length on top of the frame beams, alongside the two eave beams. With at least one purlin, the roof dead, snow and wind loads go onto the purlins and eave beams by their tributary width across the roof. MIDAS then carries them into the frames, including the overhangs as cantilevers. With no purlins, roof loads go straight to the frames by tributary width. Fill evenly places that many purlins at equal spacing between the eaves.</div>
+            <div class="subhead-lbl">Member end releases</div>
+            <div class="field-desc" style="margin-bottom:2px">Rafter ends at the eave beams</div>
+            <div class="seg" id="segRelRafter"><button data-v="continuous" class="on">Continuous</button><button data-v="pinned">Pinned</button></div>
+            <div class="field-desc" style="margin-bottom:2px">Eave beams at the frames</div>
+            <div class="seg" id="segRelEave"><button data-v="continuous" class="on">Continuous</button><button data-v="simple">Simple spans</button></div>
+            <div class="field-desc" style="margin-bottom:2px">Purlins at the frames</div>
+            <div class="seg" id="segRelPurlin"><button data-v="continuous" class="on">Continuous</button><button data-v="simple">Simple spans</button></div>
+            <div class="field-desc">A released end frees major and minor axis bending (My, Mz); torsion and shear stay connected. Pinned rafter: each frame beam is hinged to the low and high eave beams at its tips. Simple spans: the eave beams or purlins are hinged at every frame, except over an end frame with a front / back overhang, where the cantilever stays continuous with the first span. Where a pinned rafter meets a simple-span eave beam, the eave beam keeps its weak-axis (Mz) continuity on one side so the joint is not left free to spin; it carries no moment because nothing else at the joint resists that rotation. A pinned rafter tip also gets an RY support: the rafter's released rotation is the eave beam rolling about its own axis, so this torsional brace keeps the eave from spinning. It carries no moment for loads at the beam centroid.</div>
           </div>
           <div class="field"><label>Number of columns</label><input type="number" min="1" max="10" step="1" id="nColInput" value="2"><span class="unit"></span></div>
           <div class="field-desc">Number of column lines supporting the roof beam. 1 = cantilever; 2 = simple bay; 3+ = multi-bay continuous canopy (statically indeterminate, solved by the in-app stiffness analysis).</div>
@@ -924,6 +932,9 @@ const state = Object.assign({}, DEFAULTS, {
   purlinSect: 'W8X10',           // 3D: purlin section
   B_trib2D: null,                // B_trib entered in 2D, restored when switching back from 3D
   beamConnect: 'continuous',     // column-to-beam connection: 'continuous' = fixed/moment, 'pinned' = hinged (releases column top)
+  relRafter: 'continuous',       // 3D: rafter ends at the eave beams: 'continuous' or 'pinned' (My, Mz released at the rafter tips)
+  relEave: 'continuous',         // 3D: eave beams at the frames: 'continuous' or 'simple' (My, Mz released, cantilevers kept)
+  relPurlin: 'continuous',       // 3D: purlins at the frames: 'continuous' or 'simple'
   baseFixity: 'fixed', flow: 'clear', screen: 'partial',
   snowMode: 'manual', windMode: 'manual',   // 'manual' or 'calc'
   riskCat: 'II', exposure: 'C',
@@ -1798,6 +1809,9 @@ document.getElementById('colBaseTable').addEventListener('input',e=>{
   else if(!isNaN(v)){ state.colBases[i]=v; recomputeDebounced(); }
 });
 bindSeg(document.getElementById('segConnect'),'beamConnect');
+bindSeg(document.getElementById('segRelRafter'),'relRafter');
+bindSeg(document.getElementById('segRelEave'),'relEave');
+bindSeg(document.getElementById('segRelPurlin'),'relPurlin');
 bindSeg(segFix,'baseFixity',updateCfgTag);
 bindSeg(document.getElementById('segDim'),'modelDim',v=>{
   // keep the 2D tributary width so switching back restores what was entered
@@ -2499,6 +2513,104 @@ function buildMesh3D(s){
   });
   return {nodes,elements,frames,longLines,geom:g,beamStations,colX,ys,L3,is3D:true};
 }
+// Member end releases of the 3D model: element id -> {i, j} MCT flags (Fx Fy Fz Mx My Mz).
+//  - pinned column-to-beam connection: column top (j-end) My, Mz. A single column line
+//    pinned to the beams would let the roof rotate about the line of column tops (a
+//    mechanism), so that release is only written with 2+ columns per frame.
+//  - pinned rafter: the frame beam elements at the low / high tips (the eave beam joints).
+//  - simple-span eave beams / purlins: the long-line element ends at each frame line,
+//    except an end frame with an overhang (the cantilever stays continuous with its backspan).
+//  A joint where a pinned rafter meets a simple-span eave beam would have no stiffness about
+//  the rafter's local z; the eave element on one side keeps Mz there (released My only).
+//  out.roll: the pinned rafter tips, except tips at a fixed column top. The rafter's major-axis release
+//  is the same rotation as the eave beam rolling about its own axis (Y), so nothing would
+//  hold the eave line against rolling; those joints get an RY restraint (a torsional brace
+//  at each frame). It carries only eave torsion, which is zero for loads at the centroid.
+// Hinge markers for the graphics: one point per released element end, set a short
+// distance into the released member (so it is clear which member is hinged).
+// Returns [{x,y,z, ux,uy,uz (unit, into the member), kind:'rafter'|'column'|'eave'|'purlin', frame, node, label}].
+function releaseMarks(s,mesh,off){
+  mesh=mesh||buildMCT(s).mesh; off=off||0.6;
+  let rls;
+  if(mesh.is3D) rls=memberReleases3D(s,mesh);
+  else { rls=new Map(); if(s.beamConnect==='pinned' && nCols(s)>1) mesh.keyNodes.cols.forEach(c=>{
+    const e=mesh.elements.find(e=>/^col\d/.test(e.member) && e.n2===c.top); if(e) rls.set(e.id,{i:'000000',j:'000011'}); }); }
+  const out=[], ys=mesh.is3D?mesh.ys:[0];
+  rls.forEach((r,id)=>{
+    const e=mesh.elements.find(e=>e.id===id); if(!e) return;
+    const a=mesh.nodes[e.n1-1], b=mesh.nodes[e.n2-1], Le=Math.hypot(b.x-a.x,b.y-a.y,b.z-a.z)||1;
+    const u=[(b.x-a.x)/Le,(b.y-a.y)/Le,(b.z-a.z)/Le], d=Math.min(off,0.45*Le);
+    const ln=/^long/.test(e.member)?mesh.longLines[+e.member.slice(4)]:null;
+    const kind=e.member==='beam'?'rafter':/^col/.test(e.member)?'column':(ln&&ln.kind==='purlin')?'purlin':'eave';
+    [['i',a,1],['j',b,-1]].forEach(([end,n,sg])=>{
+      if(r[end].slice(4)==='00') return;
+      const fj=e.frame!=null?e.frame:ys.findIndex(y=>Math.abs(y-n.y)<1e-6);
+      const partial=r[end].slice(4)==='10';
+      const what=kind==='rafter'?`rafter pinned to the ${n.x<mesh.geom.L/2?'low':'high'} eave`:kind==='column'?`column ${+e.member.slice(3)+1} pinned to the beam`:
+        `${kind==='purlin'?'purlin at x = '+f(ln.x,2)+' ft':ln.kind+' beam'} hinged${partial?' (My only)':''}`;
+      out.push({x:n.x+sg*u[0]*d,y:n.y+sg*u[1]*d,z:n.z+sg*u[2]*d,ux:sg*u[0],uy:sg*u[1],uz:sg*u[2],kind,frame:fj,node:n.id,
+        label:`${mesh.is3D?'Frame '+(fj+1)+': ':''}${what}`});
+    });
+  });
+  return out;
+}
+// Plotly hinge-marker trace (open circles); P maps a mark to [x,y] (2D) or [x,y,z] (3D).
+function releaseTrace(marks,three,P,size){
+  if(!marks.length) return null;
+  const pts=marks.map(P||(m=>three?[m.x,m.y,m.z]:[m.x,m.z]));
+  const t={mode:'markers',x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),text:marks.map(m=>m.label),name:'member releases',
+    hovertemplate:'%{text}<extra>release</extra>',marker:{size:size||(three?5:9),symbol:'circle-open',color:COL.rust,line:{width:2,color:COL.rust}}};
+  if(three){ t.type='scatter3d'; t.z=pts.map(p=>p[2]); }
+  return t;
+}
+// plain-language list of the 3D member releases (report, DXF notes)
+function releaseSummary3D(s){
+  const out=[], oh=((+s.OH_front||0)>1e-6||(+s.OH_back||0)>1e-6)?' (continuous over an end frame with an overhang)':'';
+  if(s.relRafter==='pinned') out.push('rafters pinned to the eave beams at their tips');
+  if(s.relEave==='simple') out.push('eave beams simple span between frames'+oh);
+  if(s.relPurlin==='simple' && purlinXs(s).length) out.push('purlins simple span between frames'+oh);
+  return out;
+}
+function memberReleases3D(s,mesh){
+  const out=new Map(), FULL='000011', MY='000010';
+  out.roll=[];
+  const set=(e,end,flag)=>{ const r=out.get(e.id)||{i:'000000',j:'000000'};
+    const cur=r[end]; r[end]=[...cur].map((c,k)=>(c==='1'||flag[k]==='1')?'1':'0').join(''); out.set(e.id,r); };
+  const yOf=n=>mesh.nodes[n-1].y;
+  if(s.beamConnect==='pinned' && nCols(s)>1)
+    mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>{
+      const e=mesh.elements.find(e=>e.frame===fr.j && /^col\d/.test(e.member) && e.n2===c.top);
+      if(e) set(e,'j',FULL);
+    }));
+  const tipNodes=new Set();
+  if(s.relRafter==='pinned')
+    mesh.frames.forEach(fr=>{
+      const tips=[fr.keyNodes.Ltip, fr.keyNodes.Rtip];
+      mesh.elements.filter(e=>e.frame===fr.j && e.member==='beam').forEach(e=>{
+        if(tips.includes(e.n1)){ set(e,'i',FULL); tipNodes.add(e.n1); }
+        if(tips.includes(e.n2)){ set(e,'j',FULL); tipNodes.add(e.n2); }
+      });
+    });
+  const colTops=new Set(); mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>colTops.add(c.top)));
+  const colPinned=s.beamConnect==='pinned' && nCols(s)>1;   // a pinned column top does not hold RY either
+  out.roll=[...tipNodes].filter(n=>colPinned || !colTops.has(n)).sort((a,b)=>a-b);
+  const ys=mesh.ys, relY=ys.filter((y,k)=>!((k===0 && (+s.OH_front||0)>1e-6) || (k===ys.length-1 && (+s.OH_back||0)>1e-6)));
+  const atRel=n=>relY.some(y=>Math.abs(yOf(n)-y)<1e-6);
+  mesh.longLines.forEach(ln=>{
+    const eave=ln.kind!=='purlin';
+    if((eave?s.relEave:s.relPurlin)!=='simple') return;
+    const els=mesh.elements.filter(e=>e.member==='long'+ln.li);
+    const kept=new Set();   // tip joints where this line already keeps Mz on one side
+    els.forEach(e=>{
+      [['i',e.n1],['j',e.n2]].forEach(([end,n])=>{
+        if(!atRel(n)) return;
+        if(tipNodes.has(n) && !kept.has(n)){ kept.add(n); set(e,end,MY); }
+        else set(e,end,FULL);
+      });
+    });
+  });
+  return out;
+}
 // A single frame of the 3D mesh, shaped like the 2D mesh (members 'beam' / 'colN',
 // keyNodes, geom) so the 2D plots, results diagrams and reaction readers work on it.
 function frameView(mesh3,j){
@@ -2588,26 +2700,23 @@ function buildMCT3D(s){
   lines.push('; NODE_LIST, CONST(Dx,Dy,Dz,Rx,Ry,Rz), GROUP');
   const baseNodes=[]; mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>baseNodes.push(c.base)));
   for(let i=0;i<baseNodes.length;i+=12) lines.push(`   ${baseNodes.slice(i,i+12).join(' ')}, 111111, `);
+  const rls=memberReleases3D(s,mesh);
+  if(rls.roll.length){
+    lines.push('; pinned rafter tips: RY restraint so the eave beams cannot roll about their own axis');
+    for(let i=0;i<rls.roll.length;i+=12) lines.push(`   ${rls.roll.slice(i,i+12).join(' ')}, 000010, `);
+  }
   lines.push('');
 
-  // A single column line pinned to the beams would let the roof rotate about the line of
-  // column tops (a mechanism), so the release is only written with 2+ columns per frame.
-  if(s.beamConnect==='pinned' && nCols(s)>1){
-    const relRows=[];
-    mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>{
-      const topEl=mesh.elements.find(e=>e.frame===fr.j && /^col\d/.test(e.member) && e.n2===c.top);
-      if(topEl) relRows.push(topEl.id);
-    }));
-    if(relRows.length){
-      lines.push('*FRAME-RLS    ; Beam End Release');
-      lines.push('; ELEM_LIST, bVALUE, FLAG-i, Fxi, Fyi, Fzi, Mxi, Myi, Mzi        ; 1st line');
-      lines.push(';                    FLAG-j, Fxj, Fyj, Fzj, Mxj, Myj, Mzj, GROUP ; 2nd line');
-      relRows.forEach(id=>{
-        lines.push(`    ${id},  NO, 000000, 0, 0, 0, 0, 0, 0`);
-        lines.push(`             000011, 0, 0, 0, 0, 0, 0, `);
-      });
-      lines.push('');
-    }
+  if(rls.size){
+    lines.push('*FRAME-RLS    ; Beam End Release');
+    lines.push('; ELEM_LIST, bVALUE, FLAG-i, Fxi, Fyi, Fzi, Mxi, Myi, Mzi        ; 1st line');
+    lines.push(';                    FLAG-j, Fxj, Fyj, Fzj, Mxj, Myj, Mzj, GROUP ; 2nd line');
+    [...rls.keys()].sort((a,b)=>a-b).forEach(id=>{
+      const r=rls.get(id);
+      lines.push(`    ${id},  NO, ${r.i}, 0, 0, 0, 0, 0, 0`);
+      lines.push(`             ${r.j}, 0, 0, 0, 0, 0, 0, `);
+    });
+    lines.push('');
   }
 
   // ---- element sets per frame ----
@@ -4267,6 +4376,7 @@ async function buildReport(){
     <li>${nCombo} LRFD strength load combinations (ASCE 7-16 §2.3.1) plus an envelope, generated as MIDAS load cases/combinations.</li>
     ${is3d?`<li>3D structure: ${frameYs(s).length} identical frames tied by longitudinal edge and eave beams (${esc(s.longSect)}). ${loadViaPurlins(s)?`Roof gravity and wind loads are applied to the purlins and eave beams by their roof width, and MIDAS carries them into the frames; the overhangs are carried as cantilevers. Purlins are modeled at the roof-line elevation with their strong axis vertical (no roll to the roof slope), connected rigidly to the frame beams.`:`Roof gravity and wind loads go to the frame beams by tributary width, and the end frames include the front and back overhangs. The edge and eave beams carry their own self weight and the end fascia force, and they provide continuity between frames. They are not separately loaded by the overhang roof area.`}</li>
     <li>Longitudinal stability comes from the columns acting as fixed-base cantilevers (weak-axis bending for W-shapes). No bracing is modeled.</li>
+    ${releaseSummary3D(s).length?`<li>Member end releases (MCT *FRAME-RLS, major and minor axis moments My, Mz): ${releaseSummary3D(s).join('; ')}.${s.relRafter==='pinned'?' The pinned rafter tips carry an RY restraint so the eave beams cannot roll about their own axis (a torsional brace at each frame).':''}</li>`:''}
     <li>Wind along the length per ASCE 7-16 Fig. 27.3-7 (C<sub>N</sub> by distance from the windward edge, cases A/B, γ = 90°/270°), averaged over each frame\u2019s roof strip.</li>`:''}
   </ul>
   <h3>${nAs}.2 NOT included — verify separately if applicable</h3>
@@ -4556,6 +4666,7 @@ function draw3D(){
         colorscale:[[0,COL.ink],[1,COL.ink]],hoverinfo:'text',text:[`pinned base ${idx+1}`]});
     }
   });
+  { const rt=releaseTrace(releaseMarks(s),true,m=>[m.x,0,g.yAt(m.x)-bd/2-0.3]); if(rt) traces.push(rt); }
 
   // ---- translucent tributary envelope: a slab over the roof at the full width B ----
   if(showTrib){
@@ -4837,6 +4948,9 @@ function draw3DFull(){
     const dd=pur?pd_:ld_, bw=pur?pb_:lb, z=g.yAt(x)+bd/2+(pur?dd/2:-dd/2);   // purlins sit on top of the frame beams
     traces.push(box3D(x,L3/2,z, bw/2,0,0, 0,L3/2,0, 0,0,dd/2, pur?'#8c6bb1':COL.amber, pur?`purlin x = ${f(x,2)} ft ${pp.desig}`:`${ln.kind} beam ${lp.desig}`));
   });
+  // member end releases: open circles on top of the released member, just off the joint
+  { const lift={rafter:bd/2, eave:bd/2, purlin:bd/2+pd_, column:-bd/2-0.3};
+    const rt=releaseTrace(releaseMarks(s),true,m=>[m.x,m.y,(m.kind==='column'?g.yAt(m.x):m.z)+lift[m.kind]]); if(rt) traces.push(rt); }
   if(showSect){ label3D(mx,ys[0],mz+bd+0.6,bp.desig,COL.steel,10); label3D(g.colX[0]+cd,ys[0],g.colBase[0]+2,cp.desig,COL.moss,10); label3D(0,L3/2,g.yStart+0.9,lp.desig,'#8a5e10',10); }
   // roof surface + windscreen (translucent)
   if(showTrib){
@@ -5029,6 +5143,7 @@ function drawGeom(){
   const A=computeModel(state),g=A.geom,s=state;
   const xhi=g.L;
   const traces=structureTraces(g,s);
+  { const rt=releaseTrace(releaseMarks(s).filter(m=>m.frame===0 && (m.kind==='rafter'||m.kind==='column'))); if(rt) traces.push(rt); }
   // dimension annotation for overhangs
   const layout=BASE_LAYOUT({
     shapes:[gradeShape(g,s,-3,xhi+3)],
@@ -5162,6 +5277,8 @@ function drawPlan(){
   });
   traces.push({x:ys.flatMap(y=>g.colX.map(()=>y)),y:ys.flatMap(()=>g.colX),mode:'markers',marker:{size:10,color:'rgba(0,0,0,0)'},
     hoverinfo:'text',text:ys.flatMap((y,j)=>g.colX.map((cx,i)=>`F${j+1}-C${i+1}: ${s.colSect}, base el. ${f(g.colBaseF[j][i],2)} ft, length ${f(g.colHF[j][i],2)} ft`)),name:''});
+  // member end releases (column-top pins are not visible in plan)
+  { const rt=releaseTrace(releaseMarks(s,null,Math.min(1.2,0.03*Math.max(L,L3))).filter(m=>m.kind!=='column'),false,m=>[m.y,m.x]); if(rt) traces.push(rt); }
   // ---- scale: work in screen pixels so labels and margins fit at any canopy size ----
   const el=document.getElementById('plotPlan');
   const W=Math.max(480,el.clientWidth||900), padL=120, padR=130, padB=92, padT=28;
@@ -5234,6 +5351,7 @@ function drawMeshPlot(mesh){
   const baseIds=mesh.keyNodes.cols.map(c=>c.base);
   traces.push({x:baseIds.map(i=>mesh.nodes[i-1].x),y:baseIds.map(i=>mesh.nodes[i-1].z),
     mode:'markers',marker:{symbol:'triangle-up',size:14,color:COL.ink},hoverinfo:'skip'});
+  { const rt=releaseTrace(releaseMarks(s,mesh,0.35*g.L/12)); if(rt) traces.push(rt); }
   Plotly.react('plotMesh',traces,BASE_LAYOUT({shapes:[gradeShape(g,s,-3,g.L+3)]}),PLOT_CFG);
 }
 
@@ -5253,6 +5371,7 @@ function drawMeshPlot3D(mesh){
   const bases=[]; mesh.frames.forEach(fr=>fr.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
   traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),
     marker:{size:5,color:COL.ink,symbol:'square'},name:'fixed supports',hoverinfo:'skip'});
+  { const rt=releaseTrace(releaseMarks(state,mesh),true); if(rt) traces.push(rt); }
   const xr=mesh.geom.L+2, yr=mesh.L3+2, zr=Math.max(...mesh.nodes.map(n=>n.z))-Math.min(...mesh.nodes.map(n=>n.z))+2, mr=Math.max(xr,yr,zr);
   Plotly.react('plotMesh',traces,{paper_bgcolor:'rgba(0,0,0,0)',margin:{l:0,r:0,t:0,b:0},showlegend:true,
     legend:{orientation:'h',x:0,y:1,font:{size:10}},
@@ -6117,6 +6236,7 @@ function drawWhole(mesh){
   // supports and frame labels
   const bases=[]; mesh.frames.forEach(F=>F.keyNodes.cols.forEach(c=>bases.push(mesh.nodes[c.base-1])));
   traces.push({type:'scatter3d',mode:'markers',x:bases.map(n=>n.x),y:bases.map(n=>n.y),z:bases.map(n=>n.z),marker:{size:4,color:COL.ink,symbol:'square'},hoverinfo:'skip',showlegend:false});
+  { const rt=releaseTrace(releaseMarks(state,mesh,Math.min(0.8,0.03*mr)),true,m=>{ const q=P(mesh.nodes[m.node-1]), n=mesh.nodes[m.node-1]; return [m.x+q[0]-n.x,m.y+q[1]-n.y,m.z+q[2]-n.z]; },6); if(rt) traces.push(rt); }
   const zt=Math.max(...zs0)+0.12*zr;
   traces.push({type:'scatter3d',mode:'text',x:mesh.frames.map(()=>mesh.geom.L/2),y:mesh.frames.map(F=>F.y),z:mesh.frames.map(()=>zt),
     text:mesh.frames.map(F=>`F${F.j+1}`),textfont:{size:wsTxtSize()+1,color:COL.ink},hoverinfo:'skip',showlegend:false});
@@ -6849,7 +6969,7 @@ function dxfCover(D, C) { const h = D.h, l = D.layer('ANNO-TEXT', 7), tb = D.lay
   const notes = [
     'DESIGN PER ASCE 7-16 (LOADS) AND AISC 360 (STEEL). THE STRUCTURE WAS ANALYZED IN MIDAS CIVIL FROM THE MODEL GENERATED BY THIS TOOL; SEE THE DESIGN LOADS SHEET.',
     `STRUCTURAL STEEL: SECTIONS PER AISC 15TH ED. SHAPES DATABASE. E = ${s.E_ksi} KSI, DENSITY ${s.density_pcf} PCF. SPECIFY ASTM GRADES ON THE CONTRACT DRAWINGS.`,
-    C.three ? 'COLUMN BASES ARE FIXED. THE COLUMNS ACT AS CANTILEVERS FOR WIND ALONG THE LENGTH; NO BRACING IS PROVIDED.'
+    C.three ? `COLUMN BASES ARE FIXED. THE COLUMNS ACT AS CANTILEVERS FOR WIND ALONG THE LENGTH; NO BRACING IS PROVIDED. COLUMN-TO-BEAM CONNECTIONS ARE ${s.beamConnect === 'pinned' && nCols(s) > 1 ? 'PINNED' : 'MOMENT (FIXED)'}.${releaseSummary3D(s).length ? ' ' + releaseSummary3D(s).join('; ').toUpperCase() + '.' : ''}`
       : `COLUMN BASES ARE ${s.baseFixity.toUpperCase()}. COLUMN-TO-BEAM CONNECTIONS ARE ${s.beamConnect === 'pinned' ? 'PINNED' : 'MOMENT (FIXED)'}.`,
     'WORK POINTS (W.P.) ARE AT THE ROOF BEAM CENTERLINE OVER EACH COLUMN. ELEVATIONS ARE RELATIVE TO THE PROJECT DATUM.',
     'CONTRACTOR TO VERIFY ALL DIMENSIONS AND ELEVATIONS IN THE FIELD BEFORE FABRICATION.',
@@ -6885,13 +7005,16 @@ function dxfPlan(D, C) { const h = D.h, g = C.g, X = v => v * 12, L = g.L, L3 = 
   const y1 = C.ys[0], xm = C.ys.length > 1 ? (C.ys[0] + C.ys[1]) / 2 : C.ys[0] + 1;
   C.lay.forEach((ln, i) => { const nm = ln.kind === 'purlin' ? `PURLIN ${C.s.purlinSect}` : `${ln.kind.toUpperCase()} BEAM ${s.longSect}`;
     D.text(ly.t, X(xm), X(ln.x) + (ln.kind === 'purlin' ? pb : lb) / 2 + 0.4 * h, 0.9 * h, nm, 1); });
-  // slope arrow (no text inside the plan; see the legend)
+  // moment releases: circles just off the joint on the released member
+  const rlm = releaseMarks(s, null, (Math.max(bb, lb, pb) / 2 + 0.9 * h) / 12).filter(m => m.kind !== 'column');
+  rlm.forEach(m => D.circle(ly.t, X(m.y), X(m.x), 0.45 * h));
   const ax = X((C.ys[C.ys.length - 2] ?? 0) + (C.ys[C.ys.length - 1] - (C.ys[C.ys.length - 2] ?? 0)) / 2), a0 = X(L) * 0.15, a1 = X(L) * 0.85; D.line(ly.t, ax, a0, ax, a1); dxfArrow(D, ly.t, ax, a1, 0, 1);
   // legend below the plan
   dxfNotes(D, ly.t, 0, -ext - 14 * h, 'LEGEND AND NOTES', [
     `FRAME BEAMS ${s.beamSect} AT GRIDS 1 TO ${C.ys.length}; COLUMNS ${s.colSect} AT EVERY FRAME AND COLUMN GRID (${C.ys.length * C.nC} TOTAL).`,
     `EAVE BEAMS ${s.longSect}${C.purl.length ? `; PURLINS ${s.purlinSect} AT ${C.purl.map(x => dxfFI(X(x))).join(', ')} FROM THE LOW EAVE` : ''}. ALL RUN THE FULL LENGTH, CANTILEVERING ${dxfFI(X(s.OH_front))} / ${dxfFI(X(s.OH_back))} PAST THE END FRAMES.`,
-    `ARROW: ROOF SLOPES UP ${dxfFrac(12 * s.slope, 16)}:12 (${f(g.theta * 180 / Math.PI, 2)} DEG.) FROM THE LOW EAVE TO THE HIGH EAVE.`], 110);
+    `ARROW: ROOF SLOPES UP ${dxfFrac(12 * s.slope, 16)}:12 (${f(g.theta * 180 / Math.PI, 2)} DEG.) FROM THE LOW EAVE TO THE HIGH EAVE.`,
+    ...(rlm.length ? [`CIRCLE = MOMENT RELEASE (PINNED END) OF THE MEMBER IT IS ON: ${releaseSummary3D(s).join('; ').toUpperCase()}.`] : [])], 110);
   D.text(ly.t, X(L3) + 0.5 * h, X(L) + 0.4 * h, 0.9 * h, 'HIGH EAVE'); D.text(ly.t, X(L3) + 0.5 * h, -1.1 * h, 0.9 * h, 'LOW EAVE');
   // section tags
   const nL = C.nums && C.nums['LONGITUDINAL ELEVATION'], secSheet = j => { const fs = (C.fsets || []).findIndex(q => q.js.includes(j)), t = C.list && C.list.filter(x => /^FRAME SECTION/.test(x))[fs]; return t ? C.nums[t] : null; };
@@ -6922,6 +7045,8 @@ function dxfFrameOne(D, C, fj) { const h = D.h, g = C.g, X = v => v * 12, s = C.
     D.text(ly.t, X(cx) + cd / 2 + 0.5 * h, zb + 0.4 * h, 0.9 * h, `BASE ${dxfEl(colBase[i])}`);
     D.text(ly.t, X(cx) + cd / 2 + 0.5 * h, zA(cx) - (bd / 2) / c - 1.4 * h, 0.9 * h, `W.P. ${dxfEl(g.yAt(cx))}`);
     D.dimV(ly.d, zb, zA(cx), X(cx) - cd / 2 - 3 * h, X(cx) - cd / 2, 'H = <>'); });
+  // pinned rafter tips (moment release circles on the beam centerline)
+  releaseMarks(s, null, 1.6 * h / 12).filter(m => m.kind === 'rafter' && m.frame === fj).forEach(m => D.circle(ly.bm, X(m.x), X(m.z), 0.5 * h));
   // longitudinal members in section on the roof (3D): eave beams flush top, purlins on top
   C.lay.forEach(ln => { const pur = ln.kind === 'purlin', P = pur ? C.pp : C.lp, top = zA(ln.x) + (bd / 2) / c, z0 = pur ? top : top - P.d;
     D.rect(pur ? ly.pu : ly.lg, X(ln.x) - P.b / 2, z0, X(ln.x) + P.b / 2, z0 + P.d); });
@@ -6945,7 +7070,8 @@ function dxfFrameOne(D, C, fj) { const h = D.h, g = C.g, X = v => v * 12, s = C.
     D.text(ly.t, X(0), zA(0) + (bd / 2) / c + 0.6 * h, 0.9 * h, `EAVE ${s.longSect}`, 0); }
   const top = Math.max(g.yStart, g.yEnd) * 12 + bd + 16 * h;
   D.text(ly.t, -6 * h, top + 2 * h, 1.6 * h, C.three ? `SECTION ${fj + 1} - FRAME ${fj + 1}` : 'FRAME ELEVATION');
-  D.text(ly.t, -6 * h, top, 0.9 * h, `${C.three ? `AT Y = ${dxfFI(X(C.ys[fj]))} FROM THE FRONT EDGE, ` : ''}LOOKING ALONG +Y. W.P. = WORK POINT AT ROOF BEAM CENTERLINE. ${s.beamConnect === 'pinned' && C.nC > 1 ? 'CIRCLE = PINNED COLUMN-TO-BEAM CONNECTION.' : 'COLUMN-TO-BEAM CONNECTIONS ARE MOMENT CONNECTIONS.'}`);
+  D.text(ly.t, -6 * h, top, 0.9 * h, `${C.three ? `AT Y = ${dxfFI(X(C.ys[fj]))} FROM THE FRONT EDGE, ` : ''}LOOKING ALONG +Y. W.P. = WORK POINT AT ROOF BEAM CENTERLINE. ${s.beamConnect === 'pinned' && C.nC > 1 ? 'CIRCLE AT A COLUMN TOP = PINNED COLUMN-TO-BEAM CONNECTION.' : 'COLUMN-TO-BEAM CONNECTIONS ARE MOMENT CONNECTIONS.'}`);
+  if (C.three && s.relRafter === 'pinned') D.text(ly.t, -6 * h, top - 1.4 * h, 0.9 * h, 'CIRCLE AT A BEAM TIP = FRAME BEAM PINNED TO THE EAVE BEAM.');
   // column schedule for the frame
   dxfTable(D, ly.tb, C.paper === 'B' ? X(L) + 14 * h : 0, C.paper === 'B' ? zMin + (C.nC + 3) * 1.5 * h + 1.7 * h : zMin - 14 * h, ['GRID', 'X FROM LOW TIP', 'BASE EL.', 'W.P. EL.', 'LENGTH'], g.colX.map((cx, i) => [dxfLetter(i), dxfFI(X(cx)), dxfEl(colBase[i]).slice(4), dxfEl(g.yAt(cx)).slice(4), dxfFI(colH[i] * 12)]), 'COLUMNS');
 }
@@ -6961,6 +7087,10 @@ function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   C.lay.forEach(ln => { const pur = ln.kind === 'purlin', P = pur ? C.pp : C.lp, top = zA(ln.x) + (bd / 2) / c, z0 = pur ? top : top - P.d;
     const l = pur ? ly.pu : ly.lg; D.line(l, 0, z0, X(L3), z0, ln.x > g.colX[0] + 1e-6 && !pur ? hid : undefined); D.line(l, 0, z0 + P.d, X(L3), z0 + P.d, ln.x > g.colX[0] + 1e-6 && !pur ? hid : undefined);
     D.line(l, 0, z0, 0, z0 + P.d); D.line(l, X(L3), z0, X(L3), z0 + P.d); });
+  // eave beam / purlin moment releases at the frames (circles at mid-depth, just off the frame)
+  releaseMarks(s, null, (bb / 2 + 0.9 * h) / 12).filter(m => m.kind === 'eave' || m.kind === 'purlin').forEach(m => {
+    const ln = C.lay.find(l => Math.abs(l.x - m.x) < 1e-6); if (!ln) return; const pur = ln.kind === 'purlin', P = pur ? C.pp : C.lp, top = zA(ln.x) + (bd / 2) / c, z0 = pur ? top : top - P.d;
+    D.circle(pur ? ly.pu : ly.lg, X(m.y), z0 + P.d / 2, Math.min(0.45 * h, P.d * 0.45)); });
   const gz = s.El_base * 12; D.line(ly.gd, -6 * h, gz, X(L3) + 6 * h, gz, hid);
   const zMin = Math.min(zb0, gz);
   D.chainH(ly.d, [0, ...C.ys, L3].map(X), zMin - 6 * h, zMin); D.dimH(ly.d, 0, X(L3), zMin - 10 * h, zMin, 'OVERALL <>');
@@ -6975,6 +7105,7 @@ function dxfLong(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = 
   D.text(ly.t, X(L3) + 1 * h, zHi - 0.3 * h, 0.9 * h, `HIGH EAVE ${dxfEl(g.yEnd)} (CL)`); D.text(ly.t, X(L3) + 1 * h, zLo - 0.3 * h, 0.9 * h, `LOW EAVE ${dxfEl(g.yStart)} (CL)`);
   D.text(ly.t, -6 * h, zHi + 15 * h, 1.6 * h, 'LONGITUDINAL ELEVATION');
   D.text(ly.t, -6 * h, zHi + 13 * h, 0.9 * h, `SECTION B: LOOKING FROM THE LOW EAVE SIDE (+X). COLUMN LINE A SHOWN; MEMBERS BEHIND IT HIDDEN. FRONT OVERHANG ${dxfFI(X(s.OH_front))}, BACK OVERHANG ${dxfFI(X(s.OH_back))}.`);
+  if (s.relEave === 'simple' || (s.relPurlin === 'simple' && C.purl.length)) D.text(ly.t, -6 * h, zHi + 11.6 * h, 0.9 * h, 'CIRCLE = MOMENT RELEASE (SIMPLE-SPAN END) AT THE FRAME.');
 }
 /* ---------- 5: column and base layout with reactions ---------- */
 function dxfBase(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, L3 = C.L3;
@@ -7206,6 +7337,7 @@ function dxfIso(D, C) { const h = D.h, mesh = buildMCT(state).mesh; if (!mesh.is
   if (anchorInUse()) mesh.frames.forEach(F => F.keyNodes.cols.forEach(c => { const id = anchorGroupOf(anchorKey(F.j, c.i)), gr = id && anchorGroup(id); if (!gr || !gr.bp || !gr.bp.plate) return;
     const n = mesh.nodes[c.base - 1], bx = gr.bp.plate.N / 24, by = gr.bp.plate.B / 24;
     D.pline(ly.co, [[-bx, -by], [bx, -by], [bx, by], [-bx, by]].map(([dx, dy]) => P(n.x + dx, n.y + dy, n.z)), true); }));
+  const rlm = releaseMarks(C.s, mesh, 1.5 * h / 12); rlm.forEach(m => { const q = P(m.x, m.y, m.z); D.circle(ly.t, q[0], q[1], 0.4 * h); });
   // member callouts with leaders
   const s = C.s, f0 = mesh.frames[0], fl = mesh.frames[mesh.frames.length - 1], lowE = C.lay.find(l => l.kind === 'low eave'), pur = C.lay.find(l => l.kind === 'purlin');
   const call = (pt, dx, dy, txt) => { const q = [pt[0] + dx * h, pt[1] + dy * h]; D.line(ly.t, pt[0], pt[1], q[0], q[1]); D.text(ly.t, q[0] + (dx >= 0 ? 0.4 : -0.4) * h, q[1] - 0.4 * h, 0.9 * h, txt, dx >= 0 ? 0 : 2); };
@@ -7214,7 +7346,7 @@ function dxfIso(D, C) { const h = D.h, mesh = buildMCT(state).mesh; if (!mesh.is
   if (lowE) call(P(0, (C.ys[0] + (C.ys[1] ?? C.ys[0] + 4)) / 2, g.yAt(0)), -6, -4, `LOW EAVE BEAM ${s.longSect}`);
   if (pur) call(P(pur.x, C.L3 * 0.6, g.yAt(pur.x)), 6, 5, `PURLIN ${s.purlinSect} (TYP.)`);
   const bb = D.bbox(0); D.text(ly.t, bb[0], bb[3] + 3 * h, 1.6 * h, 'ISOMETRIC VIEW');
-  D.text(ly.t, bb[0], bb[3] + 1.3 * h, 0.9 * h, 'ISOMETRIC PROJECTION OF THE ANALYSIS MODEL (MEMBER CENTERLINES), TRUE LENGTH ALONG X, Y AND Z. FOR INFORMATION ONLY.');
+  D.text(ly.t, bb[0], bb[3] + 1.3 * h, 0.9 * h, `ISOMETRIC PROJECTION OF THE ANALYSIS MODEL (MEMBER CENTERLINES), TRUE LENGTH ALONG X, Y AND Z. FOR INFORMATION ONLY.${rlm.length ? ' CIRCLE = MOMENT RELEASE (PINNED END).' : ''}`);
 }
 // title block cells on a 34 in sheet: [x, width, label, lines, kind]; optional firm, revisions and seal cells
 function dxfTitleCells(S, k) { const o = dxfOpts(), mt = dxfMeta(), big = (DXF_PAPER[S.paper] || DXF_PAPER.D)[0] > 20, cells = [];
@@ -7546,7 +7678,7 @@ function anaRun(text){
 // ============================================================================
 const PROJ_KEY='canopyProjects_v1';
 // keys that make up a saved project = everything in DEFAULTS plus the mode/config flags
-const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','resSrc','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste','resUnits','anchor']);
+const STATE_KEYS=Object.keys(DEFAULTS).concat(['nCol','baySpacings','colBases','modelDim','nFrameBays','frameSpacings','frameColBases','resSrc','longSect','purlins','purlinSect','dxf','B_trib2D','beamConnect','baseFixity','flow','screen','snowMode','windMode','riskCat','exposure','beamSect','colSect','midasPaste','resUnits','anchor','relRafter','relEave','relPurlin']);
 function snapshotState(){const o={};STATE_KEYS.forEach(k=>o[k]=state[k]);return o;}
 function loadProjects(){try{return JSON.parse(localStorage.getItem(PROJ_KEY))||{};}catch(e){return {};}}
 function saveProjects(p){try{localStorage.setItem(PROJ_KEY,JSON.stringify(p));}catch(e){projStatus('Save failed: storage unavailable',true);}}
@@ -7560,7 +7692,7 @@ function refreshProjList(sel){
 function refreshAllInputs(){
   document.querySelectorAll('input[data-k]').forEach(inp=>{const k=inp.dataset.k;if(k in state)inp.value=state[k];});
   // segment buttons
-  const segMap=[['segDim','modelDim'],['segConnect','beamConnect'],['segFix','baseFixity'],['segFlow','flow'],['segScreen','screen'],['segSnow','snowMode'],['segWind','windMode'],['segScreenWind','screenWindMode'],['segColWind','colWindMode'],['segFasciaWind','fasciaWindMode']];
+  const segMap=[['segDim','modelDim'],['segConnect','beamConnect'],['segRelRafter','relRafter'],['segRelEave','relEave'],['segRelPurlin','relPurlin'],['segFix','baseFixity'],['segFlow','flow'],['segScreen','screen'],['segSnow','snowMode'],['segWind','windMode'],['segScreenWind','screenWindMode'],['segColWind','colWindMode'],['segFasciaWind','fasciaWindMode']];
   segMap.forEach(([id,prop])=>{const seg=document.getElementById(id);if(!seg)return;seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===state[prop]));});
   // column count + bay table
   document.getElementById('nColInput').value=nCols(state);
@@ -7599,6 +7731,7 @@ function applyProject(obj){
   if(!('frameColBases' in obj)) state.frameColBases=null;
   if(!obj.resUnits) state.resUnits={F:'lbf',M:'ft-lbf',D:'in'};
   if(!obj.anchor) state.anchor=anchorDefaults();
+  ['relRafter','relEave','relPurlin'].forEach(k=>{ if(!(k in obj)) state[k]='continuous'; });   // older projects: no member releases
   _anchorEval={}; _anchorSig='';   // older 3D projects: seeded from the per-column bases
   refreshAllInputs(); updateCfgTag(); syncResUnitsUI(); recompute();
   // restore pasted MIDAS results (if any) and re-derive reactions/comparison
