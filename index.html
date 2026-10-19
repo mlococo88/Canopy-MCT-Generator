@@ -7669,6 +7669,22 @@ refreshProjList();
   const $=id=>document.getElementById(id);
   function cloudStatus(msg,err){const el=$('cloudStatus');if(!el)return;el.textContent=msg;el.style.color=err?'var(--rust)':'var(--moss)';setTimeout(()=>{if(el.textContent===msg)el.textContent='';},3500);}
   const sanitizeId=name=>name.trim().replace(/[^\w\- ]+/g,'').replace(/\s+/g,'_').slice(0,80);
+  // The project is stored as gzipped JSON text (stateGz). Firestore rejects the raw
+  // state object: it has nested arrays (frameColBases), undefined values, objects
+  // created inside the anchorage designer's iframe, and pasted MIDAS results can pass
+  // the 1 MB document limit. Projects saved before this keep their plain `state` field.
+  const CLOUD_MAX=1000000;
+  async function packState(st){
+    const json=JSON.stringify(st);
+    const gz=new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    let bin=''; for(let i=0;i<gz.length;i+=0x8000) bin+=String.fromCharCode.apply(null, gz.subarray(i,i+0x8000));
+    return btoa(bin);
+  }
+  async function unpackState(it){
+    if(!it.stateGz) return it.state||null;
+    const bin=Uint8Array.from(atob(it.stateGz), c=>c.charCodeAt(0));
+    return JSON.parse(await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
+  }
 
   function wire(){
     const API=window.CloudAPI;
@@ -7775,19 +7791,22 @@ refreshProjList();
         const revNote=$('cloudRevNote').value.trim();
         const revisions=(existing&&Array.isArray(existing.revisions))?existing.revisions.slice(-19):[];
         revisions.push({by:user.email, note:revNote||'(no note)', at:new Date().toISOString()});
-        await API.save(id, { name, state:snapshotState(), revNote, revisions });
+        const stateGz=await packState(snapshotState());
+        if(stateGz.length>CLOUD_MAX){ cloudStatus(`Project is too large for the cloud (${(stateGz.length/1e6).toFixed(1)} MB compressed, limit 1 MB) — clear the pasted MIDAS results, or use Export JSON instead.`,true); return; }
+        await API.save(id, { name, stateGz, revNote, revisions });
         cloudStatus(`Saved "${name}" to cloud ✓`);
         $('cloudRevNote').value='';
         refreshCloudList(id);
-      }catch(e){ cloudStatus('Cloud save failed.',true); console.error(e); }
+      }catch(e){ cloudStatus('Cloud save failed'+(e&&e.code?` (${e.code})`:'')+'.',true); console.error(e); }
     };
 
     $('cloudLoadBtn').onclick=async()=>{
       const id=$('cloudLoad').value; if(!id){cloudStatus('Select a cloud project to load.',true);return;}
       try{
         const it=await API.load(id);
-        if(!it||!it.state){cloudStatus('Project not found or empty.',true);return;}
-        applyProject(it.state);
+        const st=it?await unpackState(it):null;
+        if(!st){cloudStatus('Project not found or empty.',true);return;}
+        applyProject(st);
         $('cloudProjName').value=it.name||id; $('projName').value=it.name||id;
         const revs=(it.revisions||[]).slice(-1)[0];
         cloudStatus(`Loaded "${it.name||id}"${revs?` (rev by ${revs.by})`:''} ✓`);
