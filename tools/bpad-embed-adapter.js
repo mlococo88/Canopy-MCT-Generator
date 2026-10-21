@@ -57,7 +57,13 @@
         var checks=allChecks().map(function(c){ return {label:c.label, ref:c.ref, dcr:c.dcr, combo:c.combo, na:!!c.na}; });
         var m=dcrMatrix();
         var rows=(m.rows||[]).map(function(r){ return {combo:r.combo, worst:r.worst, worstKey:r.worstKey}; });
-        return {ok:true, checks:checks, rows:rows, modes:m.modes, warns:wr};
+        /* shear on the anchors: the ACI Fig. R17.7.2.1b case each combination used and the largest
+           per-anchor shear as a multiple k of an equal share V/n */
+        var nA=(anchorGeom().pts||[]).length||1, sh={cases:{}, k:1, combo:"", label:"", Vu:0, Vres:0, n:nA};
+        (CC.combos||[]).forEach(function(c){ var Vr=Math.hypot(c.raw.Vx,c.raw.Vy); if(!(Vr>1e-9)) return;
+          var id=c.vCase?c.vCase.id:"all"; sh.cases[id]=(sh.cases[id]||0)+1;
+          if(c.Vu_per>sh.Vu){ sh.Vu=c.Vu_per; sh.Vres=Vr; sh.k=c.Vu_per/(Vr/nA); sh.combo=c.name; sh.label=c.vCase?c.vCase.label:"all anchors"; } });
+        return {ok:true, checks:checks, rows:rows, modes:m.modes, warns:wr, shear:sh};
       }catch(e){ return {ok:false, err:String(e&&e.message||e)}; }
       finally{ S=sS; CC=sC; VALIDATION=sV; }
     },
