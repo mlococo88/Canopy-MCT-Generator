@@ -1996,6 +1996,14 @@ function longWindCases(s){
   });
   return out;
 }
+// The stepped Fig. 27.3-7 pressure of a longitudinal wind case along the length: one segment
+// per zone (0–h, h–2h, >2h from the windward edge) clipped to the roof, in plan Y (ft).
+function longZoneSegs(lc,L3){
+  const lab=['0–h','h–2h','>2h'];
+  return lc.zones.map((z,i)=>{ const d0=Math.min(z.d0,L3), d1=Math.min(z.d1,L3); if(d1<=d0+1e-9) return null;
+    const ya=(lc.gamma===90)?d0:L3-d1, yb=(lc.gamma===90)?d1:L3-d0;
+    return {i, label:lab[i], d0, d1, y0:ya, y1:yb, cn:z.cn, p:lc.qhG*z.cn}; }).filter(Boolean);
+}
 
 // ============================================================================
 // GEOMETRY + LOADS
@@ -5014,15 +5022,23 @@ function draw3DFull(){
       ys.forEach((y,j)=>arrow3D(fx-sg*fl,y,fz,sg,0,0,fl,COL.rust,`fascia F${j+1} ${f(s.d_roof*s.p_lat*tribs[j]/1000,2)} k`).forEach(t=>traces.push(t)));
       loadNote=`${wc.name}: roof p_lower=${f(wc.pLower,1)} / p_upper=${f(wc.pUpper,1)} psf on every frame (× its tributary width); column drag ${f(wColLine,1)} lbf/ft on all columns; fascia point load at each frame's windward tip.`;
     } else if(lc){
-      const ref=Math.max(...lc.frames.map(fr=>Math.abs(fr.p)),1);
-      lc.frames.forEach((fr,j)=>{
-        const up=fr.p<0; drawDistributed(roofPts(0,g.L,fr.y0,fr.y1,4,1),{x:up?nrmX:-nrmX,y:0,z:up?nrmZ:-nrmZ},fr.p,ref,COL.amber);
-        if(showLabels) label3D(g.L/2,ys[j],g.yAt(g.L/2)+modelScale*0.2,`F${j+1} ${f(Math.abs(fr.p),1)} psf`,'#8a5e10',10);
+      // the stepped Fig. 27.3-7 pressure along the length, zone by zone from the windward edge
+      const segs=longZoneSegs(lc,L3), ref=Math.max(...segs.map(z=>Math.abs(z.p)),1);
+      segs.forEach(z=>{
+        const up=z.p<0, ny=Math.max(2,Math.round((z.y1-z.y0)/3));
+        drawDistributed(roofPts(0,g.L,z.y0,z.y1,4,ny),{x:up?nrmX:-nrmX,y:0,z:up?nrmZ:-nrmZ},z.p,ref,COL.amber);
+        // zone outline on the roof
+        const zt=x=>g.yAt(x)+bd/2+0.06;
+        traces.push({type:'scatter3d',mode:'lines',x:[0,g.L,g.L,0,0],y:[z.y0,z.y0,z.y1,z.y1,z.y0],z:[zt(0),zt(g.L),zt(g.L),zt(0),zt(0)],
+          line:{color:'#c98a1a',width:3},hoverinfo:'text',text:`${z.label}: C_N = ${f(z.cn,2)}, ${f(z.p,1)} psf`,name:''});
+        if(showLabels) label3D(g.L+0.8,(z.y0+z.y1)/2,g.yAt(g.L)+modelScale*0.12,`${z.label}: ${f(Math.abs(z.p),1)} psf ${up?'↑':'↓'}`,'#8a5e10',11);
       });
       colDrag({x:0,y:lc.ySign,z:0});
       const yw=(lc.gamma===90)?0:L3, fl=modelScale*0.14;
       lineXs.forEach(x=>arrow3D(x,yw-lc.ySign*fl,g.yAt(x),0,lc.ySign,0,fl,COL.rust,'end fascia').forEach(t=>traces.push(t)));
-      loadNote=`${lc.name}: wind along the length, entering at the ${lc.gamma===90?'front':'back'} edge. Each frame gets the Fig. 27.3-7 C_N averaged over its roof strip; column drag along Y; end fascia at the windward edge.`;
+      loadNote=`${lc.name}: wind along the length, entering at the ${lc.gamma===90?'front':'back'} edge. Roof pressure by Fig. 27.3-7 zone from the windward edge: ${longZoneSegs(lc,L3).map(z=>`${z.label} ${f(z.p,1)} psf`).join(', ')} (h = ${f(lc.h,1)} ft). `
+        +(loadViaPurlins(s)?'The purlins and eave beams carry this stepped pressure element by element. ':`Each frame gets the pressure averaged over its roof strip: ${lc.frames.map((fr,j)=>`F${j+1} ${f(fr.p,1)}`).join(', ')} psf. `)
+        +'Column drag along Y; end fascia at the windward edge.';
     }
   }
   // ---- reactions (governing envelope, every frame) ----
@@ -5664,28 +5680,36 @@ function drawLongWindInto(plotId, lc){
     annotations.push({x:y,y:zBase-0.9,text:`F${j+1}`,showarrow:false,font:{size:10,color:COL.ink}});
   });
   shapes.push({type:'line',x0:-3,x1:L3+3,y0:s.El_base,y1:s.El_base,line:{color:COL.grade,width:1.5,dash:'dot'}});
-  // zone boundaries along the roof, measured from the windward edge
-  const yAtD=d=>(lc.gamma===90)?d:L3-d;
-  lc.zones.forEach((z,i)=>{
-    if(z.d0>=L3) return;
-    const ya=yAtD(z.d0), yb=yAtD(Math.min(z.d1,L3));
-    shapes.push({type:'rect',x0:Math.min(ya,yb),x1:Math.max(ya,yb),y0:zRoof+0.15,y1:zRoof+0.65,
-      fillcolor:i===0?'rgba(201,138,26,0.30)':(i===1?'rgba(201,138,26,0.18)':'rgba(201,138,26,0.08)'),line:{width:0}});
-    annotations.push({x:(ya+yb)/2,y:zRoof+0.4,text:`${i===0?'0–h':(i===1?'h–2h':'>2h')}: C<sub>N</sub>=${f(z.cn,2)}`,
-      showarrow:false,font:{size:9,color:'#8a5e10'}});
-  });
-  // per-frame uniform pressure (strip-averaged), magnitude-scaled standoff
-  const pMax=Math.max(...lc.frames.map(fr=>Math.abs(fr.p)),1e-6), sc=2.6/pMax;
-  lc.frames.forEach((fr,j)=>{
-    const p=fr.p, up=p<0, st=Math.max(0.4,Math.abs(p)*sc), z0=zRoof+0.8, zt=z0+st;
-    traces.push({x:[fr.y0,fr.y1],y:[zt,zt],mode:'lines',line:{color:COL.amber,width:1.6},hoverinfo:'skip'});
-    const n=Math.max(2,Math.round((fr.y1-fr.y0)/2.5));
-    for(let i=0;i<=n;i++){ const y=fr.y0+(fr.y1-fr.y0)*i/n;
+  // stepped Fig. 27.3-7 pressure along the length (zones from the windward edge)
+  const segs=longZoneSegs(lc,L3), viaP=loadViaPurlins(s);
+  const pMax=Math.max(...segs.map(z=>Math.abs(z.p)),...lc.frames.map(fr=>Math.abs(fr.p)),1e-6), sc=2.6/pMax, z0=zRoof+0.8;
+  const zOf=p=>z0+Math.max(0.4,Math.abs(p)*sc);
+  segs.forEach((z,k)=>{
+    shapes.push({type:'rect',x0:z.y0,x1:z.y1,y0:zRoof+0.15,y1:zRoof+0.65,
+      fillcolor:z.i===0?'rgba(201,138,26,0.30)':(z.i===1?'rgba(201,138,26,0.18)':'rgba(201,138,26,0.08)'),line:{width:0}});
+    const zt=zOf(z.p), up=z.p<0;
+    traces.push({x:[z.y0,z.y1],y:[zt,zt],mode:'lines',line:{color:COL.amber,width:2.4},hoverinfo:'text',
+      text:`${z.label} from the windward edge (${f(z.d0,1)}–${f(z.d1,1)} ft): C_N = ${f(z.cn,2)}, p = ${f(z.p,1)} psf`,name:''});
+    // vertical step to the next zone
+    const nx=segs[k+1]; if(nx){ const yS=(lc.gamma===90)?z.y1:z.y0; traces.push({x:[yS,yS],y:[zt,zOf(nx.p)],mode:'lines',line:{color:COL.amber,width:2.4},hoverinfo:'skip'}); }
+    const n=Math.max(2,Math.round((z.y1-z.y0)/2.5));
+    for(let a=0;a<=n;a++){ const y=z.y0+(z.y1-z.y0)*a/n;
       annotations.push(up?{x:y,y:zt,ax:y,ay:z0,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:2,arrowwidth:1.1,arrowsize:0.9,arrowcolor:COL.amber,text:''}
                          :{x:y,y:z0,ax:y,ay:zt,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:2,arrowwidth:1.1,arrowsize:0.9,arrowcolor:COL.amber,text:''}); }
-    annotations.push({x:(fr.y0+fr.y1)/2,y:zt+0.7,text:`F${j+1}: ${f(Math.abs(p),1)} psf ${up?'suction':'press'}<br>w = ${f(Math.abs(p*tribs[j]),0)} lbf/ft`,
-      showarrow:false,font:{size:9,color:'#8a5e10'}});
+    annotations.push({x:(z.y0+z.y1)/2,y:zt+1.3,text:`<b>${z.label}</b>: C<sub>N</sub> = ${f(z.cn,2)}<br>${f(Math.abs(z.p),1)} psf ${up?'suction':'press'}`,
+      showarrow:false,font:{size:9.5,color:'#8a5e10'}});
   });
+  // what each frame receives: without purlins, its strip-averaged pressure (dashed); with purlins
+  // the purlins and eave beams carry the stepped pressure itself
+  lc.frames.forEach((fr,j)=>{
+    if(!viaP){ const zt=zOf(fr.p);
+      traces.push({x:[fr.y0,fr.y1],y:[zt,zt],mode:'lines',line:{color:'#6a665d',width:1.2,dash:'dash'},hoverinfo:'text',
+        text:`F${j+1} applied: strip-averaged C_N = ${f(fr.cn,3)}, ${f(fr.p,1)} psf × ${f(tribs[j],2)} ft = ${f(fr.p*tribs[j],0)} lbf/ft`,name:''}); }
+    if(!viaP) annotations.push({x:ys[j],y:zBase-2.1,text:`${f(Math.abs(fr.p),1)} psf avg`,showarrow:false,font:{size:8.5,color:'#6a665d'}});
+  });
+  annotations.push({x:0,y:zRoof+8.3,xanchor:'left',showarrow:false,font:{size:9,color:'#6a665d'},
+    text:viaP?'Solid: Fig. 27.3-7 pressure by zone, applied to the purlins and eave beams element by element.'
+             :'Solid: Fig. 27.3-7 pressure by zone. Dashed: the strip-averaged pressure each frame receives.'});
   // column drag along Y and the windward end fascia
   const sg=lc.ySign, dl=1.6;
   ys.forEach(y=>{ for(let i=0;i<=5;i++){ const z=zBase+(zRoof-zBase)*i/5;
@@ -5694,7 +5718,7 @@ function drawLongWindInto(plotId, lc){
   const pEnd=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L).p:s.p_lat;
   annotations.push({x:yWin,y:zRoof,ax:yWin-sg*3.2,ay:zRoof,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:3,arrowwidth:2.4,arrowcolor:'#3f7d99',
     text:`end fascia ${f(s.d_roof*pEnd*g.L/1000,2)} k`,font:{size:9,color:'#2c5666'},xanchor:sg>0?'right':'left'});
-  const az=zRoof+4.6, am=L3/2, ah=L3*0.22;
+  const az=zRoof+6.2, am=L3/2, ah=L3*0.22;
   annotations.push({x:am+sg*ah,y:az,ax:am-sg*ah,ay:az,xref:'x',yref:'y',axref:'x',ayref:'y',showarrow:true,arrowhead:3,arrowwidth:3.5,arrowsize:1.3,arrowcolor:'#2c5666',text:''});
   annotations.push({x:am,y:az+0.9,text:`WIND ${lc.gamma}° — along the length, entering at the ${lc.gamma===90?'front':'back'} edge (h = ${f(lc.h,1)} ft)`,
     showarrow:false,font:{size:10,color:'#2c5666'}});
