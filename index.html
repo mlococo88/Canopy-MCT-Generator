@@ -7435,11 +7435,31 @@ function dxfWind(D, C) { const h = D.h, g = C.g, X = v => v * 12, s = C.s, A = C
       const ya = X(yOf(d0)), yb = X(yOf(d1)); if (i) D.line(ly.ro, ya, 0, ya, Hh, hid);
       const xm = (ya + yb) / 2; D.text(ly.w, xm, Hh / 2 + 0.6 * h, 0.9 * h, `CN ${f(z.cn, 2)}`, 1); D.text(ly.w, xm, Hh / 2 - 1.0 * h, 0.9 * h, `${f(lc.qhG * z.cn, 1)} PSF`, 1); });
     arrows([0.25, 0.5, 0.75].map(fr => fwd ? [-7 * h, Hh * fr, -1.5 * h, Hh * fr] : [W + 7 * h, Hh * fr, W + 1.5 * h, Hh * fr]));
+    // stepped net roof pressure along the length (Fig. 27.3-7 zones), drawn under the plan on its own
+    // baseline: suction hangs below it with arrows pointing away, pressure with arrows pointing at it
+    { const segs = longZoneSegs(lc, len), viaP = loadViaPurlins(s), y0 = -9 * h, amp = (C.paper === 'B' ? 5 : 8) * h;
+      const pMax = Math.max(...segs.map(z => Math.abs(z.p)), ...lc.frames.map(fr => Math.abs(fr.p)), 1e-6), lv = p => y0 - amp * Math.abs(p) / pMax;
+      D.line(ly.ro, 0, y0, W, y0);
+      D.text(ly.t, 0, y0 + 0.7 * h, 0.8 * h, viaP ? 'NET PRESSURE BY ZONE (ON PURLINS)' : 'NET PRESSURE BY ZONE');
+      segs.forEach((z, k) => { const xa = X(z.y0), xb = X(z.y1), yl = lv(z.p), up = z.p < 0;
+        D.line(ly.w, xa, yl, xb, yl);
+        const nx = segs[k + 1]; if (nx) { const xs = X(fwd ? z.y1 : z.y0); D.line(ly.w, xs, yl, xs, lv(nx.p)); }
+        if (k === 0) { const xe = X(fwd ? z.y0 : z.y1); D.line(ly.w, xe, y0, xe, yl); }
+        if (k === segs.length - 1) { const xe = X(fwd ? z.y1 : z.y0); D.line(ly.w, xe, y0, xe, yl); }
+        const n = Math.max(2, Math.round((xb - xa) / (4 * h)));
+        for (let i = 1; i < n; i++) { const x = xa + (xb - xa) * i / n; if (Math.abs(yl - y0) > 1.2 * h) up ? dxfArrowLine(D, ly.w, x, y0, x, yl) : dxfArrowLine(D, ly.w, x, yl, x, y0); }
+        D.text(ly.w, (xa + xb) / 2, yl - 1.4 * h, 0.8 * h, `${f(z.p, 1)} PSF`, 1); });
+      // what each frame receives (without purlins: the strip average), at the frame lines
+      const yF = y0 - amp - 3.4 * h;
+      C.ys.forEach((y, j) => { const fr = lc.frames[j]; D.line(ly.ro, X(y), y0, X(y), y0 - 0.6 * h);
+        if (!viaP && fr) { D.line(ly.w, X(fr.y0), lv(fr.p), X(fr.y1), lv(fr.p), hid); D.text(ly.t, X(y), yF, 0.75 * h, `F${j + 1}: ${f(Math.abs(fr.p), 1)}`, 1); }
+        else D.text(ly.t, X(y), yF, 0.75 * h, `F${j + 1}`, 1); });
+      if (!viaP) D.text(ly.t, 0, yF - 1.5 * h, 0.75 * h, 'HIDDEN / AT FRAMES: FRAME AVERAGE, PSF'); }
     D.text(ly.t, 0, Hh + 4.5 * h, 1.1 * h, `${lc.name.toUpperCase()} (GAMMA = ${lc.gamma}%%d)`);
     D.text(ly.t, 0, Hh + 3 * h, 0.8 * h, `ENTERING AT THE ${fwd ? 'FRONT' : 'BACK'} EDGE. ZONES AT H, 2H (H = ${f(lc.h, 1)} FT).`); }));
   if (part !== 2) blocks.push(() => dxfNotes(D, ly.t, 0, 0, 'WIND NOTES', [
     `FASCIA: ${f(s.p_lat, 1)} PSF ON THE ${f(s.d_roof, 2)} FT FASCIA DEPTH. COLUMNS: ${f(s.p_col, 1)} PSF ON THE COLUMN FACE.${s.screen !== 'none' ? ` WINDSCREEN: ${f(s.p_screen, 1)} PSF.` : ''}`,
-    'ROOF NET PRESSURES ACT NORMAL TO THE ROOF. STRIP-AVERAGED FRAME VALUES FOR THE ALONG-LENGTH CASES ARE TABULATED ON THE DESIGN LOADS SHEET.',
+    'ROOF NET PRESSURES ACT NORMAL TO THE ROOF. ALONG-LENGTH ZONE PRESSURES UNDER EACH PLAN; FRAME VALUES ON THE DESIGN LOADS SHEET.',
     'ACROSS THE FRAMES: ASCE 7-16 FIG. 27.3-4. ALONG THE LENGTH: FIG. 27.3-7.'], C.paper === 'B' ? 55 : 110));
   dxfFlow(D, C, blocks);
 }
