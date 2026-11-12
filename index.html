@@ -3961,6 +3961,29 @@ function rpFig(sn, caption){
   return {type:'figure', caption, svg:`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sn.w} ${sn.h}" style="width:100%;max-width:${Math.min(760,sn.w)}px;height:auto;display:block;margin:0 auto"><image href="${sn.url}" x="0" y="0" width="${sn.w}" height="${sn.h}"/></svg>`};
 }
 const rpN=(v,d)=>({t:isFinite(v)?f(v,d==null?2:d):'—', n:true});
+// one load's moment (green) and shear (orange) diagrams on the frame the Results tab shows (resultsMesh), drawn into
+// the offscreen scratch plot and snapped; kM, kV: a common scale over all the loads
+async function rpDiagFig(loadList, kM, kV, gg, caption, withV){
+  const base=structureTraces(gg,state).map(t=>!t.line?Object.assign({},t,{opacity:0.4}):Object.assign({},t,{line:Object.assign({},t.line,{width:1.5,color:'#c4ced4'}),opacity:0.6}));
+  let tr=[]; loadList.forEach((L,i)=>{ tr=tr.concat(diagramTracesFor(L,'momentY',i?'#2d4a14':COL.moss,i?'rgba(45,74,20,0.12)':'rgba(74,107,34,0.16)',kM).traces);
+    if(withV) tr=tr.concat(diagramTracesFor(L,'shearZ',COL.rust,'rgba(179,80,45,0.14)',kV).traces); });
+  const layout=BASE_LAYOUT({shapes:[gradeShape(gg,state,-3,gg.L+3)],margin:{l:14,r:12,t:8,b:20},xaxis:{visible:false,scaleanchor:'y',scaleratio:1},yaxis:{visible:false}});
+  try{ Plotly.react('plotScratch',base.concat(tr),layout,{staticPlot:true}); }catch(e){ return null; }
+  return rpFig(await rpSnap('plotScratch'), caption);
+}
+// peak member forces by member group over the given loads (the envelope where there is one): frame beams and
+// columns per frame, eave beams and purlins (3D); the governing load of each value
+function rpMemberPeaks(mesh, loads){
+  const grp=new Map(), name=e=>{ if(e.member==='beam') return (mesh.is3D?`F${e.frame+1} `:'')+'roof beam';
+    const m=/^col(\d+)/.exec(e.member); if(m) return (mesh.is3D?`F${e.frame+1}-`:'')+`C${+m[1]+1} column`;
+    const ln=mesh.longLines&&mesh.longLines[+e.member.slice(4)]; return ln?(ln.kind==='purlin'?`purlin x = ${f(ln.x,2)} ft`:`${ln.kind} beam`):e.member; };
+  const elG=new Map(mesh.elements.map(e=>[e.id,name(e)])), set=new Set(loads);
+  RESULT_ROWS.forEach(r=>{ if(!set.has(r.load)) return; const k=elG.get(r.elem); if(!k) return;
+    const q=grp.get(k)||{My:[0,''],Mz:[0,''],Vz:[0,''],N:[0,'']};
+    [['My','momentY'],['Mz','momentZ'],['Vz','shearZ'],['N','axial']].forEach(([a,b])=>{ const v=Math.abs(r[b]||0); if(v>q[a][0]) q[a]=[v,r.load]; });
+    grp.set(k,q); });
+  return [...grp.entries()];
+}
 const rpNote=(text,warn)=>({type:'note', text, warn:!!warn});
 
 async function buildReportModel(){
@@ -3977,6 +4000,9 @@ async function buildReportModel(){
   const figGeom=rpFig(await rpSnap('plotGeom'),'Structure elevation (typical frame): sloped roof beam, columns and base supports'+(is3d?'; hinge circles mark member end releases.':'.'));
   const figMesh=rpFig(await rpSnap('plotMesh'),'Analysis model: nodes and elements.');
   const figGrav=rpFig(await rpSnap('plotGravity'),'Gravity load along the roof beam.');
+  let fig3D=null;
+  if(is3d){ const _c=threedCase; try{ threedCase='none'; draw3DFull(); if(typeof stopWindAnim==='function') stopWindAnim();
+    fig3D=rpFig(await rpSnap('plot3d',900,560),`3D structure: ${frameYs(s).length} frames, columns, eave beams${purlinXs(s).length?' and purlins':''}${releaseSummary3D(s).length?'; circles mark member end releases':''}.`); }catch(e){} threedCase=_c; }
   const windFigs=[];
   for(const wc of allW){ try{ drawWindInto('plotScratch', wc); }catch(e){}
     windFigs.push(rpFig(await rpSnap('plotScratch'), wc.long
@@ -4045,7 +4071,13 @@ async function buildReportModel(){
   ])});
 
   // ---- 3 Geometry ----
-  sections.push({title:'Geometry', subs:[{title:'Geometry derivation', key:'G-der', items:F([rpNote('Worked on the [[tab:geometry|Geometry tab]].'), ...rpDeriv('geomDerived','geo'), figGeom, figPlan])}]});
+  sections.push({title:'Geometry', subs:F([{title:'Geometry derivation', key:'G-der', items:F([rpNote('Worked on the [[tab:geometry|Geometry tab]].'), ...rpDeriv('geomDerived','geo'), figGeom, figPlan])},
+    is3d?{title:'3D structure', items:F([fig3D, {type:'table', caption:'Frames along the length: position from the front edge, tributary width, and each column base elevation / column length.',
+      head:['Frame','y (ft)','Tributary width (ft)',...g.colX.map((x,i)=>`C${i+1} (x = ${f(x,2)} ft): base el. / length (ft)`)],
+      rows:frameYs(s).map((y,j)=>[`F${j+1}`,rpN(y,2),rpN(frameTribs(s)[j],2),...g.colX.map((x,i)=>`${f(g.colBaseF[j][i],2)} / ${f(g.colHF[j][i],2)}`)]), wide:true},
+      {type:'kv', rows:[['Length (front edge to back edge)', `${f(length3D(s),2)} ft`],['Eave beams', `${s.longSect} along the low and high roof edges, full length`],
+        ['Purlins', purlinXs(s).length?`${s.purlinSect} at x = ${purlinXs(s).map(x=>f(x,2)).join(', ')} ft`:'none'],
+        ['Member end releases', releaseSummary3D(s).length?releaseSummary3D(s).join('; '):'none (continuous)']]}])}:null])});
 
   // ---- 4 Gravity ----
   sections.push({title:'Dead and snow loads', subs:[{title:'Gravity loads', key:'D-der', items:F([rpNote('Surface loads act on the horizontal projection (MIDAS bPROJ = YES); member self weight is added from the section areas and the steel density. Worked on the [[tab:gravity|Dead & Snow tab]].'),
@@ -4089,13 +4121,39 @@ async function buildReportModel(){
     let figFBD=null; try{ reactShowCase='__gov__'; const _a=reactAllFrames,_m=fbdShowMember; reactAllFrames=false; fbdShowMember=false; drawFBDInto('plotReact', midasData()); reactAllFrames=_a; fbdShowMember=_m;
       figFBD=rpFig(await rpSnap('plotReact'), `Column base free body${is3d?` (frame ${Math.min(resFrame,frameYs(s).length-1)+1})`:''}: governing support reactions on each column (envelope).`); }catch(e){}
     const peak=loads.map(L=>{ const rr=RESULT_ROWS.filter(r=>r.load===L); return {cells:[L,{t:uMom(Math.max(...rr.map(r=>Math.abs(r.momentY)))),n:true},{t:uForce(Math.max(...rr.map(r=>Math.abs(r.shearZ)))),n:true},{t:uForce(Math.max(...rr.map(r=>Math.abs(r.axial)))),n:true}], cls:/envelope/i.test(L)?'hi':''}; });
+    // the element key and the moment / shear diagrams of every case and combination, on the frame the Results tab shows
+    const fSel=is3d?Math.min(resFrame,frameYs(s).length-1):0, fTxt=is3d?` (frame ${fSel+1})`:'';
+    let figKey=null; try{ drawKeyDiagram(); figKey=rpFig(await rpSnap('plotKey'),`Element (boxed) and node numbering${fTxt}, as in the MIDAS model and the beam force table.`); }catch(e){}
+    const diagItems=[];
+    { const fmesh=resultsMesh(), gg=fmesh.geom, fEls=new Set(fmesh.elements.map(e=>e.id)); let gM=1e-9, gV=1e-9;
+      loads.forEach(L=>RESULT_ROWS.forEach(r=>{ if(r.load===L&&fEls.has(r.elem)){ gM=Math.max(gM,Math.abs(r.momentY)); gV=Math.max(gV,Math.abs(r.shearZ)); } }));
+      for(const L of loads){ const fig=await rpDiagFig([L],2.4/gM,2.4/gV,gg,`${L}${fTxt}: moment (green) and shear (orange), one scale for all the loads.`,true); if(fig) diagItems.push(fig);
+        diagItems.push({type:'table', head:[`${L}: member`,`M max / min (${uMomLbl()})`,`V max / min (${uForceLbl()})`,`N max / min (${uForceLbl()})`],
+          rows:memberStats(L).map(r=>[r.member,`${uMom(r.M.max)} / ${uMom(r.M.min)}`,`${uForce(r.V.max)} / ${uForce(r.V.min)}`,`${uForce(r.N.max)} / ${uForce(r.N.min)}`])}); } }
+    // 3D: the whole structure (envelope moment diagram on every member) and each frame's envelope moment
+    const envL=envelopeLoads(), wholeItems=[];
+    if(is3d){
+      const _q=document.getElementById('wsQty').value, _v=document.getElementById('wsVals').value, _l=wsLoad, _m=wsMode;
+      try{ document.getElementById('wsQty').value='momentY'; document.getElementById('wsVals').value='peak'; wsLoad=envL.length?'__env__':loads[0]; wsMode='diagram'; drawWhole(mesh);
+        wholeItems.push(rpFig(await rpSnap('plotWhole',900,600),`Whole structure: strong-axis moment (Moment-y) on every member, ${envL.length?'envelope of the strength combinations':loads[0]}.`)); }catch(e){}
+      document.getElementById('wsQty').value=_q; document.getElementById('wsVals').value=_v; wsLoad=_l; wsMode=_m;
+      const _rf=resFrame;
+      try{ if(envL.length){ let gM=1e-9; RESULT_ROWS.forEach(r=>{ if(envL.includes(r.load)) gM=Math.max(gM,Math.abs(r.momentY)); });
+        for(let j=0;j<frameYs(s).length;j++){ resFrame=j; wholeItems.push(await rpDiagFig(envL,2.4/gM,1,resultsMesh().geom,`Frame ${j+1}: envelope moment, max and min (darker), one scale for all frames.`,false)); } } }catch(e){}
+      resFrame=_rf;
+    }
+    const peaks=rpMemberPeaks(mesh, envL.length?envL:loads);
     sections.push({title:'Analysis results', subs:[
       {title:'Governing base reactions', key:'R-gov', items:F([rpNote(`From the ${src}, read at each column base element. Sign convention: N + = compression; V and M in the frame plane${lng?'; V_long and M_long along the canopy length (column weak axis), from the wind along the length':''}. Each value is the one of largest magnitude over the envelope, with its sign; the components need not act together.`),
         stale?rpNote('The results are out of date: re-run the analysis.',true):null,
         {type:'table', head:['Support',`N (${uForceLbl()})`,'combination',`V (${uForceLbl()})`,'combination',`M (${uMomLbl()})`,'combination'].concat(lng?[`V_long (${uForceLbl()})`,`M_long (${uMomLbl()})`]:[]), rows:govRows, wide:true}, figFBD])},
       {title:'Reactions by load case and combination', items:[{type:'table', lazy:true, title:`Reactions at every column base, ${loads.length} cases and combinations`, head:['Load / combination','Support',`N (${uForceLbl()})`,`V (${uForceLbl()})`,`M (${uMomLbl()})`].concat(lng?[`V_long (${uForceLbl()})`,`M_long (${uMomLbl()})`]:[]), rows:caseRows, wide:true}]},
-      {title:'Member force peaks', items:[{type:'table', lazy:loads.length>20, title:'Peak |M|, |V|, |N| over all members, per case', head:['Load / combination',`|M|max (${uMomLbl()})`,`|V|max (${uForceLbl()})`,`|N|max (${uForceLbl()})`], rows:peak},
-        rpNote('Member forces and diagrams for every member and combination: [[tab:results|Results tab]] (3D view: moment and shear diagrams on the whole structure).')]}]});
+      {title:'Member forces by member', items:[{type:'table', caption:`Largest member forces of each member group, ${envL.length?'envelope of the strength combinations':'all loads'}, with the governing load: strong-axis moment M_y, weak-axis moment M_z${is3d?' (eave beams and purlins bend about it under wind across the frames)':''}, shear V_z and axial N.`,
+          head:['Member',`|M_y| (${uMomLbl()})`,'load',`|M_z| (${uMomLbl()})`,`|V_z| (${uForceLbl()})`,`|N| (${uForceLbl()})`,'load (N)'],
+          rows:peaks.map(([k,q])=>[k,{t:uMom(q.My[0]),n:true},q.My[1],{t:uMom(q.Mz[0]),n:true},{t:uForce(q.Vz[0]),n:true},{t:uForce(q.N[0]),n:true},q.N[1]]), wide:true},
+        {type:'table', lazy:loads.length>20, title:'Peak |M|, |V|, |N| over all members, per case', head:['Load / combination',`|M|max (${uMomLbl()})`,`|V|max (${uForceLbl()})`,`|N|max (${uForceLbl()})`], rows:peak}]},
+      ...(is3d&&wholeItems.filter(Boolean).length?[{title:'Whole structure (3D)', items:F([rpNote('Member forces of every frame, eave beam and purlin: [[tab:results|Results tab]] (whole-structure view; coloured members or diagrams, any load).'), ...wholeItems])}]:[]),
+      {title:'Moment and shear diagrams'+fTxt, items:F([rpNote(`The ${RES_SRC==='app'?'analysis':'MIDAS'} node values plotted along the members (straight between nodes), every case and combination, each with its members' max / min.${is3d?' The frame is the one selected on the Results tab; choose another there and refresh the report for its diagrams.':''}`), figKey, ...diagItems])}]});
   }
 
   // ---- 9 Anchorage ----
