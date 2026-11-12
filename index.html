@@ -2128,8 +2128,7 @@ function buildMesh(s){
   // --- column positions ---
   const colX=g.colX;                     // array of column x-positions
   // --- beam: split at columns and load points so they land on nodes ---
-  let beamStations=[0, g.C1x, g.C3x, g.C2x, g.L, ...colX];
-  beamStations = [...new Set(beamStations.map(x=>+x.toFixed(6)))].filter(x=>x>=-1e-6&&x<=g.L+1e-6).sort((a,b)=>a-b);
+  let beamStations=beamStationList([0, g.L, ...colX], [g.C1x, g.C3x, g.C2x], g.L);
   members.beam=[];
   for(let i=0;i<beamStations.length-1;i++){
     meshMember(beamStations[i],g.yAt(beamStations[i]),beamStations[i+1],g.yAt(beamStations[i+1]),2,'beam');
@@ -2436,6 +2435,17 @@ function _buildMCT2D(s){
 // purlin position (section 4), from the front roof edge (y = 0) to the back edge (y = length3D), and
 // share nodes with the frames where they cross. Elements carry .frame (index, or null
 // for longitudinal members) so a single frame can be viewed like the 2D mesh.
+// Roof-beam (rafter) stations: the member points (tips, columns, purlins and eaves) exactly, plus the
+// quarter points L/4, L/2, 3L/4 unless one falls within STATION_TOL of a member point. A quarter
+// point a hair away from a purlin made a sliver of rafter (e.g. 0.0003 ft, cut into mesh_minN
+// elements) that left near-coincident nodes and an ill-conditioned model.
+const STATION_TOL=0.01;   // ft (about 1/8 in)
+function beamStationList(primary, secondary, L){
+  const ok=x=>x>=-1e-6 && x<=L+1e-6;
+  const prim=[...new Set(primary.filter(ok).map(x=>+x.toFixed(6)))];
+  const sec=secondary.filter(ok).map(x=>+x.toFixed(6)).filter(x=>prim.every(p=>Math.abs(p-x)>STATION_TOL));
+  return [...new Set(prim.concat(sec))].sort((a,b)=>a-b);
+}
 function buildMesh3D(s){
   const m=computeModel(s), g=m.geom;
   const nodes=[]; const nodeKey=new Map();
@@ -2483,8 +2493,7 @@ function buildMesh3D(s){
     }
   }
   const colX=g.colX, ys=frameYs(s), L3=length3D(s);
-  let beamStations=[0, g.C1x, g.C3x, g.C2x, g.L, ...colX, ...purlinXs(s)];
-  beamStations=[...new Set(beamStations.map(x=>+x.toFixed(6)))].filter(x=>x>=-1e-6&&x<=g.L+1e-6).sort((a,b)=>a-b);
+  let beamStations=beamStationList([0, g.L, ...colX, ...purlinXs(s)], [g.C1x, g.C3x, g.C2x], g.L);
   const _scr=m.loads||{};
   const screenOn=(s.screen!=='none') && ((_scr.screenH||0)>1e-6);
   const frames=ys.map((y,j)=>{
@@ -6853,6 +6862,9 @@ function validateInputs(){
     if(purlinXs(s).length && !sectProps(s.purlinSect).found) msgs.push(`Purlin section "${s.purlinSect}" not in the AISC database.`);
     const nBadP=(s.purlins||[]).length-purlinXs(s).length;
     if(nBadP>0) msgs.push(`${nBadP} purlin position${nBadP>1?'s are':' is'} outside the roof (0 to ${f(totalLength(s),2)} ft) or duplicated and ignored.`);
+    // a purlin a hair off a column line or another purlin leaves a sliver of rafter between them
+    { const pts=[0,totalLength(s),...columnXs(s),...purlinXs(s)].sort((a,b)=>a-b);
+      for(let i=1;i<pts.length;i++){ const d=pts[i]-pts[i-1]; if(d>1e-6 && d<0.05){ msgs.push(`Roof points at x = ${f(pts[i-1],3)} and ${f(pts[i],3)} ft are only ${f(d*12,2)} in apart (purlin, column line or roof tip). Move the purlin onto the other point or at least 1 in away: a sliver of rafter between them gives near-coincident nodes and an ill-conditioned model.`); break; } } }
   }
   // ASCE 7-16 Fig. 27.3-4 is stated for 0.25 <= h/L <= 1.0, with L the horizontal roof width across the frame
   { const h=roofMeanHeight(s), Lw=totalLength(s);
