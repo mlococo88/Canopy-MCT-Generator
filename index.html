@@ -7,6 +7,8 @@
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]']]},svg:{fontCache:'global'},startup:{typeset:false}};</script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <!-- Firebase (modular v10 via gstatic CDN). Exposes window.CloudAPI for the main script. -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
@@ -754,13 +756,12 @@
   <div class="onecol">
     <div class="toolbar">
       <button class="btn primary" id="reportBtn">↻ Refresh report</button>
-      <button class="btn primary" id="printReportBtn">⬇ Download Report (PDF)</button>
+      <button class="btn primary" id="printReportBtn" title="Print the whole report (every section open) with a running header and page numbers; choose Save as PDF in the print dialog">⬇ Print / PDF report</button>
       <button class="btn primary" id="xlsxBtn" title="Formal submittal workbook with live Excel formulas">⬇ Excel calc (.xlsx)</button>
       <button class="btn primary" id="dxfBtn" title="Plan set for AutoCAD: framing plan, elevations, base layout, loads">⬇ DXF drawings</button>
-      <button class="btn" id="downloadReportBtn">Download as HTML</button>
-      <span class="hint" style="margin-left:auto">The report refreshes automatically when you open this tab. "Download Report (PDF)" opens your browser's print dialog — choose "Save as PDF" as the destination.</span>
+      <span class="hint" style="margin-left:auto">The report rebuilds when you open this tab. Navigate with the contents tree, search, expand or collapse sections; "Print / PDF report" prints every section with a running header and page numbers (choose Save as PDF).</span>
     </div>
-    <div id="reportInline" style="background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px">
+    <div id="reportInline" style="background:#fff;border:1px solid var(--line);border-radius:6px;padding:0">
       <div class="placeholder">Generating report…</div>
     </div>
   </div>
@@ -3828,22 +3829,8 @@ async function buildCalcWorkbook(s, A, meta, H){
   return wb;
 }
 
-// Report figures are already base64 PNGs in the built report, so they are
-// scraped rather than re-rendered.
-function xlCollectFigures(){
-  const host=document.getElementById('reportInline');
-  if(!host) return [];
-  const figs=[];
-  host.querySelectorAll('figure').forEach(fg=>{
-    const img=fg.querySelector('img');
-    if(!img||!img.src||img.src.indexOf('data:image')!==0) return;
-    const cap=fg.querySelector('figcaption');
-    const nw=img.naturalWidth||720, nh=img.naturalHeight||420;
-    const w=Math.min(660,nw), h=Math.round(nh*(w/nw));
-    figs.push({title:cap?cap.textContent.trim():('Figure '+(figs.length+1)),dataUrl:img.src,w:w,h:h});
-  });
-  return figs;
-}
+// The figures of the last built report (buildReportModel keeps them), for the Excel calc.
+function xlCollectFigures(){ return REPORT.figs.slice(); }
 
 // reaction values in the selected result units, rounded to the shown decimals
 function xlRF(v){ const u=ru().F; return +(v*u.k).toFixed(u.d); }
@@ -3929,585 +3916,245 @@ function projMetaHTML(s){
   ).join('')+`</div>`;
 }
 
-async function buildReport(){
-  if(_reportBuilding) return;          // avoid overlapping builds (tab open + click)
-  _reportBuilding=true;
-  const _host0=document.getElementById('reportInline');
-  if(_host0 && !_host0.dataset.built) _host0.innerHTML='<div class="placeholder">Generating report…</div>';
+// ============================================================================
+// REPORT — the calculation report on All-Structural's shared report viewer (window.SharedReport,
+// shared/report.js, with window.SharedSteps, shared/steps.js; both embedded by tools/sync-bpad.py), like the
+// Report tabs of the All-Structural tools: title block, references, contents and navigation tree, search,
+// collapse / expand, "see §" links, printing with a running header and page numbers.
+// The worked steps are the derivations the Geometry, Dead & Snow and Wind tabs show (DERIV), so the report and
+// the tabs cannot drift. Display only: nothing here is computed for design.
+// ============================================================================
+const DERIV={};   // the derivation items each tab rendered last: geomDerived, gravDerived, windDerived
+const REPORT={api:null, closed:new Set(), figs:[], building:false, model:null};
+// a derivation label / note as plain text: inline TeX \( … \) through SharedSteps.toText, HTML tags removed
+function rpPlain(s){
+  s=String(s==null?'':s);
+  const T=t=>(window.SharedSteps?SharedSteps.toText(t):t);
+  return s.replace(/\\\((.*?)\\\)/g,(m,t)=>T(t)).replace(/<sub>(.*?)<\/sub>/g,'_$1').replace(/<sup>(.*?)<\/sup>/g,'^$1')
+    .replace(/<br\s*\/?>/g,' ').replace(/<[^>]+>/g,'').replace(/&nbsp;/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/\s+/g,' ').trim();
+}
+// the derivation items of a tab as steps items, one per heading (a topic each)
+function rpDeriv(key, scope){
+  const out=[]; let cur=null, n=0, no=0;
+  (DERIV[key]||[]).forEach(it=>{
+    if(it.h){ cur={type:'steps', scope, steps:[], topic:{title:rpPlain(it.h), no:++no}}; out.push(cur); return; }
+    if(!it.tex) return;
+    if(!cur){ cur={type:'steps', scope, steps:[]}; out.push(cur); }
+    cur.steps.push({id:'s'+(++n), label:rpPlain(it.label)||'—', sym:'', eq:it.tex, sub:'', value:null, unit:'', d:2, ref:'', note:rpPlain(it.note)});
+  });
+  return out.filter(x=>x.steps.length);
+}
+// a plot as a report figure: a PNG snapshot (Plotly) or the plot's own SVG, kept for the Excel calc too
+async function rpSnap(id,w,h){
+  const el=document.getElementById(id); if(!el) return null;
+  const sv=el.querySelector(':scope > svg[viewBox]');
   try{
-  const s=state, A=computeModel(s), g=A.geom, ld=A.loads, {text,mesh}=buildMCT(s);
-  const wcases=A.loads.wcases, lcases=A.loads.lcases||[], allW=wcases.concat(lcases);
-  const nCombo=lrfdCombos(allW).length, is3d=is3D(s);
-  const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  const fld=(label,val,unit='')=>`<tr><td>${label}</td><td>${val}${unit?' '+unit:''}</td></tr>`;
-  const today=new Date().toISOString().slice(0,10);
-  const thetaDeg=g.theta*180/Math.PI;
+    if(sv){ const vb=sv.getAttribute('viewBox').split(/[\s,]+/).map(Number); return {url:await svgToPng(sv,2), w:vb[2]||760, h:vb[3]||440}; }
+    if(typeof Plotly==='undefined') return null;
+    const url=await Promise.race([Plotly.toImage(el,{format:'png',width:w||760,height:h||440,scale:2}), new Promise(r=>setTimeout(()=>r(null),4000))]);
+    return url?{url, w:w||760, h:h||440}:null;
+  }catch(e){ return null; }
+}
+function rpFig(sn, caption){
+  if(!sn) return null;
+  REPORT.figs.push({title:caption, dataUrl:sn.url, w:Math.min(660,sn.w), h:Math.round(sn.h*Math.min(660,sn.w)/sn.w)});
+  return {type:'figure', caption, svg:`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sn.w} ${sn.h}" style="width:100%;max-width:${Math.min(760,sn.w)}px;height:auto;display:block;margin:0 auto"><image href="${sn.url}" x="0" y="0" width="${sn.w}" height="${sn.h}"/></svg>`};
+}
+const rpN=(v,d)=>({t:isFinite(v)?f(v,d==null?2:d):'—', n:true});
+const rpNote=(text,warn)=>({type:'note', text, warn:!!warn});
 
-  // ---- capture Plotly snapshots as PNG (need each plot to be rendered) ----
-  if(typeof Plotly==='undefined'){
-    document.getElementById('reportInline').innerHTML='<div class="placeholder">Plotly library is still loading (or blocked by the network). Open this tab again in a moment to generate the report.</div>';
-    _reportBuilding=false;
-    return;
-  }
-  // ensure all plots have been drawn at least once
-  try{ drawGeom(); drawMeshPlot(mesh); drawGravity(); drawWind(); }catch(e){}
-  async function snap(id,w,h){
-    const el=document.getElementById(id);
-    if(!el) return null;
-    const sv=el.querySelector(':scope > svg[viewBox]');
-    if(sv){ try{ return await svgToPng(sv,2); }catch(e){ return null; } }
-    try{
-      const img=Plotly.toImage(el,{format:'png',width:w||760,height:h||440,scale:2});
-      const timeout=new Promise(res=>setTimeout(()=>res(null),4000));
-      return await Promise.race([img,timeout]);   // null if it stalls past 4s
-    }catch(e){ return null; }
-  }
-  let imgPlan=null;
-  if(is3D(s)){ try{ drawPlan(); const pe=document.getElementById('plotPlan'), r=(parseFloat(pe.style.height)||460)/(pe.clientWidth||900);
-    imgPlan=await snap('plotPlan',760,Math.round(Math.max(300,Math.min(700,760*r)))); }catch(e){} }
-  const imgGeom=await snap('plotGeom'), imgMesh=await snap('plotMesh'),
-        imgGrav=await snap('plotGravity');
-  // snapshot ALL FOUR wind cases by rendering each into the offscreen scratch plot
-  const windImgs=[], longImgs=[];
-  for(const wc of wcases){
-    try{ drawWindInto('plotScratch', wc); }catch(e){}
-    windImgs.push({wc, img: await snap('plotScratch')});
-  }
-  for(const lc of lcases){
-    try{ drawWindInto('plotScratch', lc); }catch(e){}
-    longImgs.push({lc, img: await snap('plotScratch')});
-  }
-  let imgKey=null; const comboImgs=[];
-  if(RESULT_ROWS.length){
-    try{ drawResultsPlot(); }catch(e){}
-    imgKey=await snap('plotKey');
-    // render each combo's M+V overlay into the scratch div and snapshot it
-    const fmesh=resultsMesh(); const gg=fmesh.geom, fEls=new Set(fmesh.elements.map(e=>e.id));
-    const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
-    let gMaxM=1e-9,gMaxV=1e-9;
-    loads.forEach(ld=>RESULT_ROWS.filter(r=>r.load===ld && fEls.has(r.elem)).forEach(r=>{gMaxM=Math.max(gMaxM,Math.abs(r.momentY));gMaxV=Math.max(gMaxV,Math.abs(r.shearZ));}));
-    const kM=2.4/gMaxM,kV=2.4/gMaxV;
-    for(const ld of loads){
-      const base=structureTraces(gg,s).map(t=>{
-        if(!t.line) return Object.assign({},t,{opacity:0.4});
-        return Object.assign({},t,{line:Object.assign({},t.line,{width:1.5,color:'#c4ced4'}),opacity:0.6});
-      });
-      const rM=diagramTracesFor(ld,'momentY',COL.moss,'rgba(74,107,34,0.16)',kM);
-      const rV=diagramTracesFor(ld,'shearZ',COL.rust,'rgba(179,80,45,0.14)',kV);
-      const layout=BASE_LAYOUT({shapes:[gradeShape(gg,s,-3,gg.L+3)],margin:{l:14,r:12,t:8,b:20},
-        xaxis:{visible:false,scaleanchor:'y',scaleratio:1},yaxis:{visible:false}});
-      try{ Plotly.react('plotScratch',base.concat(rM.traces,rV.traces),layout,{staticPlot:true}); }catch(e){}
-      comboImgs.push({ld, img: await snap('plotScratch'), stats: memberStats(ld)});
-    }
-  }
-  const imgTag=(d,cap)=>d?`<figure><img src="${d}" style="width:100%;max-width:720px;border:1px solid #d4cfc4;border-radius:4px"><figcaption>${cap}</figcaption></figure>`:'';
+async function buildReportModel(){
+  const s=state, A=computeModel(s), g=A.geom, ld=A.loads, {mesh}=buildMCT(s), is3d=is3D(s);
+  const wcases=ld.wcases, lcases=ld.lcases||[], allW=wcases.concat(lcases), combos=lrfdCombos(allW);
+  const thetaDeg=g.theta*180/Math.PI, today=new Date().toISOString().slice(0,10);
+  REPORT.figs=[];
+  // the tabs' derivations and plots, drawn now so the report has the current ones
+  try{ drawGeom(); drawMeshPlot(mesh); drawGravity(); drawWind(); }catch(e){ console.warn(e); }
+  const F=x=>x.filter(Boolean);
+  let figPlan=null;
+  if(is3d){ try{ drawPlan(); const pe=document.getElementById('plotPlan'), r=(parseFloat(pe.style.height)||460)/(pe.clientWidth||900);
+    figPlan=rpFig(await rpSnap('plotPlan',760,Math.round(Math.max(300,Math.min(700,760*r)))),'Plan: frames and columns, eave beams, purlins and plan dimensions.'); }catch(e){} }
+  const figGeom=rpFig(await rpSnap('plotGeom'),'Structure elevation (typical frame): sloped roof beam, columns and base supports'+(is3d?'; hinge circles mark member end releases.':'.'));
+  const figMesh=rpFig(await rpSnap('plotMesh'),'Analysis model: nodes and elements.');
+  const figGrav=rpFig(await rpSnap('plotGravity'),'Gravity load along the roof beam.');
+  const windFigs=[];
+  for(const wc of allW){ try{ drawWindInto('plotScratch', wc); }catch(e){}
+    windFigs.push(rpFig(await rpSnap('plotScratch'), wc.long
+      ? `${wc.name}: wind along the length, entering at the ${wc.gamma===90?'front':'back'} edge. Stepped Fig. 27.3-7 zone pressure${loadViaPurlins(s)?' (carried by the purlins and eave beams)':'; dashed: the strip-averaged pressure each frame receives'}.`
+      : `${wc.name}: ${wc.gamma===180?'wind up-slope toward the high side':'wind toward the low side'}. C_NW = ${f(wc.cnw,2)}, C_NL = ${f(wc.cnl,2)}; p_lower = ${f(wc.pLower,1)} psf, p_upper = ${f(wc.pUpper,1)} psf.`)); }
+  try{ drawWind(); }catch(e){}
 
-  // ---- section + weight quantities for the report (geometry only, no solver) ----
-  const _bp=sectProps(s.beamSect), _cp=sectProps(s.colSect);
-  const _Abeam=_bp.A/144, _Acol=_cp.A/144;          // in^2 -> ft^2
-  const _Lbeam=g.L/g.cos;
-  const _W_D=(s.DL*s.B_trib)*g.L/1000;              // kip
-  const _W_S=(s.SL*s.B_trib)*g.L/1000;              // kip
-  const _stepped=g.colBase.some(z=>Math.abs(z-s.El_base)>1e-9);
-  const _Lcols=_stepped?g.colH.reduce((a,b)=>a+b,0):nCols(s)*s.H_col;   // total column length (ft)
-  const _W_sw=(_Abeam*_Lbeam + _Acol*_Lcols)*s.density_pcf/1000; // kip
-  const R={Abeam:_Abeam, Acol:_Acol, W_D:_W_D, W_S:_W_S, W_sw:_W_sw};
-
-  // ---- input parameters table ----
-  const inputRows=[
-    ['Configuration', `${nCols(s)} column${nCols(s)>1?'s':''}${nCols(s)===1?' (cantilever)':', '+s.baseFixity+' base'}`],
-    ['Left overhang $L_{OH,L}$', s.L_OH+' ft'],['Right overhang $L_{OH,R}$', s.R_OH+' ft'],
-    ['Roof slope $m$', s.slope+' (rise/run)'],
-    ['Column height $H$', s.H_col+' ft'],
-    ['Column base elevation(s)', _stepped?g.colBase.map((z,i)=>`Col ${i+1}: ${f(z,2)} ft`).join(', '):`${f(s.El_base,2)} ft (all columns)`],['Bay spacing(s)', nCols(s)>1?baySpans(s).map(b=>b+' ft').join(', '):'—'],
-    ['Tributary width $B$', s.B_trib+' ft'],
-    ['Beam section', `${s.beamSect} (${sectProps(s.beamSect).shape==='H'?'W-shape':'HSS'})`],['Column section', `${s.colSect} (${sectProps(s.colSect).shape==='H'?'W-shape':'HSS'})`],
-    ['Elastic modulus $E$', s.E_ksi+' ksi'],['Steel density $\\gamma$', s.density_pcf+' pcf'],['Poisson $\\nu$', s.poisson],
-    ['Mesh max length / min elements', `${s.mesh_max} ft / ${Math.max(1,Math.round(s.mesh_minN||1))} per member`],
-    ['Dead load $D$', s.DL+' psf'],['Snow load $S$', s.SL+' psf'],
-    ['Velocity pressure $q_h$', s.q_h+' psf'],['Gust factor $G$', s.G],['Wind flow', s.flow==='clear'?'Clear':'Obstructed'],
-    ['Fascia depth $d_f$ × press.', `${s.d_roof} ft × ${f(s.p_lat,1)} psf`+(s.fasciaWindMode==='calc'?(s.fasciaCfMethod==='sign'?' (§29.3 sign)':' (§29.4 flat)'):'')],['Column wind press.', `${f(s.p_col,1)} psf`+(s.colWindMode==='calc'?' (§29.4)':'')],
-    ['Windscreen', s.screen==='none'?'none':`${s.screen}, ${f(s.p_screen,1)} psf`+(s.screenWindMode==='calc'?` (ASCE 29.3, ${f(s.scrPctOpen||0,0)}% open)`:'')+(s.screen==='partial'?`, el ${s.scr_bot}–${s.scr_top} ft`:'')]
-  ].map(([l,v])=>fld(l,v)).join('');
-
-  // ---- GEOMETRY derivation ----
-  const L=g.L, cosT=g.cos, sinT=g.sin, Lbeam=L/cosT;
-  const _bays=baySpans(s);
-  const _baySum=_bays.reduce((a,b)=>a+b,0);
-  const _bayTerm = _bays.length ? ` + (${_bays.map(b=>f(b,2)).join(' + ')})` : '';
-  const _bayLbl = _bays.length ? ` + \\sum L_{bay}` : '';
-  const geomMath=`
-  <p>The canopy is a mono-slope (single-pitch) roof. All geometry derives from the overhang lengths, bay spacing(s), slope, and column height. Working in the vertical plane with horizontal axis \\(x\\) (along the canopy) and vertical axis \\(z\\):</p>
-  <p>Plan span from tip to tip = left overhang + ${_bays.length?`the ${_bays.length} bay spacing${_bays.length>1?'s':''} between columns`:'(no interior bays)'} + right overhang:</p>
-  \\[ L = L_{OH,L}${_bayLbl} + L_{OH,R} = ${f(s.L_OH,2)}${_bayTerm} + ${f(s.R_OH,2)} = ${f(L,3)}\\ \\text{ft} \\]
-  <p>Roof angle from the slope (rise over run):</p>
-  \\[ \\theta = \\tan^{-1}(m) = \\tan^{-1}(${s.slope}) = ${f(thetaDeg,3)}^{\\circ},\\quad \\cos\\theta = ${f(cosT,4)},\\ \\sin\\theta = ${f(sinT,4)} \\]
-  <p>The left (low) column top sits at the column height; the roof rises to the right at slope \\(m\\). Elevation of the roof at any plan position \\(x\\) (measured from the left tip):</p>
-  \\[ z(x) = z_{0} + m\\,x,\\qquad z_{0} = (\\text{El}_{base}+H) - m\\,L_{OH,L} = ${f(g.yStart,3)}\\ \\text{ft} \\]
-  <p>Key elevations:</p>
-  \\[ z_{tip,L}=${f(g.yStart,3)},\\quad z_{col,L}=${f(g.yCol,3)},\\quad z_{col,N}=${f(g.yAt(g.colX[g.colX.length-1]),3)},\\quad z_{tip,R}=${f(g.yEnd,3)}\\ \\text{ft} \\]
-  <p>Tall (high-side) column height. The high column top follows the roof; its base sits at the same elevation, so its height is the low column height plus the roof rise over the run from the low to the high column:</p>
-  \\[ H_{tall} = H + m\\,(x_{col,N}-x_{col,1}) = ${f(s.H_col,2)} + ${s.slope}\\cdot${f(g.colX[g.colX.length-1]-g.colX[0],2)} = ${f(s.H_col + s.slope*(g.colX[g.colX.length-1]-g.colX[0]),3)}\\ \\text{ft} \\]
-  ${_stepped?`<p>The column bases are stepped rather than all at the datum (El \\(${f(s.El_base,2)}\\) ft). The roof position above is unchanged; each column runs from its own base up to the roof beam, so its actual length is the roof elevation at the column minus its base elevation:</p>
-  \\[ ${g.colX.map((x,i)=>`H_{${i+1}} = ${f(g.yAt(x),2)} - (${f(g.colBase[i],2)}) = ${f(g.colH[i],3)}`).join(',\\quad ')}\\ \\text{ft} \\]`:''}
-  <p>True (sloped) roof length, used for surface loads and member meshing:</p>
-  \\[ L_{beam} = \\frac{L}{\\cos\\theta} = \\frac{${f(L,3)}}{${f(cosT,4)}} = ${f(Lbeam,3)}\\ \\text{ft} \\]
-  `;
-
-  // ---- AREAS / SELF WEIGHT ----
-  const beamP=sectProps(s.beamSect), colP=sectProps(s.colSect);
-  const swMath=`
-  <p>Cross-sectional areas from the AISC database (converted in²→ft²):</p>
-  \\[ A_{beam}\\,(${beamP.desig}) = \\frac{${beamP.A}}{144} = ${f(R.Abeam,4)}\\ \\text{ft}^2,\\qquad
-     A_{col}\\,(${colP.desig}) = \\frac{${colP.A}}{144} = ${f(R.Acol,4)}\\ \\text{ft}^2 \\]
-  <p>Self weight (added automatically to the dead-load case in MIDAS):</p>
-  ${_stepped?`\\[ W_{sw} = \\gamma\\left(A_{beam}L_{beam} + A_{col}\\textstyle\\sum H_i\\right)
-     = ${s.density_pcf}\\left(${f(R.Abeam,4)}\\cdot${f(Lbeam,2)} + ${f(R.Acol,4)}\\cdot${f(_Lcols,2)}\\right)`:`\\[ W_{sw} = \\gamma\\left(A_{beam}L_{beam} + ${nCols(s)}\\,A_{col}H\\right)
-     = ${s.density_pcf}\\left(${f(R.Abeam,4)}\\cdot${f(Lbeam,2)} + ${nCols(s)}\\cdot${f(R.Acol,4)}\\cdot${s.H_col}\\right)`}
-     = ${f(R.W_sw*1000,1)}\\ \\text{lbf} \\]
-  <p class="note-sm">Equivalently as line weights (\\(\\gamma A\\), consistent with the MIDAS self-weight basis): ${beamP.desig} = ${f(consistentPlf(beamP.desig,s.density_pcf),2)} plf, ${colP.desig} = ${f(consistentPlf(colP.desig,s.density_pcf),2)} plf.</p>
-  `;
-
-  // ---- GRAVITY LOADS ----
-  const wDLft=s.DL*s.B_trib, wSLft=s.SL*s.B_trib;
-  const gravMath=`
-  <p>Dead and snow are surface pressures over the tributary width \\(B\\), applied as vertical line loads on the roof beam. They are defined over the <b>horizontal projection</b> (MCT <code>bPROJ=YES</code>), consistent with the ASCE snow definition, so the line-load value is per foot of plan length:</p>
-  \\[ w_D = D\\cdot B = ${s.DL}\\cdot${s.B_trib} = ${f(wDLft,1)}\\ \\text{lbf/ft},\\qquad
-     w_S = S\\cdot B = ${s.SL}\\cdot${s.B_trib} = ${f(wSLft,1)}\\ \\text{lbf/ft} \\]
-  <p>Total gravity resultants over the plan span (applied vertically, global Z):</p>
-  \\[ W_D = w_D\\,L = ${f(R.W_D*1000,0)}\\ \\text{lbf} = ${f(R.W_D,2)}\\ \\text{k},\\qquad
-     W_S = w_S\\,L = ${f(R.W_S*1000,0)}\\ \\text{lbf} = ${f(R.W_S,2)}\\ \\text{k} \\]
-  <p class="note-sm">Because the loads are projected, MIDAS distributes the same total whether the roof is flat or pitched; the per-foot-of-slope intensity is automatically \\(w\\cos\\theta\\). Self weight (below) follows the actual member length.</p>
-  <p>Distribution to ${nCols(s)} support${nCols(s)>1?'s':''} is computed by the MIDAS analysis (Section 6), which captures continuity over multiple columns.</p>
-  `;
-
-  // ---- WIND C_N determination ----
-  const flow=s.flow, qhG=s.q_h*s.G;
-  // find bracketing table angles
-  let a0=CN_ANGLES[0],a1=CN_ANGLES[0];
-  for(let i=0;i<CN_ANGLES.length-1;i++){if(thetaDeg>=CN_ANGLES[i]&&thetaDeg<=CN_ANGLES[i+1]){a0=CN_ANGLES[i];a1=CN_ANGLES[i+1];break;}}
-  const tInterp=(a1===a0)?0:(thetaDeg-a0)/(a1-a0);
-  const windCaseDetail=wcases.map(w=>{
-    const v0=CN_TABLE[a0][w.kase][String(w.gamma)][flow], v1=CN_TABLE[a1][w.kase][String(w.gamma)][flow];
-    const windwardSide = (w.gamma===180)?'lower (left)':'upper (right)';
-    return `<tr><td>${w.name}</td><td>${windwardSide}</td><td>${v0[0].toFixed(2)} / ${v1[0].toFixed(2)}</td><td>${w.cnw.toFixed(3)}</td>
-      <td>${v0[1].toFixed(2)} / ${v1[1].toFixed(2)}</td><td>${w.cnl.toFixed(3)}</td>
-      <td>${w.pLower.toFixed(1)}</td><td>${w.pUpper.toFixed(1)}</td></tr>`;
-  }).join('');
-  // ---- 3D structure: frame layout and wind along the length ----
-  let frame3DMath='', long3DMath='';
-  if(is3d){
-    const ys=frameYs(s), tribs=frameTribs(s), sp=frameSpans(s), L3=length3D(s);
-    frame3DMath=`
-  <h3>2.1 3D structure — frames along the length</h3>
-  <p>The frame above is repeated at ${ys.length} positions along the canopy length (global Y). The frames are tied together by eave beams (${esc(s.longSect)}) along the low and high roof edges${purlinXs(s).length?` and by ${purlinXs(s).length} purlins`:''}. These members cantilever past the end frames to the front and back overhangs. Every column base is fixed, and the columns act as cantilevers for wind along the length.</p>
-  \\[ L_Y = L_{OH,F} + \\textstyle\\sum s_k + L_{OH,B} = ${f(s.OH_front,2)} + (${sp.map(b=>f(b,2)).join(' + ')}) + ${f(s.OH_back,2)} = ${f(L3,3)}\\ \\text{ft} \\]
-  <p>Each frame carries roof load from half of each adjacent bay. The end frames also carry the front or back overhang:</p>
-  <table class="rpt"><thead><tr><th>Frame</th><th>y (ft)</th><th>Tributary width B<sub>j</sub> (ft)</th><th>w<sub>D</sub> (lbf/ft)</th><th>w<sub>S</sub> (lbf/ft)</th></tr></thead><tbody>
-  ${ys.map((y,j)=>`<tr><td>F${j+1}</td><td>${f(y,2)}</td><td>${f(tribs[j],2)}</td><td>${f(s.DL*tribs[j],0)}</td><td>${f(s.SL*tribs[j],0)}</td></tr>`).join('')}
-  </tbody></table>
-  <p class="note-sm">\\(\\sum B_j = ${f(tribs.reduce((a,b)=>a+b,0),2)}\\) ft \\(= L_Y\\), so the whole roof area is carried. The single-frame derivations in this report use the governing (largest) tributary width B = ${f(s.B_trib,2)} ft. The MCT applies each frame\u2019s own B<sub>j</sub>.</p>`
-    + (()=>{ const Bz=g.colBaseF, Hc=g.colHF; if(!Bz.some(r=>r.some((z,i)=>Math.abs(z-Bz[0][i])>1e-9))) return '';
-      return `<p>Column base elevations differ between frames. Each column runs from its own base to the roof beam. The single-frame figures and derivations above show frame 1:</p>
-  <table class="rpt"><thead><tr><th>Frame</th>${g.colX.map((x,i)=>`<th>Col. ${dxfLetter(i)} base / length (ft)</th>`).join('')}</tr></thead><tbody>
-  ${Bz.map((r,j)=>`<tr><td>F${j+1}</td>${r.map((z,i)=>`<td>${f(z,2)} / ${f(Hc[j][i],2)}</td>`).join('')}</tr>`).join('')}</tbody></table>`; })()
-    + (loadViaPurlins(s) ? (()=>{ const lay=longLineLayout(s), tanT=Math.tan(g.theta); return `
-  <h3>2.2 Purlins and load path</h3>
-  <p>${purlinXs(s).length} purlins (${esc(s.purlinSect)}) run the full length on top of the frame beams, alongside the two eave beams (${esc(s.longSect)}). The roof dead, snow and wind loads are applied to these longitudinal lines, each carrying the roof strip halfway to its neighbours. MIDAS then delivers the load to the frames, and the overhang strips are carried as cantilevers. Wind pressure acts normal to the roof, so a line carrying plan width w receives \\(w_Z=-p\\,w\\) and \\(w_X=+p\\,w\\tan\\theta\\) (\\(\\tan\\theta=${f(tanT,4)}\\)) per foot along the length.</p>
-  <table class="rpt"><thead><tr><th>Line</th><th>x (ft)</th><th>Roof strip (ft)</th><th>Width w (ft)</th><th>w<sub>D</sub> (lbf/ft)</th><th>w<sub>S</sub> (lbf/ft)</th></tr></thead><tbody>
-  ${lay.map(l=>`<tr><td>${l.kind}</td><td>${f(l.x,2)}</td><td>${f(l.a,2)}–${f(l.b,2)}</td><td>${f(l.trib,2)}</td><td>${f(s.DL*l.trib,0)}</td><td>${f(s.SL*l.trib,0)}</td></tr>`).join('')}
-  </tbody></table>
-  <p class="note-sm">\\(\\sum w = ${f(lay.reduce((a,l)=>a+l.trib,0),2)}\\) ft = L. Cross wind: lines in the lower half take p<sub>lower</sub>, lines in the upper half p<sub>upper</sub>, and a strip that straddles mid-span takes each part at its own pressure. The fascia acts as a line load along the windward eave beam. Wind along the length: each element takes the Fig. 27.3-7 C<sub>N</sub> of its zone.</p>`; })() : '');
-    const lc0=lcases[0], fl=(s.flow==='obstr')?'obstr':'clear';
-    const pEnd=(s.fasciaWindMode==='calc')?calcFasciaWind(s,g.L).p:s.p_lat;
-    long3DMath=`
-  <h3>4.4 Wind along the length (3D structure, γ = 90° and 270°)</h3>
-  <p>Wind parallel to the frames uses ASCE 7-16 Fig. 27.3-7 (free roofs, θ ≤ 45°, γ = 90°, 270°). C<sub>N</sub> depends on the horizontal distance from the windward edge, measured in multiples of the mean roof height h. Both load cases A and B are applied for wind entering at the front edge (γ = 90°) and at the back edge (γ = 270°), giving four more MIDAS load cases.</p>
-  \\[ h = ${f(lc0.h,2)}\\ \\text{ft},\\qquad p = q_h\\,G\\,C_N = ${f(s.q_h*s.G,2)}\\,C_N \\]
-  <table class="rpt"><thead><tr><th>Distance from windward edge</th><th>C<sub>N</sub> Case A</th><th>C<sub>N</sub> Case B</th></tr></thead><tbody>
-    <tr><td>≤ h (0–${f(lc0.h,1)} ft)</td><td>${f(CN90_ZONES[0][fl].A,2)}</td><td>${f(CN90_ZONES[0][fl].B,2)}</td></tr>
-    <tr><td>h to 2h (${f(lc0.h,1)}–${f(2*lc0.h,1)} ft)</td><td>${f(CN90_ZONES[1][fl].A,2)}</td><td>${f(CN90_ZONES[1][fl].B,2)}</td></tr>
-    <tr><td>&gt; 2h</td><td>${f(CN90_ZONES[2][fl].A,2)}</td><td>${f(CN90_ZONES[2][fl].B,2)}</td></tr></tbody></table>
-  <p>Each frame receives C<sub>N</sub> averaged over the roof strip it carries, weighted by length across the zones. The result is applied as a uniform pressure normal to the roof along that frame\u2019s beam (w = p B<sub>j</sub>):</p>
-  <table class="rpt"><thead><tr><th>Case</th>${frameYs(s).map((y,j)=>`<th>F${j+1} C̄<sub>N</sub> / p (psf)</th>`).join('')}</tr></thead><tbody>
-  ${lcases.map(lc=>`<tr><td>${lc.name}</td>${lc.frames.map(fr=>`<td>${f(fr.cn,3)} / ${f(fr.p,1)}</td>`).join('')}</tr>`).join('')}
-  </tbody></table>
-  <p>Lateral loads along the length: column drag \\(w_{col}=${f(s.p_col*sectProps(s.colSect).d/12,2)}\\) lbf/ft on every column, along Y. The windward end fascia force \\(F = d_f\\,p_{lat,end}\\,L = ${f(s.d_roof,2)}\\cdot${f(pEnd,1)}\\cdot${f(g.L,2)} = ${f(s.d_roof*pEnd*g.L,0)}\\) lbf is shared among the longitudinal beam ends at the windward edge by their tributary width across the frame. The windscreen is edge-on to this wind and carries no load.</p>
-  ${longImgs.map((w,i)=>imgTag(w.img,`Figure 4.${7+i} — ${w.lc.name}: wind along the length, entering at the ${w.lc.gamma===90?'front':'back'} edge. Zone C<sub>N</sub> and each frame\u2019s averaged pressure.`)).join('')}`;
-  }
-  const windMath=`
-  <p>Roof wind uses the ASCE 7-16 §27.3.2 open-building (monoslope free roof) procedure, Figure 27.3-4. The net pressure on each roof half is</p>
-  \\[ p = q_h\\,G\\,C_N \\]
-  <p>where \\(q_h\\) is the velocity pressure at mean roof height, \\(G\\) the gust-effect factor, and \\(C_N\\) the net pressure coefficient (windward half \\(C_{NW}\\), leeward half \\(C_{NL}\\)). Here:</p>
-  \\[ q_h = ${s.q_h}\\ \\text{psf},\\quad G = ${s.G},\\quad q_h G = ${f(qhG,3)}\\ \\text{psf} \\]
-  <p>The roof angle \\(\\theta = ${f(thetaDeg,2)}^{\\circ}\\) falls between the tabulated angles \\(${a0}^{\\circ}\\) and \\(${a1}^{\\circ}\\); coefficients are linearly interpolated with</p>
-  \\[ t = \\frac{\\theta - ${a0}}{${a1} - ${a0}} = ${f(tInterp,3)},\\qquad C_N = C_{N,${a0}^{\\circ}} + t\\,(C_{N,${a1}^{\\circ}} - C_{N,${a0}^{\\circ}}) \\]
-  <p>Four load cases are required: two wind directions (\\(\\gamma=0^{\\circ}\\) wind toward the low side, \\(\\gamma=180^{\\circ}\\) wind up the slope toward the high side) × two flow patterns (Case A and Case B). Flow condition: <b>${flow==='clear'?'Clear wind flow':'Obstructed wind flow'}</b>. Positive \\(C_N\\) acts toward the roof (downward-normal); negative is uplift.</p>
-  <p>The windward half carries \\(C_{NW}\\); the leeward half carries \\(C_{NL}\\). The physical windward half depends on direction: for \\(\\gamma=180^{\\circ}\\) (up-slope) the lower (left) half is windward; for \\(\\gamma=0^{\\circ}\\) the upper (right) half is windward. The applied lower/upper pressures below reflect that mapping and are what the MCT writes to each roof half.</p>
-  <table class="rpt"><thead><tr><th>Case</th><th>Windward half</th><th>$C_{NW}$ (${a0}°/${a1}°)</th><th>$C_{NW}$ interp.</th><th>$C_{NL}$ (${a0}°/${a1}°)</th><th>$C_{NL}$ interp.</th><th>$p_{lower}$ (psf)</th><th>$p_{upper}$ (psf)</th></tr></thead><tbody>${windCaseDetail}</tbody></table>
-  <p class="note-sm">Each net pressure is applied to its roof half as a uniform load normal to the sloped surface (MIDAS local-Z). The mid-span step between $p_{lower}$ and $p_{upper}$ is the boundary between the windward and leeward halves.</p>
-  `;
-
-  // ---- lateral wind components ----
-  const latMath=`
-  ${s.fasciaWindMode==='calc'?(()=>{const r=calcFasciaWind(s);return `
-  ${r.method==='sign'?`
-  <p>Fascia pressure — the fascia is treated as a <b>solid sign</b> per ASCE 7-16 §29.3 (Fig. 29.3-1, force coefficients for solid freestanding walls and solid signs). The sign width \\(B\\) is the fascia length (tributary width), the sign height \\(s\\) is the fascia depth, and \\(h\\) is the height to the top of the fascia above grade. \\(C_f\\) is read from the aspect ratio \\(B/s\\) and the clearance ratio \\(s/h\\):</p>
-  \\[ \\frac{B}{s} = \\frac{${f(r.len,1)}}{${f(r.depth,2)}} = ${f(r.bs,2)},\\qquad \\frac{s}{h} = \\frac{${f(r.depth,2)}}{${f(r.hTop,2)}} = ${f(r.sh,3)} \\;\\Rightarrow\\; C_f = ${f(r.cf,2)} \\]
-  \\[ p_{lat} = q_h\\,G\\,C_f = (${f(r.qh,1)})(${r.G})(${f(r.cf,2)}) = ${f(r.p,1)}\\ \\text{psf} \\]${r.clamped?`<p class="note-sm" style="color:#b3502d">Note: a ratio falls outside the tabulated range of Fig. 29.3-1; \\(C_f\\) was clamped to the nearest tabulated entry.</p>`:''}
-  `:`
-  <p>Fascia pressure — the fascia is treated as a flat-sided member per ASCE 7-16 §29.4 (Fig. 29.4-1, force coefficient normal to the face). The aspect ratio is the fascia length (tributary width \\(B\\)) over its depth, and \\(C_f\\) is interpolated across the tabulated h/D = 1, 7, 25 (\\(C_f\\) = 1.3, 1.4, 2.0):</p>
-  \\[ \\frac{\\text{length}}{\\text{depth}} = \\frac{${f(r.len,1)}}{${f(r.depth,2)}} = ${f(r.hD,1)} \\;\\Rightarrow\\; C_f = ${f(r.cf,2)} \\]
-  \\[ p_{lat} = q_h\\,G\\,C_f = (${f(r.qh,1)})(${r.G})(${f(r.cf,2)}) = ${f(r.p,1)}\\ \\text{psf} \\]${r.clamped?`<p class="note-sm" style="color:#b3502d">Note: the fascia aspect ratio is outside the tabulated h/D range (1–25); \\(C_f\\) was clamped to the nearest value.</p>`:''}
-  `}`;})():''}
-  <p>Fascia drag — wind on the projected fascia depth, as a horizontal point load at the roof tip:</p>
-  \\[ F_{fascia} = d_f\\cdot p_{lat}\\cdot B = ${f(s.d_roof,2)}\\cdot${f(s.p_lat,1)}\\cdot${s.B_trib} = ${f(ld.F_fascia*1000,0)}\\ \\text{lbf} = ${f(ld.F_fascia,2)}\\ \\text{k} \\]
-  ${s.colWindMode==='calc'?(()=>{const r=calcColWind(s);return `
-  <p>Column pressure — each column is treated as a flat-sided member per ASCE 7-16 §29.4 (Fig. 29.4-1, normal to the face). The aspect ratio is the column height over its projected width \\(h/D\\), and \\(C_f\\) is interpolated across h/D = 1, 7, 25 (\\(C_f\\) = 1.3, 1.4, 2.0):</p>
-  \\[ \\frac{h}{D} = \\frac{${f(r.h,1)}}{${f(r.D,2)}} = ${f(r.hD,1)} \\;\\Rightarrow\\; C_f = ${f(r.cf,2)} \\]
-  \\[ p_{col} = q_h\\,G\\,C_f = (${f(r.qh,1)})(${r.G})(${f(r.cf,2)}) = ${f(r.p,1)}\\ \\text{psf} \\]${r.clamped?`<p class="note-sm" style="color:#b3502d">Note: the column h/D is outside the tabulated range (1–25); \\(C_f\\) was clamped to the nearest value.</p>`:''}`;})():''}
-  <p>Column drag — wind on the projected column width, as a horizontal line load over each column${ld.screenH>0?`. Over the windscreen band on the screened column line, the windscreen pressure governs and the bare-column drag is omitted there to avoid double-counting`:''}:</p>
-  \\[ w_{col} = p_{col}\\cdot\\tfrac{d_{col}}{12} = ${f(s.p_col,1)}\\cdot${f(sectProps(s.colSect).d/12,4)} = ${f(s.p_col*sectProps(s.colSect).d/12,2)}\\ \\text{lbf/ft} \\]
-  <p class="note-sm">The projected width \\(d_{col} = ${f(sectProps(s.colSect).d,2)}\\)\u2033 is the actual ${s.colSect} face dimension from the AISC database, not a generic input.</p>
-  ${ld.screenH>0?`${s.screenWindMode==='calc'?(()=>{const r=calcScreenWind(s);return `
-  <p><b>Windscreen wind pressure — ASCE 7-16 Chapter 29 (sign provisions).</b> The windscreen is treated as a sign. The design pressure is built from the velocity pressure, the gust-effect factor \\(G\\), and the sign force coefficient \\(C_f\\) (Fig. 29.3-1). Signs with more than 30% open area are classified as open signs and the force is applied over the net (solid) area; otherwise the §29.3.1 reduced coefficient is applied over the gross area.</p>
-  <p><i>Velocity pressure</i> (Eq. 26.10-1), with \\(K_z\\) from Table 26.10-1 (Exposure ${r.exposure}, \\(z=${f(r.meanH,0)}\\) ft):</p>
-  \\[ q_h = 0.00256\\,K_z K_{zt} K_d K_e V^2 = 0.00256(${f(r.Kz,3)})(${r.Kzt})(${r.Kd})(${r.Ke})(${r.V})^2 = ${f(r.qh,1)}\\ \\text{psf} \\]
-  <p><i>Sign geometry</i> — width \\(B\\) taken as the tributary width, height \\(s\\) the screen band, and \\(h\\) the height to the top of the screen above grade:</p>
-  \\[ B = ${f(r.B,1)}\\ \\text{ft},\\quad s = ${f(r.sH,2)}\\ \\text{ft},\\quad h = ${f(r.hTop,2)}\\ \\text{ft}
-     \\;\\Rightarrow\\; \\frac{B}{s} = ${f(r.bs,2)},\\quad \\frac{s}{h} = ${f(r.sh,2)} \\]
-  ${!r.isOpenSign?`<p><i>Force coefficient</i> \\(C_f\\), interpolated from Fig. 29.3-1 (solid freestanding/attached signs) at the above \\(B/s\\) and \\(s/h\\):</p>
-  \\[ C_{f,\\text{solid}} = ${f(r.cfSolid,2)} \\]
-  ${r.bsClamped||r.shClamped?`<p class="note-sm" style="color:#b3502d">Note: \\(B/s\\) or \\(s/h\\) falls outside the tabulated range of Fig. 29.3-1; the value was clamped to the nearest tabulated entry.</p>`:''}`:''}
-  ${r.isOpenSign?`
-  <p><i>Open-sign classification</i> — ${f(r.pctOpen,0)}% open \\(>30\\%\\), so solidity \\(\\varepsilon = 1 - \\tfrac{\\%\\text{open}}{100} = ${f(r.eps,3)} < 0.70\\). The screen is an open sign (ASCE 7-16 Fig. 29.4-2). The force coefficient is read from the open-sign table by \\(\\varepsilon\\) for flat-sided members, and the wind force acts on the net (solid) area \\(A_{net} = \\varepsilon A_{gross}\\). No reduction factor is applied (the Fig. 29.3-1 solid \\(C_f\\) and the §29.3.1 reduction are not used for an open sign):</p>
-  \\[ C_{f,\\text{open}} = ${f(r.cfOpen,2)} \\quad(\\varepsilon = ${f(r.eps,2)},\\ \\text{flat-sided; } \\varepsilon<0.1\\!\\to\\!2.0,\\ 0.1\\text{–}0.29\\!\\to\\!1.8,\\ 0.3\\text{–}0.7\\!\\to\\!1.6) \\]
-  \\[ p_{scr} = q_h\\,G\\,C_{f,\\text{open}}\\,\\varepsilon = (${f(r.qh,1)})(${r.G})(${f(r.cfOpen,2)})(${f(r.eps,3)}) = \\mathbf{${f(r.p,1)}\\ \\text{psf}} \\quad(\\text{net-area basis}) \\]`:`
-  <p><i>Open-sign reduction</i> (§29.3.1) — ${f(r.pctOpen,0)}% open \\(\\le 30\\%\\), so solidity \\(\\varepsilon = ${f(r.eps,3)} \\ge 0.70\\) (closed sign). \\(C_f\\) is reduced for the openings and applied over the gross area:</p>
-  \\[ C_{f,\\text{eff}} = C_{f,\\text{solid}}\\left[\\,1-(1-\\varepsilon)^{1.5}\\,\\right] = ${f(r.cfSolid,2)}\\,(${f(r.redux,3)}) = ${f(r.cfEff,2)} \\]
-  \\[ p_{scr} = q_h\\,G\\,C_{f,\\text{eff}} = (${f(r.qh,1)})(${r.G})(${f(r.cfEff,2)}) = \\mathbf{${f(r.p,1)}\\ \\text{psf}} \\quad(\\text{gross-area basis}) \\]`}`;})():`<p>Windscreen pressure \\(p_{scr} = ${f(s.p_screen,1)}\\) psf entered directly (manual).</p>`}
-  <p>Windscreen resultant — the pressure acts as a uniform horizontal load over the screen height \\(h_{scr}=${f(ld.screenH,2)}\\) ft, transferred to one column line over tributary width \\(B=${s.B_trib}\\) ft:</p>
-  \\[ F_{scr} = p_{scr}\\cdot h_{scr}\\cdot B = ${f(s.p_screen,1)}\\cdot${f(ld.screenH,2)}\\cdot${s.B_trib} = ${f(ld.F_screen*1000,0)}\\ \\text{lbf} = ${f(ld.F_screen,2)}\\ \\text{k} \\]`:''}
-  `;
-
-  // ---- snow/wind CALC sections (only when calc mode active) ----
-  let snowReportSection='';
-  if(s.snowMode==='calc'){
-    const r=calcSnow(s);
-    snowReportSection=`<h3>3.3 Snow load — ASCE 7-16 Ch. 7 calculation</h3>
-    <p>Flat-roof snow load (Eq. 7.3-1) with ground snow \\(p_g=${s.pg}\\) psf, exposure factor \\(C_e=${s.Ce}\\), thermal factor \\(C_t=${s.Ct}\\), Risk Category ${s.riskCat} (\\(I_s=${r.Is}\\)):</p>
-    \\[ p_f = 0.7\\,C_e\\,C_t\\,I_s\\,p_g = 0.7\\cdot${s.Ce}\\cdot${s.Ct}\\cdot${r.Is}\\cdot${s.pg} = ${f(r.pf,2)}\\ \\text{psf} \\]
-    <p>Sloped-roof snow load (Eq. 7.4-1) with roof slope factor \\(C_s\\) at \\(\\theta=${f(r.thetaDeg,2)}^{\\circ}\\):</p>
-    \\[ C_s = ${f(r.Cs,3)},\\qquad p_s = C_s\\,p_f = ${f(r.Cs,3)}\\cdot${f(r.pf,2)} = ${f(r.ps,2)}\\ \\text{psf} \\]
-    <p>Minimum roof snow load (§7.3.4), ${r.minApplies?`applicable since \\(\\theta<15^{\\circ}\\)`:`not applicable here since \\(\\theta\\ge 15^{\\circ}\\)`}:</p>
-    \\[ p_m = ${s.pg<=20?'I_s\\,p_g':'20\\,I_s'} = ${s.pg<=20?`${r.Is}\\cdot${s.pg}`:`20\\cdot${r.Is}`} = ${f(r.pm,2)}\\ \\text{psf} \\]
-    \\[ S = ${r.minApplies?'\\max(p_s,\\,p_m)':'p_s'} = ${f(r.sGov,2)}\\ \\text{psf}\\quad\\text{(applied)} \\]
-    <p class="note-sm">\\(C_s\\) per Fig. 7.4-1 (all-other-surfaces, conservative): \\(C_s=1.0\\) for \\(\\theta\\le 30^{\\circ}\\), linear to 0 at \\(70^{\\circ}\\). Unbalanced/drift snow and partial loading are not generated and should be checked separately if required.</p>`;
-  }
-  let windCalcSection='';
-  if(s.windMode==='calc'){
-    const r=calcWind(s);
-    windCalcSection=`<h3>4.1 Velocity pressure — ASCE 7-16 §26.10 calculation</h3>
-    <p>Velocity pressure exposure coefficient \\(K_z\\) (Table 26.10-1) at mean roof height \\(z=${f(s.meanH,1)}\\) ft, Exposure ${s.exposure}: \\(K_z=${f(r.Kz,3)}\\). Directionality \\(K_d=${s.Kd}\\), topographic \\(K_{zt}=${s.Kzt}\\), ground-elevation \\(K_e=${s.Ke}\\), basic wind speed \\(V=${s.V}\\) mph (Risk Category ${s.riskCat}).</p>
-    \\[ q_h = 0.00256\\,K_z\\,K_{zt}\\,K_d\\,K_e\\,V^2 = 0.00256\\cdot${f(r.Kz,3)}\\cdot${s.Kzt}\\cdot${s.Kd}\\cdot${s.Ke}\\cdot${s.V}^2 = ${f(r.qh,2)}\\ \\text{psf} \\]
-    <p class="note-sm">Computed \\(q_h=${f(r.qh,2)}\\) psf used in the roof pressure calculation below.</p>`;
-  }
-
-  // ---- MIDAS base reactions (when results pasted): governing table + FBD ----
-  const hasMidas=RESULT_ROWS.length>0;
-  const midasStale=(typeof resultsStale==='function') && resultsStale();
-  const staleNote=midasStale?`<p class="note-sm" style="color:#b3502d;font-weight:600">⚠ These MIDAS results are out of date — an input changed after they were pasted. Re-run MIDAS with the current MCT and paste fresh results before relying on these values.</p>`:'';
-  let midasReactBlock='', imgReactFBD=null;
-  if(hasMidas){
-    const gov=midasGoverning();
-    const lng3=is3D(s);
-    const govR=gov.map((gg,ci)=>`<tr><td>${gg.label||('Col '+(ci+1))}</td>
-      <td>${uForce(gg.N.v)}<br><span class="sm">${esc(gg.N.load)}</span></td>
-      <td>${uForce(gg.V.v)}<br><span class="sm">${esc(gg.V.load)}</span></td>
-      <td>${uMom(gg.M.v)}<br><span class="sm">${esc(gg.M.load)}</span></td>${lng3?`
-      <td>${uForce(gg.VL.v)}<br><span class="sm">${esc(gg.VL.load)}</span></td>
-      <td>${uMom(gg.ML.v)}<br><span class="sm">${esc(gg.ML.load)}</span></td>`:''}</tr>`).join('');
-    // per-case reactions (reaction = equal & opposite of member force)
-    const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))];
-    const caseRows=loads.map(ld=>{
-      const cf=midasColumnForces(ld);
-      return cf.map(c=>c.reaction?`<tr><td>${esc(ld)}</td><td>${c.label}</td><td>${uForce(c.reaction.N)}</td><td>${uForce(c.reaction.V)}</td><td>${uMom(c.reaction.M)}</td>${lng3?`<td>${uForce(c.reaction.VL||0)}</td><td>${uMom(c.reaction.ML||0)}</td>`:''}</tr>`:'').join('');
-    }).join('');
-    // snapshot the FBD (governing) for the report
-    reactShowCase='__gov__';
-    const _rAll=reactAllFrames, _rMem=fbdShowMember; reactAllFrames=false; fbdShowMember=false;
-    try{ drawFBDInto('plotReact', midasData()); }catch(e){}
-    reactAllFrames=_rAll; fbdShowMember=_rMem;
-    imgReactFBD=await snap('plotReact');
-    midasReactBlock=`
-    ${staleNote}
-    <p>Base reactions below are taken directly from the ${RES_SRC==='app'?'in-app linear elastic analysis of the MCT model':'MIDAS analysis (pasted beam-force results)'}, read at each column base element. Axis map: Axial → vertical reaction (N), Shear-z → horizontal (V), Moment-y → base moment (M). MIDAS reports member forces at the base; the reactions shown are equal and opposite (what the foundation resists). These are the design values, shown in ${uForceLbl()} / ${uMomLbl()}.</p>
-    ${imgTag(imgReactFBD,`Figure 6.1 — Column base free-body${is3D(s)?` (frame ${Math.min(resFrame,frameYs(s).length-1)+1})`:''}: governing support reactions on each column (envelope), with the combination that governs each component.`)}
-    <h3>6.1 Governing base reactions (${RES_SRC==='app'?'in-app analysis':'MIDAS'}) — all columns</h3>
-    <table class="rpt"><thead><tr><th>Column</th><th>Max |N| reaction (${uForceLbl()})<br>+ = compression</th><th>Max |V| reaction (${uForceLbl()})</th><th>Max |M| base (${uMomLbl()})</th>${lng3?`<th>Max |V<sub>long</sub>| (${uForceLbl()})<br>Shear-y</th><th>Max |M<sub>long</sub>| (${uMomLbl()})<br>Moment-z</th>`:''}</tr></thead><tbody>${govR}</tbody></table>
-    ${lng3?`<p class="note-sm">3D model: supports are labelled F<i>j</i>-C<i>i</i> (frame <i>j</i>, column <i>i</i>). V and M act in the frame plane; V<sub>long</sub> and M<sub>long</sub> act along the canopy length (column weak axis), from the longitudinal wind cases. The free-body figure shows frame ${Math.min(resFrame,frameYs(s).length-1)+1}.</p>`:''}
-    <p class="note-sm">Governing = independent maximum of |N|, |V|, |M| ${gov.noEnvelope?`across all pasted load cases (no Envelope combination was found, so individual unfactored cases are included — paste the Envelope results for correct design reactions)`:`taken from the pasted <b>Envelope</b> strength combination, which already brackets the 14 ASCE 7-16 strength combinations`}; the driving ${gov.noEnvelope?'case':'envelope'} is noted beneath each value. Because the maxima are taken independently, the three values for a column may come from different points in the envelope and need not act concurrently.</p>
-    <h3>6.2 Reactions by load case &amp; column (${RES_SRC==='app'?'in-app analysis':'MIDAS'})</h3>
-    <table class="rpt"><thead><tr><th>Load / combo</th><th>Column</th><th>N (${uForceLbl()})</th><th>V (${uForceLbl()})</th><th>M (${uMomLbl()})</th>${lng3?`<th>V<sub>long</sub> (${uForceLbl()})</th><th>M<sub>long</sub> (${uMomLbl()})</th>`:''}</tr></thead><tbody>${caseRows}</tbody></table>`;
-  }
-
-  // ---- wind cases summary table (pressures) ----
-  const wcRows=wcases.map(w=>`<tr><td>${w.name}</td><td>${w.cnw.toFixed(3)}</td><td>${w.cnl.toFixed(3)}</td><td>${w.pW.toFixed(1)}</td><td>${w.pL.toFixed(1)}</td></tr>`).join('');
-
-  // ---- MIDAS results (if pasted) ----
-  let resultsSection='';
-  if(RESULT_ROWS.length){
-    const loads=[...new Set(RESULT_ROWS.map(r=>r.load))];
-    const govByCase=loads.map(lc=>{
-      const rows=RESULT_ROWS.filter(r=>r.load===lc);
-      const mM=Math.max(...rows.map(r=>Math.abs(r.momentY))), mV=Math.max(...rows.map(r=>Math.abs(r.shearZ))), mN=Math.max(...rows.map(r=>Math.abs(r.axial)));
-      return `<tr${/envelope/i.test(lc)?' style="background:#f0f5e8"':''}><td>${esc(lc)}</td><td>${uMom(mM)}</td><td>${uForce(mV)}</td><td>${uForce(mN)}</td></tr>`;
-    }).join('');
-    const comboFigs = comboImgs.filter(c=>c.img).map(c=>{
-      const statRows=(c.stats||[]).map(r=>
-        `<tr><td style="font-weight:600">${r.member}</td>`+
-        `<td style="text-align:right">${uMom(r.M.max)} / ${uMom(r.M.min)}</td>`+
-        `<td style="text-align:right">${uForce(r.V.max)} / ${uForce(r.V.min)}</td>`+
-        `<td style="text-align:right">${uForce(r.N.max)} / ${uForce(r.N.min)}</td></tr>`
-      ).join('');
-      return `<figure style="margin:6px 0;flex:0 0 100%">
-        <img src="${c.img}" style="width:100%;max-width:340px;border:1px solid #d4cfc4;border-radius:4px;vertical-align:top">
-        <figcaption>${esc(c.ld)} — moment (green) &amp; shear (orange). Per-member max / min:</figcaption>
-        <table class="rpt" style="max-width:520px;font-size:9.5px;margin-top:4px"><thead><tr>
-          <th>Member</th><th>M (${uMomLbl()})</th><th>V (${uForceLbl()})</th><th>N (${uForceLbl()})</th>
-        </tr></thead><tbody>${statRows}</tbody></table>
-      </figure>`;
-    }).join('');
-    resultsSection=`<h2>7 · Analysis Results (${RES_SRC==='app'?'in-app linear elastic analysis':'MIDAS'})</h2>
-      ${RES_SRC==='app'&&APP_RES&&APP_RES.rows?`<p>First-order linear elastic analysis of the generated MCT model in this tool: 3D beam elements with shear deformation, the MCT supports, releases, load cases and combinations; ${APP_RES.planar?'solved as a plane frame':'solved in 3D'} (${APP_RES.n} equations). Second-order effects are not included.</p>`:''}
-      <p>${RESULT_ROWS.length} beam-force rows imported across ${loads.length} load cases / combinations. Peak magnitudes per case (${uForceLbl()} / ${uMomLbl()}):</p>
-      <table class="rpt"><thead><tr><th>Load / combo</th><th>|M|max (${uMomLbl()})</th><th>|V|max (${uForceLbl()})</th><th>|N|max (${uForceLbl()})</th></tr></thead><tbody>${govByCase}</tbody></table>
-      <h3>7.1 Member &amp; node key</h3>
-      ${imgTag(imgKey,'Element (boxed) and node numbering, matching the MIDAS model and the imported Beam Forces table.')}
-      <h3>7.2 Moment &amp; shear diagrams by combination</h3>
-      <p class="note-sm">Diagrams plot the ${RES_SRC==='app'?'analysis':'imported MIDAS'} node values directly (straight segments between nodes; refine the mesh for smoother curves). Moment in green, shear in orange, on a common scale across all combinations.</p>
-      <div style="display:flex;flex-wrap:wrap;gap:12px">${comboFigs}</div>`;
-  } else {
-    resultsSection=`<h2>7 · Analysis Results</h2><p class="note-sm">No analysis results: run the in-app analysis or paste MIDAS results. Run the model in MIDAS, paste the Beam Forces table in the Results tab, then regenerate this report to include analysis force diagrams and peak tables.</p>`;
-  }
-
-  // ============ assemble document ============
-  const reportStyle=`
-    body{font-family:'Inter',-apple-system,Segoe UI,sans-serif;color:#16191d;max-width:880px;margin:0 auto;padding:32px;font-size:12px;line-height:1.55}
-    h1{font-size:21px;border-bottom:2px solid #16191d;padding-bottom:8px;margin-bottom:4px}
-    .sub{color:#6a665d;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px}
-    .toc{background:#f7f5f0;border:1px solid #d4cfc4;border-radius:5px;padding:12px 18px;margin:18px 0;font-size:11.5px}
-    .toc b{display:block;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.05em;font-size:10px;color:#6a665d}
-    .toc a{color:#1d4e6b;text-decoration:none;display:inline-block;margin-right:16px}
-    h2{font-size:15px;color:#1d4e6b;margin:26px 0 10px;border-bottom:1px solid #d4cfc4;padding-bottom:5px;break-after:avoid}
-    h3{font-size:13px;color:#16191d;margin:16px 0 6px}
-    p{margin:8px 0}
-    table{border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:11px}
-    td,th{border:1px solid #d4cfc4;padding:4px 8px;text-align:left;vertical-align:top}
-    th{background:#f7f5f0;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:#6a665d}
-    table.rpt td:not(:first-child),table.kv td:last-child{text-align:right;font-family:'SFMono-Regular',Consolas,monospace}
-    .sm{font-size:9px;color:#6a665d;font-family:'Inter',sans-serif}
-    .note-sm{font-size:10.5px;color:#6a665d}
-    .rpt-list{font-size:11.5px;line-height:1.6;margin:6px 0 6px 18px;padding:0}
-    .rpt-list li{margin:3px 0}
-    figure{margin:14px 0}figcaption{font-size:10px;color:#6a665d;margin-top:4px;text-align:center}
-    pre{background:#f7f5f0;border:1px solid #d4cfc4;border-radius:4px;padding:12px;font-size:8.5px;line-height:1.35;white-space:pre-wrap;overflow-wrap:break-word;font-family:'SFMono-Regular',Consolas,monospace}
-    mjx-container{font-size:108% !important}
-    @media print{body{padding:0;max-width:none}.noprint{display:none}h2{break-after:avoid}figure,table{break-inside:avoid}}`;
-  // ---- executive summary (governing values up front) ----
-  // executive summary reactions: MIDAS design values when pasted, else a prompt
-  let summaryReactBlock;
-  if(hasMidas){
-    const mg=midasGoverning();
-    const sumRows=mg.map((gg,ci)=>`<tr><td>${gg.label||('Col '+(ci+1))}</td>
-      <td>${uForce(gg.N.v)}</td><td>${uForce(gg.V.v)}</td><td>${uMom(gg.M.v)}</td></tr>`).join('');
-    summaryReactBlock=`
-  ${staleNote}
-  <p>Governing column base reactions (${RES_SRC==='app'?'in-app linear elastic analysis':'MIDAS analysis'} — design values, per column):</p>
-  <table class="rpt"><thead><tr><th>Support</th><th>Max axial N (${uForceLbl()})<br>+ = compression</th><th>Max shear V (${uForceLbl()})</th><th>Max base moment (${uMomLbl()})</th></tr></thead><tbody>${sumRows}</tbody></table>
-  <p class="note-sm">Values above are the governing column base reactions from the <b>${RES_SRC==='app'?'in-app analysis':'MIDAS analysis'}</b>${RES_SRC==='app'?'':' (pasted results)'} — the design values. Per-case and free-body detail is in Section 6.</p>`;
-  } else {
-    summaryReactBlock=`
-  <p class="note-sm">No MIDAS results have been pasted yet. Run the model in MIDAS, paste the beam-force results in the Results tab, and regenerate this report to populate the governing column base reactions and free-body diagram.</p>`;
-  }
+  const hasRes=RESULT_ROWS.length>0, src=RES_SRC==='app'?'in-app linear elastic analysis':'MIDAS analysis (pasted results)';
+  const stale=(typeof resultsStale==='function') && resultsStale();
   const cfgWord=nCols(s)===1?'single-column (cantilever)':(nCols(s)===2?'two-column':`${nCols(s)}-column multi-bay`);
-  const summarySection=`
-  <h2 id="s0">Executive Summary</h2>
-  <p>This report documents the structural model and loading for a mono-slope ${cfgWord} canopy with ${nCols(s)===1?'cantilever support':s.baseFixity+' column bases'}, generated as a MIDAS Civil MCT import file. The roof spans ${f(g.L,1)} ft in plan at a ${f(thetaDeg,1)}° pitch. Loads follow ASCE 7-16: dead and snow as gravity surface loads, and wind by the open-building monoslope free-roof method (four directional/flow cases) plus fascia, column, and windscreen lateral loads${is3d?', with four more wind cases for wind along the length':''}. ${nCombo} strength load combinations and an envelope are generated.${is3d?` The model is a 3D structure of ${frameYs(s).length} frames over a ${f(length3D(s),1)} ft length, tied by longitudinal edge and eave beams, with fixed column bases.`:''}</p>
-  ${summaryReactBlock}
-  `;
+  const sections=[];
 
-  let anchorSection='';
-  if(hasMidas && anchorInUse()){ try{ if(await anchorEvaluateAll()) anchorSection=anchorReportHTML(8); }catch(e){ console.warn('anchorage report',e); } }
-  const nMct=anchorSection?9:8, nAs=nMct+1;
-  const reportBody=`
-  <h1>Mono-slope Canopy — Structural Design Report</h1>
-  <div class="sub">MIDAS Civil MCT model · ASCE 7-16 · generated ${today}</div>
-  ${projMetaHTML(s)}
-  <div class="toc"><b>Contents</b>
-    <a href="#s0">Summary</a><a href="#s1">1 Inputs</a><a href="#s2">2 Geometry</a><a href="#s3">3 Gravity</a>
-    <a href="#s4">4 Wind</a><a href="#s5">5 Model</a><a href="#s6">6 Reactions</a>
-    <a href="#s7">7 Results</a>${anchorSection?'<a href="#sA">8 Anchorage</a>':''}<a href="#s8">${nMct} MCT</a><a href="#s9">${nAs} Assumptions</a></div>
+  // ---- 1 Summary ----
+  const sumItems=[rpNote(`Mono-slope ${cfgWord} canopy${is3d?`, 3D structure of ${frameYs(s).length} frames over ${f(length3D(s),1)} ft`:', 2D frame'}, with ${nCols(s)===1?'a cantilever column':(is3d||s.baseFixity==='fixed'?'fixed':'pinned')+' column bases'}. The roof spans ${f(g.L,2)} ft in plan at ${f(thetaDeg,2)}°. Loads by ASCE 7-16 (dead, balanced snow, open-building wind); the model is written as a MIDAS Civil .mct file and analysed in this tool.`)];
+  let govRows=[];
+  if(hasRes){
+    if(stale) sumItems.push(rpNote('The analysis results are out of date: an input changed after they were made. Re-run the analysis (Results tab) before relying on them.',true));
+    const gov=midasGoverning(), lng=is3d;
+    govRows=gov.map((gg,i)=>[gg.label||('Col '+(i+1)),{t:uForce(gg.N.v),n:true},gg.N.load,{t:uForce(gg.V.v),n:true},gg.V.load,{t:uMom(gg.M.v),n:true},gg.M.load]
+      .concat(lng?[{t:uForce(gg.VL.v),n:true},{t:uMom(gg.ML.v),n:true}]:[]));
+    sumItems.push({type:'table', caption:`Governing column base reactions (${src}); envelope of the strength combinations; each value is the one of largest magnitude, with its sign, maximised independently. See [[R-gov]].`,
+      head:['Support',`N (${uForceLbl()})`,'combination',`V (${uForceLbl()})`,'combination',`M (${uMomLbl()})`,'combination'].concat(lng?[`V_long (${uForceLbl()})`,`M_long (${uMomLbl()})`]:[]),
+      rows:govRows, wide:true});
+  } else sumItems.push(rpNote('No analysis results yet: run the analysis on the [[tab:results|Results tab]] (or paste MIDAS results) to add the base reactions and the anchorage checks.',true));
+  if(hasRes && anchorInUse()){ const A2=anchorState();
+    sumItems.push({type:'table', caption:'Anchorage groups: governing ratio (details in [[A-sum]]).', head:['Group','Columns','Governing ratio','Check','Combination'],
+      rows:A2.groups.filter(gr=>anchorColumnsOf(gr.id).length).map(gr=>{ const w=anchorWorst(_anchorEval[gr.id]); return [gr.name, anchorColumnsOf(gr.id).map(c=>c.label).join(', '),
+        w&&isFinite(w.v)?{t:f(w.v,2)+(w.v<=1?' OK':' NG'),n:true,cls:w.v<=1?'ok':'ng'}:'—', w?w.label:'', w?(w.combo||''):'']; })}); }
+  sections.push({title:'Summary', subs:[{title:'Structure and governing results', items:sumItems}]});
 
-  ${summarySection}
+  // ---- 2 Design basis and inputs ----
+  const kv=rows=>({type:'kv', rows:rows.filter(r=>r&&r[1]!==undefined&&r[1]!==null&&r[1]!=='')});
+  const bp=sectProps(s.beamSect), cp=sectProps(s.colSect);
+  sections.push({title:'Design basis and inputs', subs:F([
+    {title:'Configuration', items:[kv([
+      ['Model', is3d?`3D structure: ${frameYs(s).length} frames, ${nFrameBays(s)} bay${nFrameBays(s)>1?'s':''} along the length`:'2D frame (tributary width)'],
+      ['Columns per frame', String(nCols(s))],
+      ['Column bases', is3d||s.baseFixity==='fixed'?'Fixed':'Pinned'],
+      ['Column-to-beam connection', s.beamConnect==='pinned'&&nCols(s)>1?'Pinned (column top released)':'Fixed (moment)'],
+      ...(is3d?[['Member end releases', releaseSummary3D(s).length?releaseSummary3D(s).join('; '):'none (continuous)']]:[]),
+      ['Risk category / exposure', `${s.riskCat} / ${s.exposure}`],
+      ['Wind flow', s.flow==='clear'?'Clear':'Obstructed'],
+      ['Windscreen', s.screen==='none'?'none':s.screen==='partial'?`partial, el. ${f(s.scr_bot,2)} to ${f(s.scr_top,2)} ft`:'full height']])]},
+    {title:'Geometry', items:[kv([
+      ['Left / right overhang', `${f(s.L_OH,3)} / ${f(s.R_OH,3)} ft`],
+      ['Bay spacings', (s.baySpacings||[]).slice(0,Math.max(0,nCols(s)-1)).map(b=>f(+b,3)).join(', ')+' ft'],
+      ['Roof slope', `${s.slope} (θ = ${f(thetaDeg,2)}°)`],
+      ['Column height (low column) / datum', `${f(s.H_col,3)} ft / el. ${f(s.El_base,2)} ft`],
+      [is3d?'Tributary width (governing frame)':'Tributary width B', `${f(s.B_trib,3)} ft`],
+      ...(is3d?[['Frame spacings', frameSpans(s).map(b=>f(b,3)).join(', ')+' ft'],['Front / back overhang', `${f(+s.OH_front||0,3)} / ${f(+s.OH_back||0,3)} ft`],
+        ['Purlins (from the low roof tip)', purlinXs(s).length?purlinXs(s).map(x=>f(x,3)).join(', ')+' ft':'none']]:[]),
+      ['Mesh', `max element ${f(s.mesh_max,2)} ft, at least ${s.mesh_minN} per member`]])], ref:''},
+    {title:'Sections and material', items:[{type:'table', head:['Member','Section','A (in²)','d (in)','b (in)','I_x (in⁴)','I_y (in⁴)'],
+      rows:F([['Roof beam (rafter)',s.beamSect,rpN(bp.A),rpN(bp.d),rpN(bp.b),rpN(bp.Ix,1),rpN(bp.Iy,1)],['Column',s.colSect,rpN(cp.A),rpN(cp.d),rpN(cp.b),rpN(cp.Ix,1),rpN(cp.Iy,1)],
+        is3d?(()=>{const p=sectProps(s.longSect);return ['Edge / eave beam',s.longSect,rpN(p.A),rpN(p.d),rpN(p.b),rpN(p.Ix,1),rpN(p.Iy,1)];})():null,
+        is3d&&purlinXs(s).length?(()=>{const p=sectProps(s.purlinSect);return ['Purlin',s.purlinSect,rpN(p.A),rpN(p.d),rpN(p.b),rpN(p.Ix,1),rpN(p.Iy,1)];})():null])},
+      kv([['Steel', `E = ${s.E_ksi} ksi, ν = ${s.poisson}, density ${s.density_pcf} pcf`],['Section properties','AISC Shapes Database (written to MIDAS as AISC10(US) DBUSER references)']])]},
+    {title:'Loads', items:[kv([
+      ['Superimposed dead load', `${f(s.DL,2)} psf`],
+      ['Snow load', s.snowMode==='calc'?`calculated (ASCE 7-16 Ch. 7): ${f(s.SL,2)} psf`:`${f(s.SL,2)} psf (entered)`],
+      ['Velocity pressure q_h', s.windMode==='calc'?`calculated (ASCE 7-16 §26.10): ${f(s.q_h,2)} psf`:`${f(s.q_h,2)} psf (entered)`],
+      ['Gust-effect factor G', String(s.G)],
+      ['Fascia depth / pressure', `${f(s.d_roof,2)} ft / ${f(s.p_lat,1)} psf${s.fasciaWindMode==='calc'?' (calculated)':''}`],
+      ['Column wind pressure', `${f(s.p_col,1)} psf${s.colWindMode==='calc'?' (calculated)':''}`],
+      ...(s.screen!=='none'?[['Windscreen pressure', `${f(s.p_screen,1)} psf${s.screenWindMode==='calc'?' (calculated)':''}`]]:[])])]}
+  ])});
 
-  <h2 id="s1">1 · Input Parameters</h2>
-  <p>All model inputs are listed below. Geometry is in feet, section dimensions in inches, surface loads in psf, and pressures in psf. These values fully define the model; every quantity derived in later sections traces back to this table.</p>
-  <table class="kv"><tbody>${inputRows}</tbody></table>
+  // ---- 3 Geometry ----
+  sections.push({title:'Geometry', subs:[{title:'Geometry derivation', key:'G-der', items:F([rpNote('Worked on the [[tab:geometry|Geometry tab]].'), ...rpDeriv('geomDerived','geo'), figGeom, figPlan])}]});
 
-  <h2 id="s2">2 · Geometry &amp; Derivation</h2>
-  <p>This section derives the complete frame geometry from the overhang lengths, roof slope, and column height. The canopy is idealized as a 2D frame in the vertical plane: a sloped roof beam supported on ${nCols(s)===1?'a single column (cantilever action)':nCols(s)+' columns'}. The roof angle controls both the wind pressure coefficients and the true (sloped) member length used for surface loads and meshing.</p>
-  ${geomMath}
-  ${frame3DMath}
-  ${imgTag(imgGeom,'Figure 2.1 — Structure elevation showing the sloped roof beam, columns, and base supports.')}
-  ${imgTag(imgPlan,'Figure 2.2 — Plan view: frames and columns, eave beams, purlins, and plan dimensions.')}
+  // ---- 4 Gravity ----
+  sections.push({title:'Dead and snow loads', subs:[{title:'Gravity loads', key:'D-der', items:F([rpNote('Surface loads act on the horizontal projection (MIDAS bPROJ = YES); member self weight is added from the section areas and the steel density. Worked on the [[tab:gravity|Dead & Snow tab]].'),
+    ...rpDeriv('gravDerived','grav'), figGrav])}]});
 
-  <h2 id="s3">3 · Gravity Loading (Dead &amp; Snow)</h2>
-  <p>Gravity loads act vertically (global Z) and comprise member self-weight (added automatically by MIDAS), superimposed dead load, and snow. Surface pressures (psf) are converted to line loads on the roof beam by multiplying by the tributary width B = ${s.B_trib} ft.</p>
-  <h3>3.1 Self weight</h3>
-  ${swMath}
-  <h3>3.2 Superimposed dead &amp; snow</h3>
-  ${gravMath}
-  ${snowReportSection}
-  ${imgTag(imgGrav,'Figure 3.1 — Uniform gravity load applied along the roof beam.')}
+  // ---- 5 Wind ----
+  const wSubs=[{title:'Wind pressures and lateral loads', key:'W-der', items:F([rpNote('Open-building monoslope free roof, ASCE 7-16 §27.3 (Fig. 27.3-4 across the frames). Net pressure $p = q_h G C_N$ normal to the roof. Worked on the [[tab:wind|Wind tab]].'), ...rpDeriv('windDerived','wind')])},
+    {title:'Wind cases across the frames', items:[{type:'table', caption:'Fig. 27.3-4: windward and leeward half coefficients and pressures (p_lower on the low half, p_upper on the high half).',
+      head:['Case','γ','C_NW','C_NL','p_W (psf)','p_L (psf)','p_lower (psf)','p_upper (psf)'],
+      rows:wcases.map(w=>[w.name,w.gamma+'°',rpN(w.cnw,3),rpN(w.cnl,3),rpN(w.pW,1),rpN(w.pL,1),rpN(w.pLower,1),rpN(w.pUpper,1)])}, ...F(windFigs.slice(0,wcases.length))]}];
+  if(lcases.length){ const lc0=lcases[0], fl=(s.flow==='obstr')?'obstr':'clear';
+    wSubs.push({title:'Wind along the length (3D)', items:F([rpNote(`ASCE 7-16 Fig. 27.3-7 (free roofs, γ = 90°, 270°): C_N by the distance from the windward edge in multiples of the mean roof height h = ${f(lc0.h,2)} ft; $p = q_h G C_N$ with $q_h G$ = ${f(s.q_h*s.G,2)} psf.`),
+      {type:'table', head:['Distance from the windward edge','C_N case A','C_N case B'], rows:[[`≤ h (0 to ${f(lc0.h,1)} ft)`,rpN(CN90_ZONES[0][fl].A),rpN(CN90_ZONES[0][fl].B)],[`h to 2h (${f(lc0.h,1)} to ${f(2*lc0.h,1)} ft)`,rpN(CN90_ZONES[1][fl].A),rpN(CN90_ZONES[1][fl].B)],['> 2h',rpN(CN90_ZONES[2][fl].A),rpN(CN90_ZONES[2][fl].B)]]},
+      rpNote(loadViaPurlins(s)?'With purlins, the purlins and eave beams carry the stepped zone pressure element by element.':'Without purlins, each frame receives C_N averaged over the roof strip it carries (length-weighted across the zones), as a uniform pressure along its beam:'),
+      ...(loadViaPurlins(s)?[]:[{type:'table', head:['Case',...frameYs(s).map((y,j)=>`F${j+1}: C̄_N / p (psf)`)], rows:lcases.map(lc=>[lc.name,...lc.frames.map(fr=>`${f(fr.cn,3)} / ${f(fr.p,1)}`)]), wide:true}]),
+      ...windFigs.slice(wcases.length)])}); }
+  sections.push({title:'Wind loads', subs:wSubs});
 
-  <h2 id="s4">4 · Wind Loading (ASCE 7-16)</h2>
-  <p>Wind is determined by the open-building monoslope free-roof procedure (ASCE 7-16 §27.3, Fig. 27.3-4). Because a canopy roof is open on both faces, net pressure coefficients C_N capture the combined top-and-bottom surface pressures. Four cases are required — two wind directions (γ = 0° toward the low side, γ = 180° up-slope toward the high side) by two flow patterns (Case A and Case B) — and each is applied as a separate MIDAS load case so the combinations can envelope the worst effect. Lateral wind on the fascia, columns, and windscreen is added as horizontal loads.</p>
-  ${windCalcSection}
-  ${windMath}
-  <h3>4.2 Lateral wind components</h3>
-  ${latMath}
-  <h3>4.3 Wind loading diagrams — all four cases</h3>
-  <p>Each diagram shows the roof net-pressure zones (with the step at mid-span between the windward and leeward halves), the column drag, the fascia point load, and any windscreen load, for that case. Arrows point in the true force direction: into the roof for downward pressure, away from the roof for suction.</p>
-  ${windImgs.map((w,i)=>imgTag(w.img,`Figure 4.${3+i} — ${w.wc.name}: ${w.wc.gamma===180?'wind up-slope toward the high side (downward pressure)':'wind toward the low side (suction)'}. C_NW=${w.wc.cnw.toFixed(2)}, C_NL=${w.wc.cnl.toFixed(2)}; p_lower=${w.wc.pLower.toFixed(1)} psf, p_upper=${w.wc.pUpper.toFixed(1)} psf.`)).join('')}
-  ${long3DMath}
+  // ---- 6 Load combinations ----
+  sections.push({title:'Load combinations', subs:[{title:'Strength combinations (ASCE 7-16 §2.3.1)', key:'C-lrfd', items:[
+    {type:'table', lazy:combos.length>20, title:`${combos.length} LRFD combinations`, head:['Name','Combination','Factors'], rows:combos.map(c=>[c.name,c.desc,c.terms.map(([n,k])=>`${k} ${n}`).join(' + ')])},
+    rpNote('An envelope of all strength combinations is also written to the MIDAS model; the governing reactions are taken from it.')]}]});
 
-  <h2 id="s5">5 · MIDAS Model</h2>
-  <p>The geometry and loads above are written to a MIDAS Civil text (.mct) file. Each physical member is meshed into multiple beam elements, sections reference the AISC10(US) database (DBUSER database type), and supports are applied at the column bases. The static load cases are combined into ASCE 7-16 strength combinations plus an envelope.</p>
-  <table class="kv"><tbody>
-    ${fld('Nodes',mesh.nodes.length)}${fld('Elements',mesh.elements.length)}
-    ${fld('Beam elements',mesh.elements.filter(e=>e.member==='beam').length)}
-    ${fld('Column elements',mesh.elements.filter(e=>/^col\d/.test(e.member)).length)}
-    ${is3d?fld('Edge / eave beam elements',mesh.elements.filter(e=>e.sec===3).length+` (${esc(s.longSect)}, section 3)`):''}
-    ${is3d&&purlinXs(s).length?fld('Purlin elements',mesh.elements.filter(e=>e.sec===4).length+` (${esc(s.purlinSect)}, section 4; ${purlinXs(s).length} purlins at x = ${purlinXs(s).map(x=>f(x,2)).join(', ')} ft)`):''}
-    ${is3d?fld('Frames',`${mesh.frames.length} at y = ${mesh.ys.map(y=>f(y,2)).join(', ')} ft`):''}
-    ${fld('Material','A36 / USER steel')}
-    ${fld('Base support',(is3d||s.baseFixity==='fixed')?'Fixed (111111)':'Pinned (111000)')}
-    ${fld('Static load cases','DL (+ self wt), Snow, Wind A-0/B-0/A-180/B-180'+(is3d?', Wind A-90/B-90/A-270/B-270':''))}
-    ${fld('Load combinations',`${nCombo} strength (ASCE 7-16 §2.3.1) + envelope`)}
-  </tbody></table>
-  ${imgTag(imgMesh,'Figure 5.1 — Meshed model: nodes and elements.')}
-  <h3>5.1 Wind case pressures</h3>
-  <table class="rpt"><thead><tr><th>Case</th><th>$C_{NW}$</th><th>$C_{NL}$</th><th>$p_W$ (psf)</th><th>$p_L$ (psf)</th></tr></thead><tbody>${wcRows}</tbody></table>
+  // ---- 7 Analysis model ----
+  const nEl=fn=>mesh.elements.filter(fn).length;
+  sections.push({title:'Analysis model', subs:[{title:'MIDAS model', items:F([kv([
+      ['Nodes / elements', `${mesh.nodes.length} / ${mesh.elements.length}`],
+      ['Roof beam / column elements', `${nEl(e=>e.member==='beam')} / ${nEl(e=>/^col\d/.test(e.member))}`],
+      ...(is3d?[['Edge / eave beam elements', String(nEl(e=>e.sec===3))],['Purlin elements', String(nEl(e=>e.sec===4))],['Frames', `${mesh.frames.length} at y = ${mesh.ys.map(y=>f(y,2)).join(', ')} ft`]]:[]),
+      ['Supports', (is3d||s.baseFixity==='fixed')?'Fixed (111111) at every column base':'Pinned (111000) at every column base'],
+      ['Static load cases', 'DL (+ self weight), Snow, Wind A-0, B-0, A-180, B-180'+(is3d?', A-90, B-90, A-270, B-270':'')],
+      ['Load combinations', `${combos.length} strength + envelope`]]),
+    rpNote(RES_SRC==='app'&&APP_RES?`Analysed in this tool: first-order linear elastic analysis of the generated .mct model (3D beam elements with shear deformation, the MCT supports, releases, load cases and combinations), ${APP_RES.planar?'solved as a plane frame':'solved in 3D'}. The same .mct file runs in MIDAS Civil.`:'Analysis results are pasted from MIDAS Civil (Results tab).'),
+    figMesh])}]});
 
-  ${hasMidas?`
-  <h2 id="s6">6 · Base Reactions (${RES_SRC==='app'?'in-app analysis':'from MIDAS'})</h2>
-  ${midasReactBlock}` : `
-  <h2 id="s6">6 · Base Reactions (pending analysis)</h2>
-  <p>No MIDAS results have been pasted. Run the model in MIDAS, paste the beam-force results in the Results tab, then regenerate this report to populate the governing base reactions, per-case tables, and the column-base free-body diagram. These are the design values for the foundation.</p>`}
-
-  ${resultsSection}
-
-  ${anchorSection}
-
-  <h2 id="s8">${nMct} · MIDAS MCT File</h2>
-  <pre>${esc(text)}</pre>
-
-  <h2 id="s9">${nAs} · Design Assumptions &amp; Limitations</h2>
-  <p>This model and report are a load-generation aid for a mono-slope canopy and are subject to review by the engineer of record. The following assumptions and limitations apply:</p>
-  <h3>${nAs}.1 Included in this model</h3>
-  <ul class="rpt-list">
-    <li>Mono-slope (single-pitch) open roof, ${nCols(s)} column line${nCols(s)>1?'s':''}, ${nCols(s)===1?'cantilever':s.baseFixity+' column bases'}.</li>
-    <li>Dead and snow as surface pressures over the tributary width, applied over the horizontal projection (bPROJ=YES); member self-weight added automatically.</li>
-    <li>${s.snowMode==='calc'?'Snow per ASCE 7-16 Ch. 7 (balanced), including the §7.3.4 minimum check.':'Snow entered manually as a uniform surface load.'}</li>
-    <li>Wind by the ASCE 7-16 §27.3 open-building monoslope free-roof method (Fig. 27.3-4): four net-pressure cases (A/B × γ=0°/180°), ${s.flow==='clear'?'clear':'obstructed'} wind flow, plus fascia, column, and ${s.screen!=='none'?'windscreen':'(no windscreen)'} lateral loads.</li>
-    <li>${nCombo} LRFD strength load combinations (ASCE 7-16 §2.3.1) plus an envelope, generated as MIDAS load cases/combinations.</li>
-    ${is3d?`<li>3D structure: ${frameYs(s).length} identical frames tied by longitudinal edge and eave beams (${esc(s.longSect)}). ${loadViaPurlins(s)?`Roof gravity and wind loads are applied to the purlins and eave beams by their roof width, and MIDAS carries them into the frames; the overhangs are carried as cantilevers. Purlins are modeled at the roof-line elevation with their strong axis vertical (no roll to the roof slope), connected rigidly to the frame beams.`:`Roof gravity and wind loads go to the frame beams by tributary width, and the end frames include the front and back overhangs. The edge and eave beams carry their own self weight and the end fascia force, and they provide continuity between frames. They are not separately loaded by the overhang roof area.`}</li>
-    <li>Longitudinal stability comes from the columns acting as fixed-base cantilevers (weak-axis bending for W-shapes). No bracing is modeled.</li>
-    ${releaseSummary3D(s).length?`<li>Member end releases (MCT *FRAME-RLS, major and minor axis moments My, Mz): ${releaseSummary3D(s).join('; ')}.${s.relRafter==='pinned'?' The pinned rafter tips carry an RY restraint so the eave beams cannot roll about their own axis (a torsional brace at each frame).':''}</li>`:''}
-    <li>Wind along the length per ASCE 7-16 Fig. 27.3-7 (C<sub>N</sub> by distance from the windward edge, cases A/B, γ = 90°/270°), averaged over each frame\u2019s roof strip.</li>`:''}
-  </ul>
-  <h3>${nAs}.2 NOT included — verify separately if applicable</h3>
-  <ul class="rpt-list">
-    <li><b>Unbalanced / drift / partial / sliding snow</b> (ASCE 7-16 §7.6–7.9, §7.12) is not generated; only balanced snow is applied.</li>
-    <li><b>Seismic loads</b> (ASCE 7-16 Ch. 12) are not generated.</li>
-    <li><b>Rain, ponding, ice, and thermal</b> loads are not considered.</li>
-    <li><b>Member design, code checks, and connection design</b> (AISC 360) are not performed; this tool generates loads and reports analysis reactions only.</li>
-    <li><b>Serviceability / deflection</b> limits are not checked.</li>
-    <li><b>Foundation design</b> is not included; base reactions are reported for the foundation engineer.${anchorSection?' The base plates and anchor rods are checked in Section 8 (anchorage only: the pedestal and footing themselves are not designed).':''}</li>
-    <li>The roof slope factor \\(C_s\\) uses the conservative "all-other-surfaces" curve and does not distinguish warm/slippery roofs.</li>
-    <li>C_N coefficients are interpolated within ASCE Fig. 27.3-4 and clamped at the 0°–45° table range.</li>
-  </ul>
-  <h3>${nAs}.3 Engineer responsibilities</h3>
-  <ul class="rpt-list">
-    <li>Confirm the MIDAS local-axis orientation matches the reaction extraction (Axial→N, Shear-z→V, Moment-y→M) and the pinned-connection release DOF, if used.</li>
-    <li>Verify section designations, material properties, mean roof height, exposure/risk categories, and all input pressures.</li>
-    <li>Confirm the governing combinations are the envelope of the strength combinations, and that all applicable load types for the project and jurisdiction have been considered.</li>
-  </ul>
-  <p class="note-sm">Prepared with the Canopy MCT Generator. Reviewed and sealed by the engineer of record below.</p>
-  <div style="margin-top:24px;display:flex;gap:40px">
-    <div style="border-top:1px solid #333;padding-top:4px;min-width:220px">Engineer of Record / P.E.</div>
-    <div style="border-top:1px solid #333;padding-top:4px;min-width:120px">Date</div>
-  </div>`;
-
-  // store for print/download
-  _reportStyle=reportStyle; _reportBody=reportBody; _reportDate=today;
-
-  // render inline into the Output tab, then typeset with MathJax
-  const inlineHost=document.getElementById('reportInline');
-  inlineHost.innerHTML=`<div class="report-scope">${reportBody}</div>`;
-  // scoped style (inject once)
-  if(!document.getElementById('reportScopeStyle')){
-    const st=document.createElement('style'); st.id='reportScopeStyle';
-    st.textContent='.report-scope{font-family:Inter,sans-serif}'+reportStyle.replace(/\n/g,'\n.report-scope ').replace(/^/,'.report-scope ');
-    document.head.appendChild(st);
+  // ---- 8 Results ----
+  if(hasRes){
+    const loads=[...new Set(RESULT_ROWS.map(r=>r.load).filter(Boolean))], lng=is3d;
+    const caseRows=[]; const frames=is3d?frameYs(s).map((_,j)=>j):[undefined];
+    loads.forEach(L=>frames.forEach(fj=>{ midasColumnForces(L,fj).forEach(c=>{ if(c.reaction) caseRows.push([L,c.label,{t:uForce(c.reaction.N),n:true},{t:uForce(c.reaction.V),n:true},{t:uMom(c.reaction.M),n:true}].concat(lng?[{t:uForce(c.reaction.VL||0),n:true},{t:uMom(c.reaction.ML||0),n:true}]:[])); }); }));
+    let figFBD=null; try{ reactShowCase='__gov__'; const _a=reactAllFrames,_m=fbdShowMember; reactAllFrames=false; fbdShowMember=false; drawFBDInto('plotReact', midasData()); reactAllFrames=_a; fbdShowMember=_m;
+      figFBD=rpFig(await rpSnap('plotReact'), `Column base free body${is3d?` (frame ${Math.min(resFrame,frameYs(s).length-1)+1})`:''}: governing support reactions on each column (envelope).`); }catch(e){}
+    const peak=loads.map(L=>{ const rr=RESULT_ROWS.filter(r=>r.load===L); return {cells:[L,{t:uMom(Math.max(...rr.map(r=>Math.abs(r.momentY)))),n:true},{t:uForce(Math.max(...rr.map(r=>Math.abs(r.shearZ)))),n:true},{t:uForce(Math.max(...rr.map(r=>Math.abs(r.axial)))),n:true}], cls:/envelope/i.test(L)?'hi':''}; });
+    sections.push({title:'Analysis results', subs:[
+      {title:'Governing base reactions', key:'R-gov', items:F([rpNote(`From the ${src}, read at each column base element. Sign convention: N + = compression; V and M in the frame plane${lng?'; V_long and M_long along the canopy length (column weak axis), from the wind along the length':''}. Each value is the one of largest magnitude over the envelope, with its sign; the components need not act together.`),
+        stale?rpNote('The results are out of date: re-run the analysis.',true):null,
+        {type:'table', head:['Support',`N (${uForceLbl()})`,'combination',`V (${uForceLbl()})`,'combination',`M (${uMomLbl()})`,'combination'].concat(lng?[`V_long (${uForceLbl()})`,`M_long (${uMomLbl()})`]:[]), rows:govRows, wide:true}, figFBD])},
+      {title:'Reactions by load case and combination', items:[{type:'table', lazy:true, title:`Reactions at every column base, ${loads.length} cases and combinations`, head:['Load / combination','Support',`N (${uForceLbl()})`,`V (${uForceLbl()})`,`M (${uMomLbl()})`].concat(lng?[`V_long (${uForceLbl()})`,`M_long (${uMomLbl()})`]:[]), rows:caseRows, wide:true}]},
+      {title:'Member force peaks', items:[{type:'table', lazy:loads.length>20, title:'Peak |M|, |V|, |N| over all members, per case', head:['Load / combination',`|M|max (${uMomLbl()})`,`|V|max (${uForceLbl()})`,`|N|max (${uForceLbl()})`], rows:peak},
+        rpNote('Member forces and diagrams for every member and combination: [[tab:results|Results tab]] (3D view: moment and shear diagrams on the whole structure).')]}]});
   }
-  // typeset (MathJax is loaded in the app head for inline rendering)
-  if(window.MathJax&&window.MathJax.typesetPromise){ try{await window.MathJax.typesetPromise([inlineHost]);}catch(e){} }
-  inlineHost.dataset.built='1';
-  }catch(err){
-    const host=document.getElementById('reportInline');
-    if(host) host.innerHTML='<div class="placeholder">Report generation hit an error. Try reopening the Output tab.</div>';
-    console.warn('buildReport failed:',err);
-  }finally{
-    _reportBuilding=false;
+
+  // ---- 9 Anchorage ----
+  if(hasRes && anchorInUse()){ try{ await anchorEvaluateAll(); }catch(e){ console.warn('anchorage',e); }
+    const A2=anchorState(), gs=A2.groups.filter(gr=>anchorColumnsOf(gr.id).length);
+    if(gs.length) sections.push({title:'Column base anchorage', subs:[
+      {title:'Basis', key:'A-sum', items:[rpNote('Each anchorage group is one base plate and anchor rod detail, checked with the Base Plate & Anchor Bolt Designer (All-Structural) for every LRFD combination at every column assigned to it: AISC Design Guide 1 (bearing, plate bending), AISC 360 J3.10, ACI 318-19 Chapter 17 (cast-in anchors). The assumptions follow Hilti PROFIS Engineering; see the "How these checks match Hilti PROFIS" panel on the [[tab:anchor|Anchorage tab]]. The full worked calculation of a group is its designer Report (Anchorage tab, Open details).')]},
+      ...gs.map(gr=>{ const d=anchorGroupDesc(gr), ev=_anchorEval[gr.id]||{}, w=anchorWorst(ev);
+        return {title:`${gr.name}: ${anchorColumnsOf(gr.id).length} column${anchorColumnsOf(gr.id).length>1?'s':''}`, items:F([kv([['Columns', anchorColumnsOf(gr.id).map(c=>c.label).join(', ')],['Base plate', d.plate],['Anchor rods', d.rods],['Concrete', d.conc],['Stand-off', d.grout],
+            ['Anchor shear', gr.shareHilti!==false?'shared equally, V/n (as Hilti PROFIS)':'by the governing ACI Fig. R17.7.2.1b case'],
+            ['Governing', w&&isFinite(w.v)?`${f(w.v,2)} ${w.v<=1?'OK':'NG'}, ${w.label} (${w.combo||''})`:'not checked']]),
+          ev.checks?{type:'table', head:['Check','Reference','Ratio','Governing combination'], rows:ev.checks.map(c=>[c.label,c.ref||'',c.na?'n/a':{t:f(c.dcr,3),n:true,cls:c.dcr<=1?'ok':'ng'},c.combo||''])}:null,
+          ev.blockers?rpNote('Not checked: '+ev.blockers.join('; '),true):null, ev.err?rpNote('Designer error: '+ev.err,true):null,
+          ev.warns&&ev.warns.length?rpNote('Designer warnings: '+ev.warns.slice(0,6).join('; ')+(ev.warns.length>6?' …':'')):null])}; })]});
   }
+
+  // ---- Assumptions ----
+  sections.push({title:'Assumptions and limitations', subs:[
+    {title:'Included', items:F([
+      rpNote(`Mono-slope (single-pitch) open roof, ${nCols(s)} column line${nCols(s)>1?'s':''}, ${nCols(s)===1?'cantilever':(is3d?'fixed':s.baseFixity)+' column bases'}.`),
+      rpNote('Dead and snow as surface pressures over the tributary width, on the horizontal projection; member self weight added automatically.'),
+      rpNote(s.snowMode==='calc'?'Snow per ASCE 7-16 Ch. 7 (balanced), including the §7.3.4 minimum.':'Snow entered as a uniform surface load.'),
+      rpNote(`Wind by the ASCE 7-16 §27.3 open-building monoslope free-roof method (Fig. 27.3-4): four cases (A/B × γ = 0°/180°), ${s.flow==='clear'?'clear':'obstructed'} flow, with fascia, column${s.screen!=='none'?' and windscreen':''} lateral loads.`),
+      is3d?rpNote(`3D: ${frameYs(s).length} frames tied by the eave beams${purlinXs(s).length?' and purlins':''}; longitudinal stability from the fixed-base columns (no bracing); wind along the length per Fig. 27.3-7 (γ = 90°/270°).`):null,
+      is3d&&releaseSummary3D(s).length?rpNote(`Member end releases (major and minor axis moments): ${releaseSummary3D(s).join('; ')}.${s.relRafter==='pinned'?' The pinned rafter tips carry an RY restraint (torsional brace of the eave beams at each frame).':''}`):null,
+      rpNote(`${combos.length} LRFD strength combinations (ASCE 7-16 §2.3.1) and an envelope.`)])},
+    {title:'Not included: verify separately where applicable', items:[
+      rpNote('Unbalanced, drift, partial and sliding snow (ASCE 7-16 §7.5 to §7.9): only balanced snow is applied (a monoslope roof has no unbalanced case under §7.6).'),
+      rpNote('Seismic loads (ASCE 7-16 Ch. 12); rain, ponding, ice and thermal loads.'),
+      rpNote('Member design and code checks (AISC 360) and serviceability limits.'),
+      rpNote(anchorInUse()?'Foundation design: the base plates and anchor rods are checked (anchorage only); the pedestal and footing are not designed.':'Foundation and anchorage design: the base reactions are reported for the foundation engineer.'),
+      rpNote('C_N is interpolated within Fig. 27.3-4 and limited to its 0° to 45° range; the snow slope factor C_s uses the all-other-surfaces curve.')]},
+    {title:'Engineer of record', items:[rpNote('Verify the inputs (sections, material, mean roof height, exposure and risk category, pressures), that all load types for the project and jurisdiction are considered, and the MIDAS local axes against the reaction extraction (Axial → N, Shear-z → V, Moment-y → M).')]}]});
+
+  const refs=((s.projRefs&&s.projRefs.trim())?s.projRefs.split('\n').filter(x=>x.trim()):XL_DEFAULT_REFS).map(r=>{ const m=r.split(/\s+[—–-]\s+/); return m.length>1?[m[0],m.slice(1).join(' — ')]:[r,'']; });
+  const proj=s.projTitle||'Steel canopy';
+  return {title:'Steel Canopy Design', subtitle:proj, code:'ASCE 7-16 · AISC 360-16 · ACI 318-19 Ch. 17 · MIDAS Civil',
+    info:[['Project',s.projTitle||''],['Project no.',s.projNo||''],['Subject',s.projSubject||''],['Task',s.projTask||''],['Computed by',s.projComputedBy||''],['Date',s.projDate||today],['Checked by',s.projCheckedBy||''],['Checked date',s.projCheckedDate||'']],
+    head:{left:proj, right:'Steel Canopy Designer', foot:'Generated '+today}, refs, sections};
 }
 
-function reportFullHTML(autoPrint){
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Canopy Report ${_reportDate}</title>
-  <script>window.MathJax={tex:{inlineMath:[['\\\\(','\\\\)'],['$','$']],displayMath:[['\\\\[','\\\\]']]},svg:{fontCache:'global'}};<\/script>
-  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"><\/script>
-  <style>${_reportStyle}
-    .btn{padding:8px 16px;background:#1d4e6b;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;margin:0 8px 16px 0}
-    @media print{.noprint{display:none}}
-  </style></head><body>
-  <button class="btn noprint" onclick="window.print()">Print / Save as PDF</button>
-  ${_reportBody}
-  ${autoPrint?`<script>
-    // wait for MathJax typesetting (if present) then open the print dialog automatically
-    (function(){
-      function go(){ setTimeout(function(){ window.focus(); window.print(); }, 350); }
-      if(window.MathJax&&MathJax.startup&&MathJax.startup.promise){ MathJax.startup.promise.then(go).catch(go); }
-      else { window.addEventListener('load',go); }
-    })();
-  <\/script>`:''}
-  </body></html>`;
+async function buildReport(){
+  const host=document.getElementById('reportInline'); if(!host || REPORT.building) return;
+  if(!window.SharedReport || !window.SharedSteps){ host.innerHTML='<div class="placeholder">The report viewer (shared/report.js, shared/steps.js) is not embedded in this file: run tools/sync-bpad.py.</div>'; return; }
+  REPORT.building=true;
+  if(!host.dataset.built) host.innerHTML='<div class="placeholder">Generating report…</div>';
+  try{
+    const M=await buildReportModel(); REPORT.model=M;
+    const goto=name=>{ const b=document.querySelector(`#tabnav button[data-tab="${name}"]`); if(b) b.click(); };
+    REPORT.api=SharedReport.mount(host, M, {closed:REPORT.closed, onGoto:goto, spy:true});
+    host.dataset.built='1';
+  }catch(err){ console.warn('buildReport failed:',err); host.innerHTML='<div class="placeholder">Report generation hit an error: '+aesc(err.message)+'</div>'; }
+  finally{ REPORT.building=false; }
 }
-function printReport(){
-  if(!_reportBody){buildReport().then(()=>setTimeout(printReport,400));return;}
-  const win=window.open('','_report');
-  if(!win){ alert('Please allow pop-ups for this site to download the PDF report.'); return; }
-  win.document.write(reportFullHTML(true)); win.document.close();
+async function printReport(){
+  const host=document.getElementById('reportInline');
+  if(!REPORT.api || !host || !host.dataset.built) await buildReport();
+  if(REPORT.api) REPORT.api.print();
 }
-function downloadReport(){
-  if(!_reportBody){buildReport().then(()=>setTimeout(downloadReport,400));return;}
-  const blob=new Blob([reportFullHTML(false)],{type:'text/html'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download=`Canopy_Report_${_reportDate}.html`;document.body.appendChild(a);a.click();
-  setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},100);
-}
-let _reportStyle='',_reportBody='',_reportDate='';
 
 function downloadMCT(){
   const {text}=buildMCT(state);
@@ -5259,7 +4906,7 @@ function drawGeom(){
      tex: colX.map((x,i)=>`x_{${i+1}}=${f(x,2)}`).join(',\\ ') + `\\ \\text{ft}`}
   );
   if(is3D(s)) items.push(...frameLayoutItems(s));
-  renderDerivation('geomDerived', items);
+  DERIV.geomDerived=items; renderDerivation('geomDerived', items);
 }
 
 // 3D frame layout derivation (shared by the Geometry tab and the report)
@@ -5521,7 +5168,7 @@ function renderGravDerived(s,g,ld){
   items.push({h:'Shared'});
   items.push({label:'Tributary width and span used above',
     tex:`B = ${f(B,1)}\\ \\text{ft},\\qquad L = ${f(L,2)}\\ \\text{ft},\\qquad L_{beam} = ${f(Lbeam,2)}\\ \\text{ft}`});
-  renderDerivation('gravDerived', items);
+  DERIV.gravDerived=items; renderDerivation('gravDerived', items);
 }
 
 // ---- Tab 3: wind loading. drawWindInto renders ANY case into a target plot div
@@ -5854,7 +5501,7 @@ function renderWindDerived(s,g,ld){
     items.push({label:'No windscreen', tex:`\\text{none}`});
   }
   if(is3D(s)) items.push(...longWindItems(s,g,ld));
-  renderDerivation('windDerived', items);
+  DERIV.windDerived=items; renderDerivation('windDerived', items);
 }
 
 // ---- Tab 5: member/node key diagram ----
@@ -6668,29 +6315,6 @@ function anchorGroupDesc(g){
     grout:anchorSoDesc(g)};
 }
 
-// report section: every group's detail, columns, checks and per-column ratios
-function anchorReportHTML(num){
-  const A=anchorState(), e=t=>aesc(t), cell=v=>v==null?'—':`<b style="color:${v<=1?'#2f6b2f':'#b3402d'}">${isFinite(v)?f(v,2):'∞'} ${v<=1?'OK':'NG'}</b>`;
-  const commit=(document.getElementById('bpadGz')||{dataset:{}}).dataset.commit||'';
-  let h=`<h2 id="sA">${num} · Column Base Anchorage</h2>
-  <p>Base plates and cast-in anchor rods are checked with the Base Plate &amp; Anchor Bolt Designer (All-Structural, BasePlateAnchorDesigner.html @ ${e(commit)}): AISC Design Guide 1 (2nd ed.) for bearing and plate bending, AISC 360 §J3.10 for bolt bearing, and ACI 318-19 Chapter 17 for the anchors. Columns are grouped into anchorage groups; each group is checked for every LRFD strength combination at every column assigned to it, with the concurrent column base reactions from the ${RES_SRC==='app'?'in-app linear elastic analysis':'MIDAS analysis'} (N, V, M in the frame plane${is3D(state)?' and V<sub>long</sub>, M<sub>long</sub> along the canopy length':''}).</p>
-  <table class="rpt"><thead><tr><th>Group</th><th>Columns</th><th>Base plate</th><th>Anchor rods</th><th>Concrete</th><th>Governing ratio</th><th>Governing check · column · combination</th></tr></thead><tbody>`;
-  A.groups.forEach(g=>{ const d=anchorGroupDesc(g), ev=_anchorEval[g.id], w=anchorWorst(ev), cols=anchorColumnsOf(g.id);
-    h+=`<tr><td><b>${e(g.name)}</b></td><td>${cols.map(c=>c.label).join(', ')||'—'}</td><td>${e(d.plate)}</td><td>${e(d.rods)}</td><td>${e(d.conc)}; ${e(d.grout)}</td><td>${cell(w?w.v:null)}</td><td>${w?`${e(w.label)}<br><span class="sm">${e(w.combo||'')}</span>`:(ev&&ev.blockers?e(ev.blockers[0]):'')}</td></tr>`; });
-  h+='</tbody></table>';
-  A.groups.forEach((g,k)=>{ const ev=_anchorEval[g.id]; if(!ev||!ev.ok) return;
-    const modeLbl={}; (ev.modes||[]).forEach(m=>{ modeLbl[m.key]=m.label; });
-    const perCol={}; (ev.rows||[]).forEach(r=>{ const c=String(r.combo).split(' · ')[0]; if(!perCol[c]||r.worst>perCol[c].worst) perCol[c]=r; });
-    h+=`<h3>${num}.${k+1} ${e(g.name)}</h3>
-    <table class="rpt"><thead><tr><th>Check</th><th>Reference</th><th>Ratio</th><th>Governing column · combination</th></tr></thead><tbody>`+
-      ev.checks.filter(c=>!c.na).map(c=>`<tr><td>${e(c.label)}</td><td>${e(c.ref||'')}</td><td>${cell(isFinite(c.dcr)?c.dcr:Infinity)}</td><td>${e(c.combo||'')}</td></tr>`).join('')+
-    `</tbody></table>
-    <table class="rpt"><thead><tr><th>Column</th><th>Governing ratio</th><th>Combination</th><th>Check</th></tr></thead><tbody>`+
-      anchorColumnsOf(g.id).map(c=>{ const r=perCol[c.label]; return `<tr><td>${c.label}</td><td>${r?cell(r.worst):'—'}</td><td>${r?e(String(r.combo).split(' · ')[1]||''):''}</td><td>${r?e(modeLbl[r.worstKey]||r.worstKey||''):''}</td></tr>`; }).join('')+
-    `</tbody></table><p class="note-sm">${ev.n} load combinations checked.${ev.warns&&ev.warns.length?' Designer notes: '+ev.warns.slice(0,3).map(e).join('; ')+(ev.warns.length>3?' …':''):''} The full worked calculation for this group (equations, drawings, every combination) is printed from the designer: Anchorage tab › Open details › Print / PDF report.</p>`;
-  });
-  return h;
-}
 
 // ---- UI ----
 async function refreshAnchorage(reloadOpen){
@@ -7001,7 +6625,6 @@ document.getElementById('reactFrameSel').addEventListener('change',e=>{ if(e.tar
 document.getElementById('reportBtn').onclick=()=>{const h=document.getElementById('reportInline');if(h)delete h.dataset.built;buildReport();};
 document.getElementById('printReportBtn').onclick=printReport;
 document.getElementById('xlsxBtn').onclick=function(){ exportCalcXlsx(this); };
-document.getElementById('downloadReportBtn').onclick=downloadReport;
 
 // ============================================================================
 // DXF DRAWINGS — a plan set exported as AutoCAD DXF. Adapted from the GirderDetail
@@ -8615,6 +8238,953 @@ else window.addEventListener('load',()=>initWhenReady(0));
   }
 
   window.SharedDxf = { drawing, toSVG, sheetSVG, sheetBorder, SHEET_INSET, printSheets, PRINT_NOTE, viewer, str, frac, fmtIn, fmtFtIn, num, dimGeo, bbox, parse, validate, download, ACI };
+})();
+
+</script>
+<script id="sharedSteps" data-src="All-Structural shared/steps.js" data-commit="e74d773">
+/* shared/steps.js — worked calculation steps (window.SharedSteps).
+   Classic script, no DOM at load (wire() and the print hook touch the page only in a browser). Created 2026-10-29 (Steel Bridge rebuild, docs/REBUILD_PLAN.md §5): every engine function
+   returns its values and the steps that work them out, and the screen, the printed report and the tests all render
+   those same steps. The format is documented in shared/README.md ("Worked steps"); keep the two in step.
+
+   A step is a plain object:
+     { id, label, sym, eq, sub, value, unit, d, ref, note, ok }
+       id     stable key, unique within one result, dotted ('sec.cn.yb'); links and "see §x.y" point to it
+       label  what the step finds, in words
+       sym    symbol of the result (equation notation, below)
+       eq     the equation in symbols, without the result symbol ('\frac{\sum A y}{\sum A}')
+       sub    the same equation with the values substituted (numbers already formatted)
+       value  the result: a full-precision number, or a string for a non-numeric outcome (a case, a yes/no)
+       unit   unit of value ('in', 'in^{2}', 'kip-ft', '' for none)
+       d      decimals to show value with (display only; value is never rounded)
+       ref    code reference with its edition, 'AASHTO LRFD 10th Ed. Eq. D6.1-…' ('' if none)
+       note   optional remark (a condition, why a case was chosen). A string, or (SNL, 2026-11-08) a list note for a long remark:
+              { lead, items: [[lead, text] | text, …], action? } — a bold lead, then bullets with bold lead words; action (a string or a
+              list of strings: "Input needed…", "Decision (pending engineer review): …") on its own line(s) first, in warning style.
+              noteParts(note) / noteText(note) below; shared/report.js renders it (screen, print, plain text). A string note is unchanged.
+       ok     optional: true / false for a test step (a condition met or not); undefined otherwise
+   It renders as:  label:  sym = eq = sub = value unit   (ref)
+
+   Equation notation (eq, sub, sym, unit): a small TeX subset that is also valid KaTeX, so that the built-in renderer and
+   KaTeX (toHTML, when the page has loaded it; 2026-10-29) show the same strings: _{…} subscript, ^{…} superscript, \frac{a}{b}, \bar{x}, \sqrt{x}, \text{…},
+   Greek letters (\gamma, \phi, \lambda, \beta, \rho, …), \sum, \cdot, \times, \le, \ge, \lt, \gt, \ne, \pm, \minus,
+   \prime, \ell, \tan, \circ (30^{\circ} -> 30°), '\,' (thin space). Nothing else. toText() renders it without any library; toHTML() with KaTeX when window.katex
+   exists, else without (see below). tests/engine/tex.test.mjs parses every step string of the engine tests with KaTeX. */
+(function () {
+  'use strict';
+  const fmt = (x, d) => {
+    if (typeof x !== 'number' || !isFinite(x)) return '—';
+    const s = x.toFixed(d == null ? 2 : d); return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s;
+  };
+  /* n(x, d): a number for a substitution; d decimals (default 2); negative values in parentheses are the caller's choice. */
+  const n = (x, d) => fmt(x, d);
+  /* g(x): thousands grouped, rounded to d decimals (default 0), for large values such as I and Mp. */
+  const g = (x, d) => {
+    if (typeof x !== 'number' || !isFinite(x)) return '—';
+    const s = fmt(x, d == null ? 0 : d), [i, f] = s.split('.');
+    return i.replace(/\B(?=(\d{3})+(?!\d))/g, '{,}') + (f ? '.' + f : '');
+  };
+
+  const KEYS = ['id', 'label', 'sym', 'eq', 'sub', 'value', 'unit', 'd', 'ref', 'note', 'ok'];
+  function step(o) {
+    if (!o || !o.id || !o.label) throw new Error('SharedSteps.step: id and label are required');
+    const s = {};
+    KEYS.forEach(k => { s[k] = o[k] === undefined ? (k === 'value' ? null : k === 'd' ? 2 : k === 'ok' ? undefined : '') : o[k]; });
+    if (s.ok === undefined) delete s.ok;
+    return s;
+  }
+  /* ---------- list notes (SNL, 2026-11-08): a step note as a lead and bullets ----------
+     noteParts(note) -> null for a string note (or none); for a list note { action: [string…], lead: string, items: [[lead, text]…] }
+                        (an item given as a plain string becomes ['', text]; empty items are dropped).
+     noteSep(lead)   -> ' ' when the item lead already ends in punctuation (':', '.', '?', '!', '—'), else ': '.
+     noteText(note)  -> the note as plain text: a string note as it is; a list note as lines: each action, the lead, then
+                        '• lead: text' per item, joined with '\n'. */
+  const noteParts = note => {
+    if (!note || typeof note !== 'object' || Array.isArray(note)) return null;
+    const str = v => (v == null ? '' : String(v));
+    const action = (Array.isArray(note.action) ? note.action : note.action != null && note.action !== '' ? [note.action] : []).map(str).filter(Boolean);
+    const items = (note.items || []).map(t => (Array.isArray(t) ? [str(t[0]), str(t[1])] : ['', str(t)])).filter(t => t[0] || t[1]);
+    return { action, lead: str(note.lead), items };
+  };
+  const noteSep = lead => (/[:.?!\u2014]$/.test(lead) ? ' ' : ': ');
+  const noteText = note => {
+    const P = noteParts(note); if (!P) return note == null ? '' : String(note);
+    return P.action.concat(P.lead ? [P.lead] : [], P.items.map(([l, t]) => '• ' + (l ? l + (t ? noteSep(l) : '') : '') + t)).join('\n');
+  };
+  /* work(prefix): a collector. w.add({...}) stores a step (id prefixed with 'prefix.') and returns its value, so an
+     engine writes  const yb = w.add({ id: 'yb', …, value: … });  w.steps is the list, in order. */
+  function work(prefix) {
+    const steps = [];
+    return {
+      steps,
+      add(o) { const s = step({ ...o, id: prefix ? prefix + '.' + o.id : o.id }); steps.push(s); return s.value; },
+      take(list) { (list || []).forEach(s => steps.push(s)); }
+    };
+  }
+
+  /* ---------- rendering of the equation notation ---------- */
+  const SYM = { alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', Delta: 'Δ', epsilon: 'ε', eta: 'η', theta: 'θ', lambda: 'λ', mu: 'μ', pi: 'π',
+    rho: 'ρ', sigma: 'σ', Sigma: 'Σ', tau: 'τ', phi: 'φ', psi: 'ψ', omega: 'ω', chi: 'χ', sum: 'Σ', cdot: '·', times: '×', le: '≤', ge: '≥',
+    lt: '<', gt: '>', ne: '≠', pm: '±', minus: '−', prime: '′', infty: '∞', to: '→', approx: '≈', ldots: '…', max: 'max', min: 'min',
+    ell: 'ℓ', tan: 'tan', circ: '°' };   // ell, tan, circ: added 2026-10-29 (the engines' \ell, \tan θ, 30^{\circ}); before, the words "ell", "tan", "circ"
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  /* TXP (2026-11-07): the plain-text path only (toText, render(…, false)): the TeX the tools write beyond the subset above
+     (\mathrm{kips}, \tfrac, \qquad, \varphi, \checkmark, \begin{cases}, …) as readable text instead of the command names
+     ("mathrmkips", "tfrac", "qquad"). TXP itself left the HTML path (toHTML without KaTeX, the report's inline notation) as it was. Display only.
+     TXH (2026-11-07): the same commands on the built-in HTML path (toHTML without KaTeX, line()/summary() without KaTeX, and the report's
+     $…$ in titles, notes and cells), as HTML: fractions stacked (.st-frac), sub/superscripts, Unicode symbols, cases / aligned / matrices as
+     an inline table. The KaTeX path, the plain text (TXP) and toText's legacy option are unchanged. Display only. */
+  const TSYM = { varphi: 'φ', vartheta: 'θ', varepsilon: 'ε', varrho: 'ρ', varsigma: 'σ', kappa: 'κ', nu: 'ν', xi: 'ξ', zeta: 'ζ', iota: 'ι',
+    upsilon: 'υ', Gamma: 'Γ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω', Upsilon: 'Υ',
+    leq: '≤', geq: '≥', leqslant: '≤', geqslant: '≥', neq: '≠', mp: '∓', div: '÷', ast: '*', star: '*', bullet: '•', checkmark: '✓',
+    Rightarrow: '⇒', rightarrow: '→', Leftarrow: '⇐', leftarrow: '←', Leftrightarrow: '⇔', leftrightarrow: '↔', implies: '⇒', iff: '⇔',
+    uparrow: '↑', downarrow: '↓', Uparrow: '⇑', Downarrow: '⇓', mapsto: '↦', perp: '⊥', parallel: '∥', sim: '~', simeq: '≃', cong: '≅',
+    equiv: '≡', propto: '∝', in: '∈', notin: '∉', subset: '⊂', cup: '∪', cap: '∩', forall: '∀', exists: '∃', partial: '∂', nabla: '∇',
+    int: '∫', iint: '∬', oint: '∮', prod: 'Π', cdots: '⋯', dots: '…', dotsb: '⋯', dotsc: '…', vdots: '⋮', angle: '∠', deg: '°',
+    lfloor: '⌊', rfloor: '⌋', lceil: '⌈', rceil: '⌉', langle: '⟨', rangle: '⟩', vert: '|', Vert: '‖', mid: '|', lvert: '|', rvert: '|',
+    lbrack: '[', rbrack: ']', lbrace: '{', rbrace: '}', backslash: '\\', '|': '‖', colon: ':', ll: '≪', gg: '≫', triangle: '△', square: '□', degree: '°' };
+  const HSYM = { textendash: '–', textemdash: '—', cdotp: '·', circlearrowleft: '↺', circlearrowright: '↻', emptyset: '∅', varnothing: '∅' };   // TXH: HTML path only
+  const TFRAC = /^(dfrac|tfrac|cfrac)$/;
+  const TWRAP = /^(mathrm|mathbf|mathit|mathsf|mathtt|mathnormal|mathcal|mathbb|mathscr|textrm|textbf|textit|textsf|texttt|textup|textnormal|emph|operatorname|boldsymbol|bm|boxed|mathrel|mathbin|mathop|mathord|mathopen|mathclose|mathpunct|overbrace|underbrace|underline|hbox|mbox|fbox)$/;
+  const TDROP = /^(displaystyle|textstyle|scriptstyle|scriptscriptstyle|limits|nolimits|relax|big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|biggl|biggr|Biggl|Biggr|middle|nonumber|notag|centering|small|tiny|large|Large|normalsize|footnotesize)$/;
+  const TOPS = /^(sin|cos|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|coth|log|ln|lg|exp|lim|det|arg|sgn)$/;
+  const TACC = { hat: '\u0302', widehat: '\u0302', tilde: '\u0303', widetilde: '\u0303', vec: '\u20D7', dot: '\u0307', ddot: '\u0308', overline: '\u0304', check: '\u030C', breve: '\u0306', acute: '\u0301', grave: '\u0300' };
+  function render(src, html, rd) {   // rd (TXP): plain text, readable (toText default); false: the plain text as before TXP (opt.legacy)
+    let i = 0;
+    const group = () => {   // the next {…} group or single character / command
+      while (src[i] === ' ') i++;
+      if (src[i] === '{') { let depth = 0, j = i; for (; j < src.length; j++) { if (src[j] === '{') depth++; else if (src[j] === '}' && --depth === 0) break; }
+        const inner = src.slice(i + 1, j); i = j + 1; return inner; }
+      if (src[i] === '\\') { const m = /^\\([A-Za-z]+|.)/.exec(src.slice(i)); i += m[0].length; return m[0]; }
+      return src[i++] || '';
+    };
+    const atom = s => /^[\p{L}\p{N}_.′\u0304]*$/u.test(s.replace(/<[^>]+>/g, ''));
+    let out = '';
+    /* TXP: one command of the plain-text path (true: handled); the subset's own commands fall through to the shared code below */
+    const txt = cmd => {
+      if (TFRAC.test(cmd)) { const a = render(group(), false, true), b = render(group(), false, true); out += `${atom(a) ? a : '(' + a + ')'}/${atom(b) ? b : '(' + b + ')'}`; return true; }
+      if (TWRAP.test(cmd)) { out += render(group(), false, true); return true; }
+      if (TDROP.test(cmd)) { while (src[i] === ' ') i++; return true; }
+      if (cmd === 'textcolor' || cmd === 'colorbox') { group(); out += render(group(), false, true); return true; }
+      if (cmd === 'color' || cmd === 'phantom' || cmd === 'hphantom' || cmd === 'vphantom' || cmd === 'label') { group(); return true; }
+      if (cmd === 'stackrel' || cmd === 'overset' || cmd === 'underset') { group(); out += render(group(), false, true); return true; }
+      if (cmd === 'quad') { out += ' '; return true; }
+      if (cmd === 'qquad') { out += '  '; return true; }
+      if (cmd === '!' || cmd === 'negthinspace' || cmd === 'allowbreak') return true;
+      if (cmd === ':' || cmd === '>' || cmd === 'thinspace' || cmd === 'medspace' || cmd === 'thickspace' || cmd === 'enspace') { out += ' '; return true; }
+      if (/^(kern|mkern|hskip|mskip|hspace|vspace)$/.test(cmd)) { const m = /^\s*(\{[^}]*\}|-?[\d.]+\s*[a-z]{2})/.exec(src.slice(i)); if (m) i += m[0].length; return true; }
+      if (cmd === '\\') { out += '; '; return true; }   // a line break (cases, aligned)
+      if (cmd === '&' || cmd === '#' || cmd === '$') { out += cmd; return true; }
+      if (cmd === 'begin') { const env = group(); if (/^cases/.test(env)) out += '{ '; else if (/^[a-z]*matrix/.test(env) || env === 'array') { if (env === 'array') group(); out += '['; } return true; }
+      if (cmd === 'end') { const env = group(); if (/^[a-z]*matrix/.test(env) || env === 'array') out += ']'; return true; }
+      if (cmd === 'left' || cmd === 'right') { if (src[i] === '.') i++; return true; }   // \left. / \right. (no bracket): nothing; any other bracket follows as is
+      if (cmd === 'sqrt' && src[i] === '[') { const j = src.indexOf(']', i); const n = render(src.slice(i + 1, j), false, true); i = j + 1; out += n + '√(' + render(group(), false, true) + ')'; return true; }
+      if (cmd === 'tag') { out += ' (' + render(group(), false, true) + ')'; return true; }
+      if (TACC[cmd] != null) { const a = render(group(), false, true); out += [...a].length === 1 ? (a + TACC[cmd]).normalize('NFC') : cmd.replace(/^wide/, '') + '(' + a + ')'; return true; }
+      if (cmd === 'not') { const a = render(group(), false, true); out += a === '=' ? '≠' : a + '\u0338'; return true; }
+      if (TOPS.test(cmd)) { out += (/[\p{L}\p{N})]$/u.test(out) ? ' ' : '') + cmd; if (/^[A-Za-z\\{]/.test(src.slice(i))) out += ' '; return true; }   // \cos\theta -> 'cos θ' (as \tan)
+      if (TSYM[cmd] != null) { out += TSYM[cmd]; return true; }
+      return false;
+    };
+    /* TXH: one command of the built-in HTML path (true: handled), as txt() for the plain text; the subset's own commands fall through */
+    const htm = cmd => {
+      const R = t => render(t, true, true);
+      if (TFRAC.test(cmd)) { const a = R(group()), b = R(group()); out += `<span class="st-frac"><span class="st-num">${a}</span><span class="st-den">${b}</span></span>`; return true; }
+      if (TWRAP.test(cmd)) { const a = R(group());
+        out += /^(mathbf|textbf|boldsymbol|bm)$/.test(cmd) ? `<b>${a}</b>` : /^(mathit|textit|emph)$/.test(cmd) ? `<i>${a}</i>` : /^(boxed|fbox)$/.test(cmd) ? `<span class="st-box" style="border:1px solid currentColor;padding:0 2px">${a}</span>`
+          : cmd === 'underline' ? `<u>${a}</u>` : a; return true; }
+      if (TDROP.test(cmd)) { while (src[i] === ' ') i++; return true; }
+      if (cmd === 'textcolor') { const c = group(), a = R(group()); out += /^([A-Za-z]+|#[0-9A-Fa-f]{3,8})$/.test(c) ? `<span style="color:${c}">${a}</span>` : a; return true; }
+      if (cmd === 'colorbox') { group(); out += R(group()); return true; }
+      if (cmd === 'color' || cmd === 'phantom' || cmd === 'hphantom' || cmd === 'vphantom' || cmd === 'label') { group(); return true; }
+      if (cmd === 'stackrel' || cmd === 'overset' || cmd === 'underset') { group(); out += R(group()); return true; }
+      if (cmd === 'quad') { out += '&emsp;'; return true; }
+      if (cmd === 'qquad') { out += '&emsp;&emsp;'; return true; }
+      if (cmd === '!' || cmd === 'negthinspace' || cmd === 'allowbreak') return true;
+      if (cmd === ':' || cmd === '>' || cmd === 'thinspace' || cmd === 'medspace' || cmd === 'thickspace') { out += '&thinsp;'; return true; }
+      if (cmd === 'enspace') { out += '&ensp;'; return true; }
+      if (/^(kern|mkern|hskip|mskip|hspace|vspace)$/.test(cmd)) { const m = /^\s*(\{[^}]*\}|-?[\d.]+\s*[a-z]{2})/.exec(src.slice(i)); if (m) i += m[0].length; return true; }
+      if (cmd === '\\') { out += '<br>'; return true; }   // a line break (cases, aligned): a new line
+      if (cmd === '&') { out += '&amp;'; return true; }
+      if (cmd === '#' || cmd === '$') { out += cmd; return true; }
+      if (cmd === 'begin') {   // cases / aligned / array / …matrix: an inline table, one cell per &, one row per \\, with its brackets
+        const env = group(), spec = env === 'array' || env === 'alignedat' ? group() : '';
+        let d = 0, e = -1; for (let k = i; k < src.length; k++) { if (src.startsWith('\\begin{', k)) d++; else if (src.startsWith('\\end{', k)) { if (!d) { e = k; break; } d--; } else if (src[k] === '\\') k++; }
+        const body = src.slice(i, e < 0 ? src.length : e); if (e < 0) i = src.length; else { i = e + 4; group(); }
+        const rows = [[]]; let b = 0, n = 0, cell = '';
+        for (let k = 0; k < body.length; k++) { const c = body[k];
+          if (c === '\\') { if (body[k + 1] === '\\' && !b && !n) { rows[rows.length - 1].push(cell); rows.push([]); cell = ''; k++; continue; }
+            if (body.startsWith('\\begin{', k)) n++; else if (body.startsWith('\\end{', k)) n--; cell += c + (body[k + 1] || ''); k++; continue; }
+          if (c === '{') b++; else if (c === '}') b--;
+          if (c === '&' && !b && !n) { rows[rows.length - 1].push(cell); cell = ''; continue; }
+          cell += c; }
+        rows[rows.length - 1].push(cell); if (rows.length > 1 && rows[rows.length - 1].join('').trim() === '') rows.pop();
+        const al = /^cases/.test(env) ? () => 'left' : /^(aligned|align|split|alignedat)/.test(env) ? k => (k % 2 ? 'left' : 'right') : spec ? k => ({ l: 'left', r: 'right' }[(spec.replace(/[^lcr]/g, '')[k] || 'c')] || 'center') : () => 'center';
+        /* brackets: border lines that stretch to the table's height (an inline flex row); cases: a '{' scaled to the rows */
+        const nr = rows.length, br = (side, st) => `<span class="st-br" style="width:.3em;border-${side}:1px solid currentColor;${st}"></span>`;
+        const [o, c] = /^cases/.test(env) ? [`<span class="st-br" style="display:flex;align-items:center;line-height:1;font-size:${nr > 1 ? (1.15 * nr).toFixed(2) : 1}em${nr > 1 ? ';transform:scaleX(.6)' : ''}">{</span>`, '']
+          : /^pmatrix/.test(env) ? [br('left', 'border-radius:50% 0 0 50%'), br('right', 'border-radius:0 50% 50% 0')]
+          : /^bmatrix/.test(env) ? [br('left', 'border-top:1px solid currentColor;border-bottom:1px solid currentColor'), br('right', 'border-top:1px solid currentColor;border-bottom:1px solid currentColor')]
+          : /^Bmatrix/.test(env) ? ['{', '}'] : /^vmatrix/.test(env) ? [br('left', ''), br('right', '')] : /^Vmatrix/.test(env) ? [br('left', 'border-left-style:double;border-left-width:3px'), br('right', 'border-right-style:double;border-right-width:3px')] : ['', ''];
+        const tb = '<span class="st-env" style="display:inline-table;vertical-align:middle">' + rows.map(r => '<span style="display:table-row">' + r.map((x, k) => `<span style="display:table-cell;padding:0 .3em;text-align:${al(k)}">${R(x.trim())}</span>`).join('') + '</span>').join('') + '</span>';
+        out += o || c ? `<span class="st-mx" style="display:inline-flex;align-items:stretch;vertical-align:middle">${o}${tb}${c}</span>` : tb;
+        return true; }
+      if (cmd === 'end') { group(); return true; }   // an \end without its \begin: nothing
+      if (cmd === 'left' || cmd === 'right') { if (src[i] === '.') i++; return true; }   // \left. / \right. (no bracket): nothing; any other bracket follows as is
+      if (cmd === 'sqrt' && src[i] === '[') { const j = src.indexOf(']', i); const n = R(src.slice(i + 1, j)); i = j + 1; out += `<sup>${n}</sup>√<span class="st-bar">${R(group())}</span>`; return true; }
+      if (cmd === 'tag') { out += '&ensp;(' + R(group()) + ')'; return true; }
+      if (TACC[cmd] != null) { const a = R(group()); out += [...a].length === 1 ? (a + TACC[cmd]).normalize('NFC') : /^(overline|widehat)$/.test(cmd) ? `<span class="st-bar">${a}</span>` : cmd.replace(/^wide/, '') + '(' + a + ')'; return true; }
+      if (cmd === 'not') { const a = R(group()); out += a === '=' ? '≠' : a + '\u0338'; return true; }
+      if (TOPS.test(cmd)) { out += (/[\p{L}\p{N})]$/u.test(out) ? '&thinsp;' : '') + cmd; if (/^[A-Za-z\\{]/.test(src.slice(i))) out += '&thinsp;'; return true; }   // \cos\theta -> 'cos θ' (as \tan)
+      if (cmd === 'text' && /\\/.test(src.slice(i, src.indexOf('}', i) + 1))) { out += R(group()); return true; }   // \text{kip\text{-}ft}, \text{50\%}: its commands rendered, not printed
+      if (TSYM[cmd] != null) { out += TSYM[cmd]; return true; }
+      if (HSYM[cmd] != null) { out += HSYM[cmd]; return true; }
+      return false;
+    };
+    while (i < src.length) {
+      const c = src[i];
+      if (c === '\\') {
+        const m = /^\\([A-Za-z]+|.)/.exec(src.slice(i)); i += m[0].length; const cmd = m[1];
+        if (!html && rd && txt(cmd)) continue;   // TXP: plain text only
+        if (html && rd && htm(cmd)) continue;   // TXH: the built-in HTML path
+        if (cmd === 'frac') { const a = render(group(), html, rd), b = render(group(), html, rd);
+          out += html ? `<span class="st-frac"><span class="st-num">${a}</span><span class="st-den">${b}</span></span>` : `${atom(a) ? a : '(' + a + ')'}/${atom(b) ? b : '(' + b + ')'}`; }
+        else if (cmd === 'bar') { const a = render(group(), html, rd); out += html ? `<span class="st-bar">${a}</span>` : a.length === 1 ? (a + '\u0304').normalize('NFC') : 'bar(' + a + ')'; }   // HTML: an overline (CSS .st-bar), whatever the font has
+        else if (cmd === 'sqrt') { const a = render(group(), html, rd); out += '√' + (html ? `<span class="st-bar">${a}</span>` : '(' + a + ')'); }
+        else if (cmd === 'text') { const a = group(); out += html ? esc(a) : a; }
+        else if (cmd === ',' || cmd === ' ' || cmd === ';') out += html ? '&thinsp;' : ' ';
+        else if (cmd === '{' || cmd === '}' || cmd === '%' || cmd === '_') out += cmd;
+        else if (cmd === 'left' || cmd === 'right') { /* the bracket that follows is printed as is */ }
+        else if (cmd === 'tan') { out += SYM.tan; if (/^[A-Za-z\\{]/.test(src.slice(i))) out += html ? '&thinsp;' : ' '; }   // \tan\theta -> 'tan θ' (as KaTeX spaces an operator)
+        else out += SYM[cmd] != null ? SYM[cmd] : cmd;
+      } else if (c === '_' || c === '^') {
+        i++; const a = render(group(), html, rd);
+        if (c === '^' && a === '°') { out += '°'; continue; }   // 30^{\circ} -> '30°' (a degree sign, not a raised '°')
+        out += html ? (c === '_' ? `<sub>${a}</sub>` : `<sup>${a}</sup>`) : (c === '_' ? '_' : '^') + (a.length > 1 ? '(' + a + ')' : a);
+      } else if (c === '{' ) { out += render(group(), html, rd); }
+      else if (c === '&' && !html && rd) { out += ' '; i++; }   // TXP: an alignment tab (cases, aligned) in plain text
+      else if (c === '~' && !html && rd) { out += ' '; i++; }   // TXP: a non-breaking space in plain text
+      else if (c === '~' && html && rd) { out += '&nbsp;'; i++; }   // TXH: a non-breaking space
+      else { out += html ? esc(c) : c; i++; }
+    }
+    return out;
+  }
+  /* KaTeX (approved 2026-10-29): when the page has loaded it (window.katex), toHTML renders with it; otherwise (offline, CDN
+     blocked) with the built-in renderer above, so the steps always show. toText (plain-text report) never uses it.
+     \minus is the subset's own macro (KaTeX has none): it is given to KaTeX as a minus sign. */
+  const KATEX_OPT = { throwOnError: false, strict: 'ignore', macros: { '\\minus': '-' } };
+  const kx = () => (typeof window !== 'undefined' && window.katex && typeof window.katex.renderToString === 'function') ? window.katex : null;
+  /* unitTeX(u): a unit as KaTeX source, its words upright ('kip-ft' -> '\text{kip-ft}', 'in^{2}' -> '\text{in}^{2}'); the built-in
+     renderer shows units as typed, so this is used for KaTeX only. */
+  const unitTeX = u => String(u == null ? '' : u).replace(/[A-Za-z][A-Za-z\-\/. ]*/g, (m, at, all) => at > 0 && all[at - 1] === '\\' ? m : `\\text{${m}}`);
+  const toHTML = s => { const t = String(s == null ? '' : s), K = kx(); return K && t ? K.renderToString(t, KATEX_OPT) : render(t, true, true); };   // TXH: rd true
+  /* toText(s, opt): plain text. opt.legacy (TXP, 2026-11-07): the output as before TXP (commands outside the subset by name), for the
+     tools that compare a report's text with their tabs' text to decide what to copy into the report (so that choice stays as it was) */
+  const toText = (s, o) => render(String(s == null ? '' : s), false, !(o && o.legacy));
+  /* line(step, html): the one-line rendering  sym = eq = sub = value unit
+     With KaTeX, sym, eq and sub are set in display style (full-size fractions) and a numeric value with its unit is set by
+     KaTeX too (same digits as fmt), so the whole line is in one typeface; a string value stays as it is. */
+  function line(s, html, o) {   // o: toText's options (plain text only)
+    const K = html ? kx() : null, D = t => K.renderToString('\\displaystyle ' + t, KATEX_OPT);
+    const R = K ? D : html ? toHTML : t => toText(t, o), parts = [];
+    if (s.sym) parts.push(R(s.sym));
+    if (s.eq) parts.push(R(s.eq));
+    if (s.sub && s.sub !== s.eq) parts.push(R(s.sub));
+    const v = typeof s.value === 'number' ? fmt(s.value, s.d) : s.value == null ? '' : String(s.value);
+    if (v !== '' && K && typeof s.value === 'number') parts.push(K.renderToString(v + (s.unit ? '\\;' + unitTeX(s.unit) : ''), KATEX_OPT));
+    else if (v !== '') parts.push(v + (s.unit ? (html ? '&nbsp;' : ' ') + (K ? toHTML(unitTeX(s.unit)) : R(s.unit)) : ''));
+    return parts.join(' = ');
+  }
+
+  /* ---------- topics: grouped worked steps (presentation spec A, 2026-10-31; first used on the Steel Bridge Shear & stiffeners tab) ----------
+     A long step list reads as topics, each with a one-line result, in the standard order of a check: inputs and geometry, section properties,
+     demands, intermediate quantities (one topic per code sub-article), resistance, check. Presentation only: the steps, their ids and values are
+     not changed or copied; group() only sorts them into topics (every step lands in exactly one, in its original order within the topic).
+       group(steps, topics, opt) -> [{ key, title, ref, see, steps, res, ratio, cls, chip }]
+         topics: [{ key, title, ref?, see?, ids: RegExp | (id) => bool, res?: RegExp (the step, by id, that sums up a topic without a test), info?: RegExp (steps whose ok flag only states which case applies, not a check: shown, but not counted in the topic's status) }] tested in order on each step id without its work prefix (opt.strip,
+                 default /^[^.]+\./: 'ts3.p1.Vn' -> 'p1.Vn'; false: the whole id, for lists that mix the ids of several works); the first match takes the step; steps no topic takes go to a last topic
+                 'other' ('Other steps'); topics with no step are left out. Topic order = the order of topics.
+         res    the topic's result step: its governing test step (ok === false first, else the largest ratio), else its last step with a value
+         ratio  the largest ratio of its test steps (a test step whose value is a number without a unit: demand / capacity), NaN if none
+         cls    'ng' (a test fails or a ratio > 1), 'hi' (ratio >= opt.hi, default 0.9), 'ok', or '' (no test step); chip: the text of the status chip
+       summary(t, html) -> the one-line result of topic t: "label: sym = value unit" of its result step (KaTeX / built-in, as line())
+       groupsHTML(groups, o) -> HTML: an Expand all / Collapse all bar and one <details class="sg-t" data-sgk="key"> per topic (closed unless
+         o.open has its key) with the summary line and status chip; o.item(step) -> the HTML of one step (the page's own step rendering, so step
+         anchors such as id="st-<step id>" stay as they were); o.see(t) -> optional HTML after the topic title (a link to where a value is worked).
+       wire(root, o) (browser) -> the Expand all / Collapse all buttons inside root, and o.onToggle(key, open) when a topic opens or closes.
+       CSS: SharedSteps.groupCss (class prefix sg-), for the page to add once. On print every topic is opened (beforeprint) and closed again. */
+  const fin = v => typeof v === 'number' && isFinite(v);
+  const isRatio = s => s.ok !== undefined && typeof s.value === 'number' && !s.unit;
+  function group(steps, topics, opt) {
+    opt = opt || {}; const strip = opt.strip === false ? null : opt.strip || /^[^.]+\./, hi = opt.hi != null ? opt.hi : 0.9;
+    const T = (topics || []).map(t => ({ key: t.key, title: t.title, ref: t.ref || '', see: t.see || '', test: t.ids, pick: t.res, skip: t.info, steps: [] })), other = { key: 'other', title: 'Other steps', ref: '', see: '', steps: [] };
+    (steps || []).forEach(s => { const id = strip ? String(s.id).replace(strip, '') : String(s.id), t = T.find(q => (typeof q.test === 'function' ? q.test(id, s) : q.test.test(id))); (t || other).steps.push(s); });
+    return T.concat([other]).filter(t => t.steps.length).map(t => {
+      const idf = s => (strip ? String(s.id).replace(strip, '') : String(s.id)), tests = t.steps.filter(s => s.ok !== undefined && !(t.skip && t.skip.test(idf(s)))), rs = tests.filter(isRatio), ng = tests.find(s => s.ok === false);
+      const ratio = rs.length ? Math.max(...rs.map(s => (fin(s.value) ? s.value : Infinity))) : NaN;
+      const gov = ng || (rs.length ? rs.reduce((a, b) => ((fin(b.value) ? b.value : Infinity) > (fin(a.value) ? a.value : Infinity) ? b : a)) : tests[tests.length - 1]);
+      const res = gov || (t.pick && t.steps.find(s => t.pick.test(strip ? String(s.id).replace(strip, '') : String(s.id)))) || [...t.steps].reverse().find(s => s.value != null && s.value !== '') || t.steps[t.steps.length - 1];
+      const cls = !tests.length ? '' : ng || ratio > 1 + 1e-9 || Number.isNaN(ratio) && rs.length ? 'ng' : ratio >= hi ? 'hi' : 'ok';
+      const chip = !tests.length ? '' : rs.length ? (fin(ratio) ? fmt(ratio, 3) : '∞') + (ng ? ' NG' : '') : ng ? 'NG' : 'OK';
+      return { key: t.key, title: t.title, ref: t.ref, see: t.see, steps: t.steps, res, ratio, cls, chip };
+    });
+  }
+  /* summary: inline notation (not display style), so the line stays one line high */
+  function summary(t, html, o) {   // o: toText's options (plain text only)
+    const s = t.res; if (!s) return '';
+    const R = html ? toHTML : x => toText(x, o), lab = html ? esc(s.label) : s.label, sym = s.sym ? R(s.sym) : '';
+    if (isRatio(s)) return `${lab}${sym ? ': ' + sym : ''}`;
+    const v = typeof s.value === 'number' ? R(fmt(s.value, s.d) + (s.unit ? (html ? '\\;' : ' ') + (html ? unitTeX(s.unit) : s.unit) : '')) : s.value == null ? '' : html ? esc(String(s.value)) : String(s.value);
+    return `${lab}${v ? ': ' + (sym && typeof s.value === 'number' ? sym + ' = ' : '') + v : ''}`;
+  }
+  const attr = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function groupsHTML(groups, o) {
+    o = o || {}; const open = o.open || new Set();
+    return `<div class="sg"><div class="sg-bar"><span class="sg-hint">${groups.length} topics; click a topic for its worked steps.</span><button type="button" data-sgall="1">Expand all</button><button type="button" data-sgall="0">Collapse all</button></div>`
+      + groups.map((t, k) => `<details class="sg-t${t.cls ? ' sg-' + t.cls : ''}" data-sgk="${attr(t.key)}"${open.has(t.key) ? ' open' : ''}><summary><span class="sg-n">${k + 1}</span><span class="sg-h"><span class="sg-ttl">${esc(t.title)}</span>${t.ref ? `<span class="sg-ref">${esc(t.ref)}</span>` : ''}${o.see ? o.see(t) || '' : ''}<span class="sg-sum">${summary(t, true)}</span></span>${t.chip ? `<span class="sg-chip">${esc(t.chip)}</span>` : ''}</summary>`
+        + `<ol class="steps">${t.steps.map(s => (o.item ? o.item(s) : `<li>${esc(s.label)}: ${line(s, true)}</li>`)).join('')}</ol></details>`).join('') + '</div>';
+  }
+  /* reveal(root, id) (browser): the element of step id (id="st-<id>") inside root, with its topic opened first (a topic starts closed); null if none */
+  function reveal(root, id) {
+    if (!root || !root.querySelector) return null; const t = root.querySelector('[id="st-' + String(id == null ? '' : id).replace(/^st-/, '').replace(/["\\]/g, '\\$&') + '"]'); if (!t) return null;
+    const d = t.closest ? t.closest('details.sg-t') : null; if (d && !d.open) d.open = true; return t;
+  }
+  function wire(root, o) {
+    o = o || {}; if (!root || !root.addEventListener) return;
+    if (typeof document !== 'undefined' && document.head && !document.getElementById('sg-css')) { const st = document.createElement('style'); st.id = 'sg-css'; st.textContent = groupCss; document.head.appendChild(st); }   // the topics' CSS, once per page
+    // a link to a step ("§", href="#st-<id>") anywhere in root opens that step's topic before the browser scrolls to it (bound once per root)
+    if (!root.__sgLink) { root.__sgLink = true; root.addEventListener('click', e => { const a = e.target && e.target.closest ? e.target.closest('a[href^="#st-"]') : null; if (a) reveal(root, a.getAttribute('href').slice(4)); }); }
+    root.querySelectorAll('[data-sgall]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); const on = b.dataset.sgall === '1', box = b.closest('.sg') || root;
+      box.querySelectorAll('details.sg-t').forEach(d => { if (d.open !== on) d.open = on; }); }));
+    root.querySelectorAll('details.sg-t').forEach(d => d.addEventListener('toggle', () => { if (o.onToggle) o.onToggle(d.dataset.sgk, d.open); }));
+  }
+  const groupCss = `.sg-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 6px;} .sg-bar .sg-hint{flex:1;font-size:8.5pt;color:#64748b;}
+    .sg-bar button{font-size:9pt;padding:2px 10px;}
+    details.sg-t{border:1px solid #d6dde6;border-radius:4px;margin:4px 0;background:#fff;} details.sg-t>summary{display:flex;gap:8px;align-items:flex-start;cursor:pointer;padding:5px 8px;list-style:none;}
+    details.sg-t>summary::-webkit-details-marker{display:none;} details.sg-t>summary::before{content:'\\25B8';color:#64748b;flex:none;} details.sg-t[open]>summary::before{content:'\\25BE';}
+    details.sg-t[open]>summary{border-bottom:1px solid #e5e9ef;background:#f6f8fb;} details.sg-t>ol.steps{margin:0;padding:2px 10px 6px;}
+    .sg-n{flex:none;font-weight:600;color:#475569;min-width:1.2em;} .sg-h{flex:1;min-width:0;} .sg-ttl{font-weight:600;} .sg-ref{font-size:8pt;color:#64748b;margin-left:6px;} .sg-see{font-size:8.5pt;margin-left:6px;}
+    .sg-sum{display:block;font-size:9pt;color:#334155;overflow-wrap:anywhere;} .sg-sum .katex{font-size:1em;}
+    .sg-chip{flex:none;font:600 9pt/1.4 system-ui,sans-serif;padding:1px 8px;border-radius:9px;background:#e2e8f0;color:#1e293b;white-space:nowrap;}
+    .sg-ok>summary .sg-chip{background:#1a8a3a;color:#fff;} .sg-hi>summary .sg-chip{background:#d9a400;color:#1e293b;} .sg-ng>summary .sg-chip{background:#c62828;color:#fff;}
+    @media print{details.sg-t{break-inside:auto;} .sg-bar{display:none;}}`;
+  // printing (Ctrl+P on a tab): every topic open, then back as it was
+  if (typeof window !== 'undefined' && window.addEventListener && typeof document !== 'undefined') {
+    let opened = [];
+    window.addEventListener('beforeprint', () => { opened = Array.from(document.querySelectorAll('details.sg-t:not([open])')); opened.forEach(d => { d.open = true; }); });
+    window.addEventListener('afterprint', () => { opened.forEach(d => { d.open = false; }); opened = []; });
+  }
+
+  window.SharedSteps = { step, work, n, g, fmt, toHTML, toText, line, unitTeX, katexOpt: KATEX_OPT, group, summary, groupsHTML, wire, reveal, groupCss, noteParts, noteSep, noteText };
+})();
+
+</script>
+<script id="sharedReport" data-src="All-Structural shared/report.js" data-commit="f16cb91">
+/* shared/report.js — calculation report viewer (window.SharedReport). Classic script.
+   Created 2026-10-30 (docs/REBUILD_PLAN.md §3, §6 Phase 2): the Gusset Plate Rating style calc-sheet report (in-app Report tab with a
+   navigation tree, collapse / expand, search, print with a running header and page numbers) as one shared viewer, so each app supplies
+   only a report model. Look and behaviour follow "Gusset Plate Rating.html" (crv-*, cr-*) and BasePlateAnchorDesigner.html (RPT-2/3);
+   the code is new. No app-specific code here. Needs window.SharedSteps (shared/steps.js) at call time: every worked step is rendered by
+   SharedSteps (KaTeX when the page has loaded it, the built-in renderer otherwise), the same strings as on the app's own tabs.
+
+   Report model (plain data; the app builds it):
+     { title, subtitle, code,                       cover lines ('Steel Bridge Design', 'Girder G1', 'AASHTO LRFD 10th Ed. (2024)')
+       info: [[label, value], …],                   title block (project, number, computed / checked by, dates), three per row
+       head: { left, right, foot },                 running header / footer text in print (strings; optional)
+       sections: [ { id, title, note?, part?, subs: [ { id, title, items: [item, …] } ] } ] }
+   part (2026-11-01, optional): a chapter heading shown before that section (screen, nav tree, contents, print, text), for a
+   report that joins the reports of several tabs (Concrete Beam Capacity.html: one chapter per tab). Section numbers run on
+   through the chapters. A model without part renders exactly as before.
+   Items:
+     { type: 'steps', scope, steps: [step…], title?, lazy? }   worked steps (shared/steps.js format). Each step's anchor key is
+                                                             scope + '/' + step.id (step.id alone when scope is ''); the first
+                                                             occurrence of a key is its derivation. lazy: rendered when opened
+                                                             (<details>), so a report of every station stays fast; print fills them.
+                                                             topics? (2026-10-31, presentation spec A): [{ title, ref, n, cls, chip, res }]
+                                                             in step order (n steps each; res: the topic's result step, SharedSteps.group):
+                                                             a sub-heading with the one-line result before each topic's steps (screen,
+                                                             print, text), and, for an item that is not lazy, nav-tree entries down to
+                                                             the topics.
+     { type: 'table', caption?, head: [cell…], rows: [[cell…] | { cells, cls }], wide?, lazy?, title? }
+                                                             lazy (2026-11-01): a long table shown closed (<details>, summary: title or
+                                                             caption and the row count), rendered when opened; print fills it.
+     { type: 'figure', svg, caption? }                       an SVG string (made by the app)
+     { type: 'note', text, warn? }
+     { type: 'kv', rows: [[label, value, key?], …] }          key: a § link to that derivation
+   Any item may carry topic (2026-11-01): { title, ref?, no?, chip?, cls?, res? } — a topic sub-heading (the same look as a steps item's
+   topics: number no, title, reference, status chip, one-line result of step res) shown before the item, with its own anchor and a
+   navigation-tree entry under the subsection. For an app whose topics hold tables and notes as well as worked steps (a tool's own
+   panel headings); the steps item's topics above are unchanged.
+   Text everywhere (titles, notes, cells): plain text, with $…$ for equation notation (SharedSteps.toHTML / toText) and
+   [[key]] for a cross-reference to a step ("§x.y", a link in the app, "§x.y" in print), [[tab:name|text]] for an in-app link to
+   the app's tab (opt.onGoto; plain text in print). A cell is a string, or { t, key, cls: 'ok' | 'hi' | 'ng' | 'na', n: true }
+   (key adds a § link; n right-aligns).
+
+   API:
+     build(model)               -> doc: numbering (§n, §n.m), the anchor index, refs, unresolved refs, duplicate keys
+     html(doc, { lazy })        -> the document HTML (title block, cover, contents, sections); lazy=false fills every lazy item
+     text(doc, opt)             -> plain text of the whole report (tests: NaN / undefined scan, "see §" check); equation notation through
+                                   SharedSteps.toText (readable, TXP 2026-11-07); opt.legacy: the notation as before TXP
+     mount(host, model, opt)    -> the viewer in host: bar (opt.controls HTML + search, Expand all, Collapse all, Print), nav tree, doc.
+                                   opt.onGoto(name) for [[tab:…]] links; opt.stick: the height of the host page's own sticky header
+                                   above the viewer (the bar sticks below it); opt.closed (a Set of closed heading ids, kept between mounts).
+                                   opt.spy (2026-11-01, optional): the nav tree highlights the heading being read and keeps it in view
+                                   (scroll-spy on the scrolling column that holds the viewer, else the page).
+                                   Returns { doc, print(), jump(key), go(anchorId) } (go: a section / subsection / step anchor id, e.g. 'rp-s3-2').
+                                   Search (RSX, 2026-11-09): the words typed are marked in the shown report (<mark class="rp-hit">, text nodes
+                                   only, never inside an equation), with a status ("12 matches in 5 sections", "3 of 12", "No matches for …"),
+                                   ▲ ▼ / Enter / Shift+Enter to step through them, Esc to clear; a lazy item not yet opened is searched in its
+                                   model text and opened when a step reaches it. Display only.
+     print(doc)                 -> prints the whole report (every section open, lazy items filled), alone on the page
+     ref(doc, key)              -> '§x.y' or null
+     css()                      -> injects the viewer's styles (mount and print do it themselves)
+   Added 2026-11-01 for the Gusset Plate Rating migration (its own viewer was the model of this one), all optional:
+     subs[].ref     a reference shown right of the subsection heading (screen, print, text)
+     sections[].key, subs[].key   an anchor key for a section / subsection: [[key]] is a "§n" / "§n.m" link and jump(key) opens it
+     refs: [[label, text], …]     a References table in the front matter (after the cover, before the contents)
+     head.center    a third running-header box (top centre); head.lines: true keeps the line breaks ('\n') of left / center /
+                    right as separate lines (without it a line break prints as a space, as before)
+   Styles: injected once (style#rp-css), class prefix rp-. */
+(function () {
+  'use strict';
+  const ST = () => window.SharedSteps;
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const keyOf = (scope, id) => (scope ? scope + '/' + id : String(id));
+
+  /* ---------- numbering and the anchor index ---------- */
+  function build(model) {
+    const doc = { model, toc: [], index: new Map(), lazy: [], refs: [], unresolved: [], dup: [] };
+    let nSt = 0, nTp = 0;
+    (model.sections || []).forEach((s, i) => {
+      const n = i + 1, sec = { n: String(n), id: 'rp-s' + n, title: s.title, subs: [] };
+      if (s.part) sec.part = { title: s.part, id: 'rp-p' + n };
+      if (s.key) { if (doc.index.has(s.key)) doc.dup.push(s.key); else doc.index.set(s.key, { n: String(n), anchor: sec.id, sub: null, lz: null }); }
+      doc.toc.push(sec);
+      (s.subs || []).forEach((q, j) => {
+        const num = `${n}.${j + 1}`, sub = { n: num, id: `rp-s${n}-${j + 1}`, title: q.title };
+        if (q.key) { if (doc.index.has(q.key)) doc.dup.push(q.key); else doc.index.set(q.key, { n: num, anchor: sub.id, sub: sub.id, lz: null }); }
+        sec.subs.push(sub);
+        (q.items || []).forEach(it => {
+          if (it.topic) { it._tp = 'rp-tp' + (++nTp); (sub.items || (sub.items = [])).push({ title: (it.topic.no != null ? it.topic.no + '. ' : '') + it.topic.title, anchor: it._tp, tops: [] }); }
+          if (it.type === 'table' && it.lazy) { it._lz = doc.lazy.length; doc.lazy.push(it); }
+          if (it.type !== 'steps') return;
+          if (it.lazy) { it._lz = doc.lazy.length; doc.lazy.push(it); }
+          it._anc = (it.steps || []).map(st => {
+            const k = keyOf(it.scope, st.id), a = 'rp-st' + (++nSt);
+            if (doc.index.has(k)) { doc.dup.push(k); return a; }
+            doc.index.set(k, { n: num, anchor: a, sub: sub.id, lz: it.lazy ? it._lz : null });
+            return a;
+          });
+          if (it.topics && it.topics.length && !it.lazy) { let j0 = 0; const tops = it.topics.map(t => { const q = { title: t.title, anchor: it._anc[j0] }; j0 += t.n; return q; });   // nav: the item, then its topics
+            (sub.items || (sub.items = [])).push({ title: it.title || 'Worked steps', anchor: it._anc[0], tops }); }
+        });
+      });
+    });
+    // every cross-reference in the model, resolved or not (text() and html() use the same scan)
+    const scan = (t, where) => { String(t == null ? '' : t).replace(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g, (m, k) => { if (!k.startsWith('tab:')) note(k, where); return m; }); };
+    const note = (k, where) => { doc.refs.push({ key: k, where }); if (!doc.index.has(k)) doc.unresolved.push({ key: k, where }); };
+    const cell = (c, where) => { if (c && typeof c === 'object') { scan(c.t, where); if (c.key) note(c.key, where); } else scan(c, where); };
+    (model.sections || []).forEach((s, i) => {
+      scan(s.title, `§${i + 1}`); scan(s.note, `§${i + 1}`);
+      (s.subs || []).forEach((q, j) => {
+        const w = `§${i + 1}.${j + 1} ${q.title}`; scan(q.title, w);
+        (q.items || []).forEach(it => {
+          if (it.topic) scan(it.topic.title, w);
+          if (it.type === 'note') scan(it.text, w);
+          else if (it.type === 'figure') scan(it.caption, w);
+          else if (it.type === 'kv') (it.rows || []).forEach(r => { scan(r[0], w); scan(r[1], w); if (r[2]) note(r[2], w); });
+          else if (it.type === 'table') { scan(it.caption, w); (it.head || []).forEach(c => cell(c, w)); (it.rows || []).forEach(r => (Array.isArray(r) ? r : r.cells).forEach(c => cell(c, w))); }
+          else if (it.type === 'steps') { scan(it.title, w); (it.steps || []).forEach(st => noteSrc(st.note).replace(SEE, (m, id) => { note(seeKey(doc, it, id), w); return m; })); }
+        });
+      });
+    });
+    return doc;
+  }
+  /* a step note may name another step as "§<step id>" (engine/shear.js "See §pan.Vn.", engine/rating.js "see §fx.Mn"): it becomes a
+     cross-reference to that step in item.see (the scope that holds the other work, when given) or else in the item's own scope */
+  const SEE = /§([A-Za-z](?:[\w.]*\w)?)/g;
+  const seeKey = (doc, it, id) => {
+    const a = it.see ? keyOf(it.see, id) : null; if (a && doc.index.has(a)) return a;
+    if (doc.index.has(keyOf(it.scope, id))) return keyOf(it.scope, id);
+    const m = (it.steps || []).find(t => String(t.id).endsWith('.' + id));   // an id relative to the engine's work prefix ('v.Vn' of 'pn.v.Vn')
+    return keyOf(it.scope, m ? m.id : id);
+  };
+  const noteOf = (doc, it, t, html, o) => { const ps = String(t).split(SEE);   // a note that already says "See §x" does not get the "see " of .rp-see in front a second time (class rp-seen)
+    return ps.map((p, i) => i % 2 ? (a => html && /\bsee\s*$/i.test(ps[i - 1]) ? a.replace('class="rp-see"', 'class="rp-see rp-seen"') : a)(rich(doc, `[[${seeKey(doc, it, p)}]]`, html, o)) : html ? esc(p) : p).join(''); };
+  const ref = (doc, key) => { const e = doc.index.get(key); return e ? '§' + e.n : null; };
+  /* SNL (2026-11-08): a step note may be a list note { lead, items: [[lead, text] | text, …], action? } (SharedSteps.noteParts). A string
+     note goes through exactly the code of before (one italic line .rp-nt; " (note)" after the step's line in the text). A list note:
+     screen and print, the action line(s) in warning style, the bold lead and a bullet list with bold lead words (each piece through
+     noteOf, so a "§id" in it is a link as before); text, the step's line without " (…)", then the note's lines indented (noteText). */
+  const NP = n => (n && typeof n === 'object' && ST().noteParts ? ST().noteParts(n) : null);
+  const noteSrc = n => { const P = NP(n); return P ? P.action.concat([P.lead], ...P.items).join('\n') : String(n || ''); };   // the note's text, for the "§id" scan of build()
+  const noteHtml = (doc, it, n) => { const P = NP(n), F = t => noteOf(doc, it, t, true); if (!P) return `<div class="rp-nt">${F(n)}</div>`;
+    return `<div class="rp-nt rp-ntl">${P.action.map(a => `<div class="rp-nta">${F(a)}</div>`).join('')}${P.lead ? `<div class="rp-ntb">${F(P.lead)}</div>` : ''}${P.items.length ? `<ul class="rp-ntu">${P.items.map(([l, t]) => `<li>${l ? `<b>${F(l)}</b>${t ? ST().noteSep(l) : ''}` : ''}${F(t)}</li>`).join('')}</ul>` : ''}</div>`; };
+  const noteTxt = (doc, it, n, o) => { const P = NP(n), F = t => noteOf(doc, it, t, false, o);   // list note only: its lines, indented under the step
+    return P.action.map(F).concat(P.lead ? [F(P.lead)] : [], P.items.map(([l, t]) => '• ' + (l ? F(l) + (t ? ST().noteSep(l) : '') : '') + F(t))).map(x => '    ' + x); };
+
+  /* ---------- rich text: $tex$, [[key]], [[tab:name|text]] ----------
+     Notation in running text, titles and table cells is set by SharedSteps' built-in renderer (subscripts, Greek, fractions in the
+     text font), not KaTeX: a report of every station has thousands of cells, and KaTeX markup there made it slow and large. The worked
+     steps themselves are set by KaTeX when the page has it. Cached by string. */
+  const LITE = new Map();
+  const lite = t => { let h = LITE.get(t); if (h != null) return h; const w = typeof window !== 'undefined' ? window : null, K = w && w.katex;
+    try { if (K) w.katex = undefined; h = ST().toHTML(t); } finally { if (K) w.katex = K; } if (LITE.size < 20000) LITE.set(t, h); return h; };
+  function rich(doc, s, html, o) {   // o: SharedSteps.toText's options (plain text only; text(doc, o))
+    const parts = String(s == null ? '' : s).split(/(\[\[[^\]]+\]\]|\$[^$]+\$)/);
+    return parts.map(p => {
+      if (!p) return '';
+      if (p.startsWith('[[') && p.endsWith(']]')) {
+        const [k, lab] = p.slice(2, -2).split('|');
+        if (k.startsWith('tab:')) return html ? `<a href="#" class="rp-go" data-rpgoto="${esc(k.slice(4))}">${esc(lab || k.slice(4))}</a>` : (lab || k.slice(4));
+        const e = doc.index.get(k), t = e ? '§' + e.n : '§?';
+        return html ? (e ? `<a href="#${e.anchor}" class="rp-see" data-rpjump="${esc(k)}">${t}</a>` : `<span class="rp-bad" title="${esc(k)}">${t}</span>`) : t;
+      }
+      if (p.length > 2 && p[0] === '$' && p[p.length - 1] === '$') return html ? lite(p.slice(1, -1)) : ST().toText(p.slice(1, -1), o);
+      return html ? esc(p) : p;
+    }).join('');
+  }
+
+  /* ---------- HTML ---------- */
+  const stepVal = s => {   // the result column: value and unit (and OK / NG of a test step), through SharedSteps
+    const v = typeof s.value === 'number' || (s.value != null && s.value !== '') ? ST().line({ value: s.value, unit: s.unit, d: s.d }, true) : '';
+    return v + (s.ok === true ? ' <span class="rp-okt">OK</span>' : s.ok === false ? ' <span class="rp-ngt">NG</span>' : '');
+  };
+  /* the sub-heading of a topic (item.topics): number, title, reference, one-line result, status */
+  const topHtml = (t, k) => `<div class="rp-top${t.cls ? ' rp-top-' + t.cls : ''}"><span class="rp-tn">${k + 1}.</span> <span class="rp-tt">${esc(t.title)}</span>${t.ref ? ` <span class="rp-ref">${esc(t.ref)}</span>` : ''}${t.chip ? ` <span class="rp-tchip">${esc(t.chip)}</span>` : ''}${t.res ? `<div class="rp-tsum">${ST().summary(t, true)}</div>` : ''}</div>`;
+  const topAt = it => { const m = new Map(); let j = 0; (it.topics || []).forEach((t, k) => { m.set(j, topHtml(t, k)); j += t.n; }); return m; };
+  function stepsHtml(doc, it) {
+    const T = topAt(it);
+    return (it.steps || []).map((s, i) => `${T.get(i) || ''}<div class="rp-step${s.ok === false ? ' rp-ng' : ''}" id="${it._anc[i]}"><div class="rp-d">${esc(s.label)}${s.ref ? `<span class="rp-ref">${esc(s.ref)}</span>` : ''}</div>
+      <div class="rp-m">${ST().line({ ...s, value: null, unit: '' }, true)}</div><div class="rp-r">${stepVal(s)}</div>${s.note ? noteHtml(doc, it, s.note) : ''}</div>`).join('');
+  }
+  function cellHtml(doc, c, th) {
+    const o = c && typeof c === 'object' ? c : { t: c }, tag = th ? 'th' : 'td', cl = [o.cls ? 'rp-' + o.cls : '', o.n ? 'rp-n' : ''].filter(Boolean).join(' ');
+    const lk = o.key ? ' ' + rich(doc, `[[${o.key}]]`, true) : '';
+    return `<${tag}${cl ? ` class="${cl}"` : ''}${o.span ? ` colspan="${o.span}"` : ''}>${rich(doc, o.t, true)}${lk}</${tag}>`;
+  }
+  /* a lazy item's body (steps or a table), made when it is opened */
+  const lazyBody = (doc, it) => (it.type === 'table' ? tableHtml(doc, it) : `<div class="rp-steps">${stepsHtml(doc, it)}</div>`);
+  function tableHtml(doc, it) {
+    return `<div class="rp-tw"><table class="rp-tbl${it.wide ? ' rp-wide' : ''}"><thead><tr>${(it.head || []).map(c => cellHtml(doc, c, true)).join('')}</tr></thead><tbody>
+      ${(it.rows || []).map(r => { const cells = Array.isArray(r) ? r : r.cells, cl = Array.isArray(r) ? '' : r.cls; return `<tr${cl ? ` class="rp-${cl}"` : ''}>${cells.map(c => cellHtml(doc, c, false)).join('')}</tr>`; }).join('')}</tbody></table></div>`;
+  }
+  function itemHtml(doc, it, lazy) {
+    const h = itemBody(doc, it, lazy);
+    return it.topic ? `<div class="rp-tpa" id="${it._tp}">${topHtml(it.topic, (it.topic.no != null ? +it.topic.no : 1) - 1)}</div>${h}` : h;
+  }
+  function itemBody(doc, it, lazy) {
+    if (it.type === 'steps') {
+      const body = () => `<div class="rp-steps">${stepsHtml(doc, it)}</div>`;   // not made for a lazy item until it is opened
+      if (it.lazy) return `<details class="rp-lz" data-rplz="${it._lz}"${lazy ? '' : ' open data-filled="1"'}><summary>${rich(doc, it.title || 'Worked steps', true)} <span class="rp-cnt">(${(it.steps || []).length} steps)</span></summary>${lazy ? '' : body()}</details>`;
+      return (it.title ? `<h4 class="rp-h3">${rich(doc, it.title, true)}</h4>` : '') + body();
+    }
+    if (it.type === 'table') {
+      if (it.lazy) return `<details class="rp-lz" data-rplz="${it._lz}"${lazy ? '' : ' open data-filled="1"'}><summary>${rich(doc, it.title || it.caption || 'Table', true)} <span class="rp-cnt">(${(it.rows || []).length} rows)</span></summary>${it.title && it.caption ? `<p class="rp-cap">${rich(doc, it.caption, true)}</p>` : ''}${lazy ? '' : tableHtml(doc, it)}</details>`;
+      return `${it.caption ? `<p class="rp-cap">${rich(doc, it.caption, true)}</p>` : ''}${tableHtml(doc, it)}`;
+    }
+    if (it.type === 'figure') return `<figure class="rp-fig">${it.svg || ''}${it.caption ? `<figcaption>${rich(doc, it.caption, true)}</figcaption>` : ''}</figure>`;
+    if (it.type === 'note') return `<p class="rp-note${it.warn ? ' rp-warn' : ''}">${rich(doc, it.text, true)}</p>`;
+    if (it.type === 'kv') return `<table class="rp-kv">${(it.rows || []).map(r => `<tr><td>${rich(doc, r[0], true)}</td><td>${rich(doc, r[1], true)}${r[2] ? ' ' + rich(doc, `[[${r[2]}]]`, true) : ''}</td></tr>`).join('')}</table>`;
+    return '';
+  }
+  function titleBlock(doc) {
+    const m = doc.model, I = m.info || [], rows = [];
+    for (let i = 0; i < I.length; i += 3) rows.push(I.slice(i, i + 3));
+    return `<table class="rp-tb">${rows.map(r => `<tr>${r.map(([l, v]) => `<td><span>${esc(l)}</span>${esc(v == null || v === '' ? '—' : v)}</td>`).join('')}</tr>`).join('')}</table>
+      <section class="rp-cover"><h1>${esc(m.title || 'Calculation report')}</h1>${m.subtitle ? `<p>${esc(m.subtitle)}</p>` : ''}${m.code ? `<p class="rp-cp">${esc(m.code)}</p>` : ''}</section>
+      ${m.refs && m.refs.length ? `<section class="rp-refs"><h2 class="rp-h1x">References</h2><table class="rp-reft">${m.refs.map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(b)}</td></tr>`).join('')}</table></section>` : ''}
+      <section class="rp-ptoc"><h2 class="rp-h1x">Contents</h2><ol>${doc.toc.map(s => `${s.part ? `<li class="rp-tp">${esc(s.part.title)}</li>` : ''}<li>${s.n}. ${esc(s.title)}${s.subs.length ? `<ol>${s.subs.map(q => `<li>${q.n} ${rich(doc, q.title, true)}</li>`).join('')}</ol>` : ''}</li>`).join('')}</ol></section>`;
+  }
+  function html(doc, opt) {
+    const lazy = !opt || opt.lazy !== false, closed = (opt && opt.closed) || new Set();
+    return titleBlock(doc) + (doc.model.sections || []).map((s, i) => { const T = doc.toc[i];
+      return `${T.part ? `<h1 class="rp-part" id="${T.part.id}">${esc(T.part.title)}</h1>` : ''}<section class="rp-sec${closed.has(T.id) ? ' rp-closed' : ''}" data-rpsec="${T.id}"><h2 class="rp-h1" id="${T.id}">${T.n}. ${esc(s.title)}</h2>${s.note ? `<p class="rp-note">${rich(doc, s.note, true)}</p>` : ''}
+        ${(s.subs || []).map((q, j) => { const Q = T.subs[j];
+          return `<div class="rp-sub${closed.has(Q.id) ? ' rp-closed' : ''}"><h3 class="rp-h2" id="${Q.id}">${Q.n} ${rich(doc, q.title, true)}${q.ref ? `<span class="rp-sref">${esc(q.ref)}</span>` : ''}</h3>${(q.items || []).map(it => itemHtml(doc, it, lazy)).join('')}</div>`; }).join('')}</section>`; }).join('');
+  }
+
+  /* ---------- plain text ---------- */
+  function text(doc, o) {   // o.legacy (TXP, 2026-11-07): equation notation as before TXP (SharedSteps.toText), for the tools that compare it with their tabs
+    const m = doc.model, L = [], T = s => rich(doc, s, false, o), SM = t => ST().summary(t, false, o);
+    L.push(m.title || '', m.subtitle || '', m.code || '');
+    if (m.refs && m.refs.length) { L.push('', 'References'); m.refs.forEach(([a, b]) => L.push(`${a}: ${b}`)); }
+    (m.info || []).forEach(([l, v]) => L.push(`${l}: ${v == null || v === '' ? '—' : v}`));
+    (m.sections || []).forEach((s, i) => {
+      if (s.part) L.push('', String(s.part).toUpperCase());
+      L.push('', `${i + 1}. ${s.title}`); if (s.note) L.push(T(s.note));
+      (s.subs || []).forEach((q, j) => {
+        L.push('', `${i + 1}.${j + 1} ${T(q.title)}${q.ref ? ' [' + q.ref + ']' : ''}`);
+        (q.items || []).forEach(it => {
+          if (it.topic) { const t = it.topic; L.push(`  ${t.no != null ? t.no + '. ' : ''}${t.title}${t.ref ? ' [' + t.ref + ']' : ''}${t.chip ? ' (' + t.chip + ')' : ''}${t.res ? ' — ' + SM(t) : ''}`); }
+          if (it.type === 'steps') { if (it.title) L.push(T(it.title)); const tp = new Map(); { let j = 0; (it.topics || []).forEach((t, k) => { tp.set(j, `  ${k + 1}. ${t.title}${t.ref ? ' [' + t.ref + ']' : ''}${t.chip ? ' (' + t.chip + ')' : ''}${t.res ? ' — ' + SM(t) : ''}`); j += t.n; }); }
+            (it.steps || []).forEach((st, i) => { if (tp.has(i)) L.push(tp.get(i)); L.push(`  ${st.label}${st.ref ? ' [' + st.ref + ']' : ''}: ${ST().line(st, false, o)}${st.ok === true ? ' OK' : st.ok === false ? ' NG' : ''}${st.note && !NP(st.note) ? ' (' + noteOf(doc, it, st.note, false, o) + ')' : ''}`); if (NP(st.note)) L.push(...noteTxt(doc, it, st.note, o)); }); }
+          else if (it.type === 'table') { if (it.caption) L.push(T(it.caption)); const c = x => { const o = x && typeof x === 'object' ? x : { t: x }; return T(o.t) + (o.key ? ' ' + T(`[[${o.key}]]`) : ''); };
+            L.push((it.head || []).map(c).join(' | ')); (it.rows || []).forEach(r => L.push((Array.isArray(r) ? r : r.cells).map(c).join(' | '))); }
+          else if (it.type === 'figure') L.push('[Figure] ' + T(it.caption));
+          else if (it.type === 'note') L.push(T(it.text));
+          else if (it.type === 'kv') (it.rows || []).forEach(r => L.push(`${T(r[0])}: ${T(r[1])}${r[2] ? ' ' + T(`[[${r[2]}]]`) : ''}`));
+        });
+      });
+    });
+    return L.join('\n');
+  }
+
+  /* ---------- styles ---------- */
+  const CSS = `
+.rp{font-family:"Times New Roman",Times,serif;color:#000;}
+.rp-bar{position:sticky;top:var(--rp-stick,0px);z-index:6;display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin:8px 0 12px;padding:8px 10px;background:#fff;border:1px solid #E4E7EB;border-radius:8px;font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:9.5pt;}
+.rp-chips{display:flex;flex-wrap:wrap;gap:6px;}
+.rp-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid #cbd5e1;border-radius:5px;cursor:pointer;background:#F8FAFC;font-size:9pt;}
+.rp-chip:has(input:checked){background:#e8eef6;border-color:#64748b;}
+.rp-sp{flex:1;}
+.rp-q{width:150px!important;} .rp-bar select{width:auto!important;}
+.rp-qw{display:inline-flex;flex-wrap:wrap;align-items:center;gap:4px 6px;max-width:100%;min-width:0;} .rp-qw .rp-qb{min-width:28px;padding-left:6px!important;padding-right:6px!important;} .rp-qw .rp-qb[hidden]{display:none!important;}   /* RSX: search, ▲ ▼, status */
+.rp-qs{font-size:9pt;color:#334155;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;min-width:0;} .rp-qs:empty{display:none;} .rp-qs.rp-qno{color:#991B1B;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:4px;padding:1px 6px;font-weight:600;}
+mark.rp-hit{background:#FDE68A;color:inherit;padding:0;border-radius:2px;box-shadow:0 0 0 1px #FDE68A;} mark.rp-hit.rp-cur{background:#F59E0B;box-shadow:0 0 0 2px #B45309;}
+.rp-doc .katex.rp-hitk{background:#FEF3C7;outline:1px dashed #D97706;outline-offset:1px;} .rp-doc .katex.rp-hitk.rp-cur{background:#FDE68A;outline:2px solid #B45309;}
+details.rp-lzq>summary{background:#FEF3C7;} details.rp-lzq.rp-cur>summary,details.rp-cur>summary{outline:2px solid #B45309;}
+.rp-toc a.rp-tochit{font-weight:800;color:#0F172A;border-left-color:#D97706;}
+.rp-body{display:grid;grid-template-columns:230px minmax(0,1fr);gap:16px;align-items:start;}
+.rp-toc{position:sticky;top:calc(var(--rp-stick,0px) + var(--rp-top,64px));max-height:calc(100vh - 150px - var(--rp-stick,0px) - var(--rp-top,64px));overflow:auto;border:1px solid #E4E7EB;border-radius:8px;padding:6px 2px;font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;scrollbar-width:thin;background:#fff;}
+.rp-toc a{display:block;padding:2px 9px;border-left:2px solid transparent;color:#475569;text-decoration:none;font-size:9pt;line-height:1.35;}
+.rp-toc a.rp-l1{font-weight:600;color:#0F172A;margin-top:5px;}
+.rp-toc a.rp-l0{font-weight:700;color:#0F172A;margin-top:9px;text-transform:uppercase;font-size:8.5pt;letter-spacing:.3px;border-bottom:1px solid #E4E7EB;}
+.rp-part{font:700 15pt Arial,Helvetica,sans-serif;margin:22pt 0 4pt;padding:0 0 4pt;border-bottom:1.5pt solid #000;scroll-margin-top:calc(var(--rp-stick,0px) + var(--rp-top,64px) + 8px);} .rp-ptoc li.rp-tp{font-weight:700;margin-top:6pt;}
+.rp-toc a.rp-l2{padding-left:20px;font-size:8.5pt;}
+.rp-toc a.rp-l3{padding-left:30px;font-size:8pt;font-style:italic;} .rp-toc a.rp-l4{padding-left:40px;font-size:8pt;}
+.rp-top{margin:8pt 0 2pt;padding:2pt 0 2pt 6pt;border-left:2.5pt solid #64748b;break-after:avoid;page-break-after:avoid;} .rp-top .rp-tn,.rp-top .rp-tt{font-weight:700;} .rp-tsum{font-size:9.5pt;}
+.rp-tpa{scroll-margin-top:calc(var(--rp-stick,0px) + var(--rp-top,64px) + 8px);}
+.rp-tchip{font-size:8.5pt;font-weight:700;padding:0 5pt;border:0.6pt solid #64748b;border-radius:6pt;} .rp-top-ok{border-left-color:#1a8a3a;} .rp-top-hi{border-left-color:#d9a400;} .rp-top-ng{border-left-color:#c62828;}
+.rp-toc a:hover,.rp-toc a.on{color:#0F172A;border-left-color:#1E3A5F;background:#eef4fb;}
+.rp-doc{display:block;max-width:8.5in;padding:0.5in 0.6in 0.7in;border:1px solid #E4E7EB;border-radius:2px;background:#fff;font-size:10.5pt;line-height:1.3;}
+.rp-tb{width:100%;border-collapse:collapse;margin:0 0 18pt;font-size:10pt;} .rp-tb td{border-bottom:0.6pt solid #000;padding:3pt 8pt 3pt 0;vertical-align:bottom;} .rp-tb span{display:block;font-size:8pt;font-style:italic;}
+.rp-cover{padding:0 0 12pt;margin:0 0 14pt;border-bottom:1pt solid #000;} .rp-cover h1{font:700 21pt/1.2 Arial,Helvetica,sans-serif;margin:0 0 6pt;} .rp-cover p{font:700 12pt Arial,Helvetica,sans-serif;margin:0 0 4pt;} .rp-cover .rp-cp{font-weight:400;}
+.rp-sref{float:right;font:italic 400 8.5pt "Times New Roman",Times,serif;color:#444;margin-left:10pt;}
+.rp-refs{margin:0 0 10pt;} .rp-reft{border-collapse:collapse;font-size:10pt;} .rp-reft td{padding:1pt 14pt 2pt 0;vertical-align:top;} .rp-reft td:first-child{white-space:nowrap;font-weight:700;}
+.rp-ptoc{display:none;} .rp-ptoc ol{list-style:none;margin:0;padding:0;} .rp-ptoc ol ol{padding-left:18pt;font-size:10pt;}
+.rp-h1x{font:700 12pt "Times New Roman",Times,serif;text-decoration:underline;text-transform:uppercase;margin:10pt 0 6pt;}
+.rp-h1{font:700 12pt "Times New Roman",Times,serif;text-decoration:underline;text-transform:uppercase;margin:16pt 0 8pt;cursor:pointer;scroll-margin-top:calc(var(--rp-stick,0px) + var(--rp-top,64px) + 8px);}
+.rp-h2{font:700 11pt "Times New Roman",Times,serif;margin:12pt 0 5pt;cursor:pointer;scroll-margin-top:calc(var(--rp-stick,0px) + var(--rp-top,64px) + 8px);}
+.rp-h1::after,.rp-h2::after{content:'▾';display:inline-block;margin-left:6pt;font-size:9pt;color:#777;text-decoration:none;}
+.rp-closed>.rp-h1::after,.rp-closed>.rp-h2::after{content:'▸';}
+.rp-sub{content-visibility:auto;contain-intrinsic-size:auto 800px;}
+.rp-sec.rp-closed>:not(.rp-h1){display:none;} .rp-sub.rp-closed>:not(.rp-h2){display:none;}
+.rp-hide{display:none!important;}
+.rp-h3{font:italic 700 10.5pt "Times New Roman",Times,serif;margin:8pt 0 2pt;}
+.rp-note{font-size:9.5pt;font-style:italic;margin:3pt 0 7pt;}
+.rp-warn{font-style:normal;border-left:3px solid #B45309;padding-left:6pt;}
+.rp-cap{font-size:9.5pt;font-weight:700;margin:8pt 0 2pt;}
+.rp-step{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"d r" "m r" "n n";gap:1pt 12pt;padding:4pt 0 3pt;border-top:0.4pt solid #bbb;break-inside:avoid;scroll-margin-top:calc(var(--rp-stick,0px) + var(--rp-top,64px) + 8px);}
+.rp-step .rp-d{grid-area:d;font-size:10pt;} .rp-step .rp-m{grid-area:m;padding-left:0.25in;overflow-x:auto;} .rp-step .rp-r{grid-area:r;align-self:center;text-align:right;white-space:nowrap;} .rp-step .rp-nt{grid-area:n;padding-left:0.25in;font-size:9pt;font-style:italic;color:#7a4a00;}
+.rp-ref{font-size:8.5pt;font-style:italic;color:#444;margin-left:8pt;}
+.rp-step .rp-ntl .rp-nta{font-style:normal;font-weight:700;border-left:3px solid #B45309;padding-left:6pt;margin:1pt 0 2pt;} .rp-step .rp-ntl .rp-ntb{font-weight:700;} .rp-step .rp-ntl .rp-ntu{margin:1pt 0 0;padding-left:14pt;} .rp-step .rp-ntl .rp-ntu li{margin:0;break-inside:avoid;}   /* SNL: a list note */
+.rp-ng .rp-r,.rp-ngt{font-weight:700;text-decoration:underline;} .rp-okt{font-size:8.5pt;} .rp-ngt{font-size:8.5pt;}
+.rp-step:target,.rp-flash{animation:rpflash 1.6s ease-out;}
+@keyframes rpflash{from{background:#FFF1B8;}to{background:transparent;}}
+@media (prefers-reduced-motion:reduce){.rp-step:target,.rp-flash{animation:none;background:#FFF7D6;}}
+.rp-tw{overflow-x:auto;}
+.rp-tbl{border-collapse:collapse;margin:3pt 0 8pt;font-size:9.5pt;} .rp-wide{width:100%;}
+.rp-tbl th,.rp-tbl td{border:0.6pt solid #000;padding:2pt 5pt;text-align:left;vertical-align:top;} .rp-tbl th{background:#e9e9e9;text-align:center;}
+.rp-tbl td.rp-n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.rp-tbl tr{break-inside:avoid;} .rp-tbl tr.rp-gov td{font-weight:700;}
+.rp-tbl td.rp-ok{background:#e7f4ec;} .rp-tbl td.rp-hi{background:#fdf3d8;} .rp-tbl td.rp-ng{background:#fbe1dd;font-weight:700;} .rp-tbl td.rp-na{color:#64748b;font-style:italic;}
+.rp-kv{border-collapse:collapse;margin:3pt 0 8pt;font-size:10pt;} .rp-kv td{padding:1pt 14pt 1pt 0;vertical-align:top;border-bottom:0.4pt dotted #bbb;}
+.rp-fig{margin:6pt 0;break-inside:avoid;} .rp-fig svg{max-width:100%;height:auto;} .rp-fig figcaption{font-size:9.5pt;font-style:italic;}
+.rp-see,.rp-go{font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:8.5pt;white-space:nowrap;}
+.rp-bad{color:#DC2626;font-weight:700;}
+details.rp-lz{border-top:0.4pt solid #bbb;padding:2pt 0;} details.rp-lz>summary{cursor:pointer;font-size:10pt;font-weight:700;padding:2pt 0;} .rp-cnt{font-weight:400;font-size:9pt;color:#555;}
+.rp-doc .katex{font-size:1.05em;} .rp-doc .katex .katex-error{color:#DC2626;}
+.st-frac{display:inline-flex;flex-direction:column;vertical-align:middle;text-align:center;font-size:92%;margin:0 2px;} .st-frac>.st-num{border-bottom:1px solid currentColor;padding:0 2px;} .st-frac>.st-den{padding:0 2px;} .st-bar{text-decoration:overline;}
+@media screen{.rp-step .rp-m{padding-top:2pt;padding-bottom:2pt;} .rp-step .rp-m .katex .base{margin:2pt 0;}}   /* equations on screen: a wrapped line clears the one above; a tall fraction stays inside the scroll box */
+#rp-print{display:none;} .rp-split{display:none;}
+@media (max-width:1000px){.rp-body{grid-template-columns:minmax(0,1fr);} .rp-toc{position:static;max-height:220px;} .rp-doc{padding:14px;}}
+@media screen and (max-width:600px){.rp-go{white-space:normal;} .rp-step{grid-template-columns:minmax(0,1fr);grid-template-areas:"d" "m" "r" "n";} .rp-step .rp-r{white-space:normal;padding-left:0.25in;}}   /* PHN (2026-11-02): phone: a long tab link wraps, and a step's result goes under its equation instead of beside it (both were cut off) */
+@media print{
+  body.rp-printing>*:not(#rp-print){display:none!important;}
+  html:has(body.rp-printing),body.rp-printing{height:auto!important;overflow:visible!important;background:#fff!important;}
+  body.rp-printing #rp-print{display:block!important;}
+  .rp-bar,.rp-toc{display:none!important;}
+  mark.rp-hit{background:none!important;color:inherit!important;box-shadow:none!important;} .rp-doc .katex.rp-hitk{background:none!important;outline:none!important;} details.rp-lzq>summary{background:none!important;} details.rp-cur>summary{outline:none!important;}   /* RSX: search marks print plainly */
+  .rp-go{font-family:inherit;font-size:inherit;color:#000;text-decoration:none;white-space:normal;}
+  .rp-body{display:block;} .rp-sub{content-visibility:visible;}
+  .rp-doc{border:0;padding:0;max-width:none;box-shadow:none;}
+  .rp-ptoc{display:block;break-after:page;}
+  .rp-sec{break-before:auto;} .rp-part{break-before:page;break-after:avoid;} .rp-part+.rp-sec{break-before:auto;} .rp-sec.rp-closed>*,.rp-sub.rp-closed>*{display:revert!important;} .rp-hide{display:revert!important;}
+  .rp-h1::after,.rp-h2::after{content:none!important;}
+  .rp-h1,.rp-h2,.rp-h3,.rp-cap{break-after:avoid;}
+  .rp-h1{break-inside:avoid;padding-bottom:2.35in;margin-bottom:-2.35in;}   /* PGB (2026-11-02): no forced page per section; a section starts on a new page only when less than ~25 % of the page (2.35 in of the 9.45 in body) is left: the heading reserves that height (padding, unbreakable) and the negative margin lets its content flow back into it */
+  .rp-top{break-inside:avoid;}   /* PHN (2026-11-02): a topic heading and its one-line result stay together (with break-after:avoid, on the page of its first step) */
+  .rp-see{font-family:"Times New Roman",Times,serif;font-size:inherit;color:#000;text-decoration:none;}
+  .rp-see::before{content:"see ";} .rp-seen::before{content:none;}
+  details.rp-lz>summary{list-style:none;} details.rp-lz>summary::-webkit-details-marker{display:none;}
+  .rp-tbl td.rp-ok,.rp-tbl td.rp-hi,.rp-tbl td.rp-ng,.rp-tbl th{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  .rp-step .rp-m{overflow:visible;}
+  .rp-tw{overflow:visible;} .rp-tbl.rp-fit{zoom:var(--rp-fit,1);}   /* RPTW (2026-11-03): no scroll bar is printed beside a table; a table wider than the page body is scaled to fit it (fitTables) */
+  .rp-tbl.rp-splitsrc{display:none;} .rp-split{display:block;} .rp-blkcap{font-weight:400;font-style:italic;margin:6pt 0 1pt;}   /* RPSP (2026-11-03): a table too wide for 0.80 prints as column blocks (splitTable) */
+  .katex,.katex *{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .katex .frac-line{border-bottom-color:#000!important;min-height:1px;}
+}`;
+  function css() {
+    if (typeof document === 'undefined' || document.getElementById('rp-css')) return;
+    const st = document.createElement('style'); st.id = 'rp-css'; st.textContent = CSS; document.head.appendChild(st);
+  }
+  const cssStr = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ');
+  function pageCss(doc) {
+    const h = doc.model.head || {}, box = 'font: 9pt "Times New Roman", Times, serif; color: #000; white-space: pre;';
+    const hs = t => (h.lines ? String(t == null ? '' : t).split('\n').map(cssStr).join('\\A ') : cssStr(t));   // head.lines: a line break is a new line ('\A')
+    return `@page { size: letter portrait; margin: ${h.lines ? '0.95in' : '0.85in'} 0.6in 0.7in 0.6in;
+      @top-left { content: "${hs(h.left || doc.model.title)}"; ${box} vertical-align: bottom; padding-bottom: 6pt; text-align: left; }${h.center ? `
+      @top-center { content: "${hs(h.center)}"; ${box} vertical-align: bottom; padding-bottom: 6pt; text-align: left; }` : ''}
+      @top-right { content: "${hs(h.right || '')}"; ${box} vertical-align: bottom; padding-bottom: 6pt; text-align: right; }
+      @bottom-left { content: "${cssStr(h.foot || doc.model.title)}"; ${box} vertical-align: top; padding-top: 6pt; }
+      @bottom-right { content: "Page " counter(page) " of " counter(pages); ${box} vertical-align: top; padding-top: 6pt; } }`;
+  }
+  function setPage(doc) { let st = document.getElementById('rp-page'); if (!st) { st = document.createElement('style'); st.id = 'rp-page'; document.head.appendChild(st); } st.textContent = doc ? pageCss(doc) : ''; }
+
+  /* ---------- the viewer ---------- */
+  const MAXMARK = 1000;   // RSX: a search stops marking (and counting) after about this many hits; the status then says "more than"
+  let LIVE = null;   // the mounted viewer (for Ctrl+P from the Report tab: running header, lazy items filled)
+  function fillLazy(root, doc) {
+    root.querySelectorAll('details.rp-lz').forEach(d => { if (!d.dataset.filled) { const it = doc.lazy[+d.dataset.rplz]; d.insertAdjacentHTML('beforeend', lazyBody(doc, it)); d.dataset.filled = '1'; } d.open = true; });
+  }
+  function mount(host, model, opt) {
+    css(); opt = opt || {};
+    const doc = build(model), closed = opt.closed || new Set();
+    host.innerHTML = `<div class="rp"><div class="rp-bar">${opt.controls || ''}<span class="rp-sp"></span><span class="rp-qw"><input type="search" class="rp-q" placeholder="Search the report" aria-label="Search the report" title="Enter: next match · Shift+Enter: previous · Esc: clear"><button type="button" class="rp-qb" data-rpq="-1" aria-label="Previous match" title="Previous match (Shift+Enter)" hidden>▲</button><button type="button" class="rp-qb" data-rpq="1" aria-label="Next match" title="Next match (Enter)" hidden>▼</button><span class="rp-qs" role="status" aria-live="polite"></span></span>
+      <button type="button" data-rpact="exp">Expand all</button><button type="button" data-rpact="col">Collapse all</button><button type="button" class="primary" data-rpact="print">Print report</button></div>
+      <div class="rp-body"><nav class="rp-toc" aria-label="Report contents">${doc.toc.map(s => `${s.part ? `<a href="#${s.part.id}" data-rpto="${s.part.id}" class="rp-l0">${esc(s.part.title)}</a>` : ''}<a href="#${s.id}" data-rpto="${s.id}" class="rp-l1">${s.n}. ${esc(s.title)}</a>${s.subs.map(q => `<a href="#${q.id}" data-rpto="${q.id}" class="rp-l2">${q.n} ${rich(doc, q.title, true)}</a>${(q.items || []).map(it => `<a href="#${it.anchor}" data-rpto="${it.anchor}" class="rp-l3">${rich(doc, it.title, true)}</a>${it.tops.map((t, k) => `<a href="#${t.anchor}" data-rpto="${t.anchor}" class="rp-l4">${k + 1}. ${esc(t.title)}</a>`).join('')}`).join('')}`).join('')}`).join('')}</nav>
+      <article class="rp-doc">${html(doc, { lazy: true, closed })}</article></div></div>`;
+    const root = host.querySelector('.rp'); if (opt.stick) root.style.setProperty('--rp-stick', opt.stick + 'px');
+    const bar = root.querySelector('.rp-bar'), art = root.querySelector('.rp-doc');
+    const size = () => { if (bar.offsetHeight) root.style.setProperty('--rp-top', (bar.offsetHeight + 8) + 'px'); }; size();
+    const open = el => { let p = el.closest('.rp-closed'); while (p) { p.classList.remove('rp-closed'); closed.delete((p.querySelector('.rp-h1,.rp-h2') || {}).id); p = p.parentElement && p.parentElement.closest('.rp-closed'); } };
+    const flash = el => { el.classList.remove('rp-flash'); void el.offsetWidth; el.classList.add('rp-flash'); setTimeout(() => el.classList.remove('rp-flash'), 1700); };
+    const go = id => { const el = root.querySelector('#' + id); if (!el) return false; open(el); el.scrollIntoView({ block: 'start' }); flash(el); return true; };
+    function jump(key) {
+      const e = doc.index.get(key); if (!e) return false;
+      if (e.lz != null) { const d = art.querySelector(`details.rp-lz[data-rplz="${e.lz}"]`); if (d) { fillOne(d); d.open = true; } }
+      return go(e.anchor);
+    }
+    root.addEventListener('click', e => {
+      const t = e.target;
+      const j = t.closest('[data-rpjump]'); if (j) { e.preventDefault(); jump(j.dataset.rpjump); return; }
+      const to = t.closest('[data-rpto]'); if (to) { e.preventDefault(); go(to.dataset.rpto); return; }
+      const g = t.closest('[data-rpgoto]'); if (g) { e.preventDefault(); if (opt.onGoto) opt.onGoto(g.dataset.rpgoto); return; }
+      const h = t.closest('.rp-h1,.rp-h2'); if (h && !t.closest('a')) { const box = h.parentElement; box.classList.toggle('rp-closed'); if (box.classList.contains('rp-closed')) closed.add(h.id); else closed.delete(h.id); return; }
+      const qb = t.closest('[data-rpq]'); if (qb) { step(+qb.dataset.rpq); return; }
+      const a = t.closest('[data-rpact]'); if (!a) return;
+      if (a.dataset.rpact === 'exp') { art.querySelectorAll('.rp-closed').forEach(x => x.classList.remove('rp-closed')); closed.clear(); }
+      else if (a.dataset.rpact === 'col') art.querySelectorAll('.rp-sec').forEach(x => { x.classList.add('rp-closed'); closed.add(x.querySelector('.rp-h1').id); });
+      else if (a.dataset.rpact === 'print') print(doc);
+    });
+    art.addEventListener('toggle', e => { const d = e.target; if (d.matches && d.matches('details.rp-lz') && d.open) fillOne(d); }, true);
+    /* search (RSX, 2026-11-09, display only): hides the subsections (and sections) whose text does not contain every word typed, as
+       before; the text of a lazy item not yet opened is its model text (lzText), so a hit inside it is found. In what stays shown, the
+       words are marked (<mark class="rp-hit">, text nodes only; an equation that holds a word gets class rp-hitk, a lazy item not yet
+       opened rp-lzq), counted in the status, the contents entries holding a hit made bold, and ▲ ▼ / Enter / Shift+Enter step through
+       the hits (opening the section, subsection or lazy item that holds one); Esc clears. */
+    const qIn = root.querySelector('.rp-q'), qSt = root.querySelector('.rp-qs'), qBt = Array.from(root.querySelectorAll('.rp-qb'));
+    const TOC = new Map(Array.from(root.querySelectorAll('.rp-toc [data-rpto]'), a => [a.dataset.rpto, a])), LZT = [], Q = { v: '', w: [], re: null, hits: [], all: [], toc: [], cur: -1, seen: 0, full: false, secs: 0 };
+    const lzText = i => { if (LZT[i] != null) return LZT[i]; const it = doc.lazy[i], F = ST().fmt, P = [it.title, it.caption];
+      if (it.type === 'table') [it.head || []].concat((it.rows || []).map(r => (Array.isArray(r) ? r : r.cells))).forEach(R => R.forEach(c => { const o = c && typeof c === 'object' ? c : { t: c }; P.push(rich(doc, o.t, false)); if (o.key) P.push(ref(doc, o.key)); }));
+      else { (it.topics || []).forEach(t => P.push(t.title, t.ref, t.chip)); (it.steps || []).forEach(st => P.push(st.label, st.ref, st.sym, st.eq, st.sub, typeof st.value === 'number' ? F(st.value, st.d) : st.value, st.unit, st.ok === true ? 'OK' : st.ok === false ? 'NG' : '', st.note ? noteSrc(st.note) : '')); }
+      return (LZT[i] = P.filter(x => x != null && x !== '').join('\n').toLowerCase()); };
+    const textOf = el => (el._rpq != null ? el._rpq : (el._rpq = [el.textContent].concat(Array.from(el.querySelectorAll('details.rp-lz'), d => lzText(+d.dataset.rplz))).join('\n').toLowerCase()));
+    function fillOne(d) {   // a lazy item filled (opened, a § link, or a search step); while a search is shown, its hits are marked
+      if (!d.dataset.filled) { d.insertAdjacentHTML('beforeend', lazyBody(doc, doc.lazy[+d.dataset.rplz])); d.dataset.filled = '1'; }
+      if (!d.classList.contains('rp-lzq')) return -1;
+      d.classList.remove('rp-lzq'); const k = Q.hits.indexOf(d); if (k < 0) return -1;
+      const H = [], full = Q.full; Q.full = false; Array.from(d.children).forEach(c => { if (c.tagName !== 'SUMMARY') markIn(c, H); }); Q.full = full;
+      Q.hits.splice(k, 1, ...(H.length ? H : [d])); if (Q.cur > k) Q.cur += Math.max(H.length, 1) - 1; status(); return k;
+    }
+    const SKIP = '.katex,svg,script,style,textarea,.rp-hide', BLK = /^(TR|LI|P|FIGURE)$/;
+    function markIn(el, H) {   // the hits in el, in document order, into H; the walk stops once MAXMARK hits are found (Q.full)
+      const w = Q.w, E = [], F = NodeFilter, tw = document.createTreeWalker(el, F.SHOW_ELEMENT | F.SHOW_TEXT, { acceptNode: n => {   // E: the hits, in document order
+        if (Q.full) return F.FILTER_REJECT;
+        if (n.nodeType === 3) { const k = (n.nodeValue.match(Q.re) || []).length; if (k) { E.push(n); if ((Q.seen += k) >= MAXMARK) Q.full = true; } return F.FILTER_SKIP; }
+        if (BLK.test(n.tagName) || n.classList.contains('rp-step')) { const t = n._rpq != null ? n._rpq : (n._rpq = n.textContent.toLowerCase()); if (!w.some(x => t.includes(x))) return F.FILTER_REJECT; }   // a block without any word: not walked
+        if (n.matches(SKIP)) { if (n.classList.contains('katex')) { const t = n._rpq != null ? n._rpq : (n._rpq = n.textContent.toLowerCase()); if (w.some(x => t.includes(x))) { n.classList.add('rp-hitk'); E.push(n); if (++Q.seen >= MAXMARK) Q.full = true; } } return F.FILTER_REJECT; }   // never inside an equation
+        if (n.matches('details.rp-lz:not([data-filled])') && w.some(x => lzText(+n.dataset.rplz).includes(x))) { n.classList.add('rp-lzq'); E.push(n); if (++Q.seen >= MAXMARK) Q.full = true; }
+        return F.FILTER_SKIP; } });
+      while (tw.nextNode());   // walked first, changed after
+      E.forEach(n => { if (n.nodeType === 1) { H.push(n); Q.all.push(n); return; }
+        const s = n.nodeValue, f = document.createDocumentFragment(); let m, a = 0, k = 0; Q.re.lastIndex = 0;
+        while ((m = Q.re.exec(s))) { if (m.index > a) f.appendChild(document.createTextNode(s.slice(a, m.index)));
+          const mk = document.createElement('mark'); mk.className = 'rp-hit'; mk.textContent = m[0]; f.appendChild(mk); H.push(mk); Q.all.push(mk); k++; a = m.index + m[0].length; }
+        if (!k) return; if (a < s.length) f.appendChild(document.createTextNode(s.slice(a))); n.replaceWith(f); });
+    }
+    function unmark() {   // the marks and classes of the last search (kept in Q.all and Q.toc: no search of the whole page)
+      const P = new Set(); Q.all.forEach(m => { if (m.tagName === 'MARK') { if (m.parentNode) { P.add(m.parentNode); m.replaceWith(m.textContent); } } else m.classList.remove('rp-hitk', 'rp-lzq', 'rp-cur'); }); P.forEach(p => p.normalize());
+      Q.toc.forEach(a => a.classList.remove('rp-tochit')); Q.all = []; Q.toc = [];
+    }
+    function status() {
+      const n = Q.hits.length, lz = Q.hits.filter(h => h.classList && h.classList.contains('rp-lzq')).length;
+      qBt.forEach(b => { b.hidden = !Q.w.length; b.disabled = !Q.hits.length; });
+      qSt.className = 'rp-qs' + (Q.w.length && !n ? ' rp-qno' : '');
+      qSt.textContent = !Q.w.length ? '' : !n ? `No matches for “${Q.v.trim()}”` : (Q.cur >= 0 ? `${Q.cur + 1} of ${n.toLocaleString('en-US')}` : `${Q.full ? 'More than ' + MAXMARK.toLocaleString('en-US') : n.toLocaleString('en-US')} match${n === 1 ? '' : 'es'}`) + ` in ${Q.secs} section${Q.secs === 1 ? '' : 's'}`
+        + (lz ? ` (${lz.toLocaleString('en-US')} in unopened lists)` : '') + (Q.full ? ` (first ${n.toLocaleString('en-US')} marked)` : '');
+    }
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(size).observe(bar);   // the bar may wrap to another line with the status
+    let qT = 0;
+    qIn.addEventListener('input', e => { clearTimeout(qT); const v = e.target.value; qT = setTimeout(() => search(v), 150); });
+    qIn.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { if (!qIn.value && !Q.w.length) return; e.preventDefault(); clearTimeout(qT); qIn.value = ''; search(''); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (qT && qIn.value !== Q.v) { clearTimeout(qT); search(qIn.value); } step(e.shiftKey ? -1 : 1); }
+    });
+    function step(d) {
+      if (!Q.hits.length) return; let k = Q.cur < 0 ? (d > 0 ? 0 : Q.hits.length - 1) : (Q.cur + d + Q.hits.length) % Q.hits.length;
+      const prev = Q.hits[Q.cur]; if (prev && prev.classList) prev.classList.remove('rp-cur');
+      let el = Q.hits[k]; if (el.matches('details.rp-lzq')) { fillOne(el); el.open = true; if (d < 0 && Q.hits[k] !== el) { let j = k; while (j + 1 < Q.hits.length && el.contains(Q.hits[j + 1])) j++; k = j; } el = Q.hits[k]; }
+      Q.cur = k; open(el); for (let p = el.parentElement && el.parentElement.closest('details'); p; p = p.parentElement && p.parentElement.closest('details')) p.open = true;
+      el.classList.add('rp-cur'); el.scrollIntoView({ block: 'center' }); requestAnimationFrame(() => { if (Q.hits[Q.cur] === el) el.scrollIntoView({ block: 'center' }); });   // again once the subsections above it are laid out (content-visibility)
+      status();
+    }
+    function search(v) {
+      qT = 0; unmark(); Q.v = String(v || ''); Q.w = Q.v.toLowerCase().split(/\s+/).filter(Boolean); Q.hits = []; Q.cur = -1; Q.seen = 0; Q.full = false; Q.secs = 0; let vis = 0;
+      const w = Q.w, has = el => { const t = textOf(el); return w.every(x => t.includes(x)); };
+      Q.re = w.length ? new RegExp(w.slice().sort((a, b) => b.length - a.length).map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi') : null;
+      art.querySelectorAll('.rp-sec').forEach(sec => {
+        const h1 = sec.querySelector('.rp-h1'), secHit = !w.length || has(h1); let any = false;
+        sec.querySelectorAll('.rp-sub').forEach(sub => { const hit = !w.length || secHit || has(sub); sub.classList.toggle('rp-hide', !hit); any = any || hit; if (hit && w.length) vis++;
+          const a = TOC.get(sub.querySelector('.rp-h2').id); if (a) a.classList.toggle('rp-hide', !hit); });
+        const show = !w.length || secHit || any; sec.classList.toggle('rp-hide', !show);
+        const a = TOC.get(h1.id); if (a) a.classList.toggle('rp-hide', !show);
+        if (w.length && show) { sec.classList.remove('rp-closed');
+          const H = []; markIn(sec, H); if (!H.length) return; Q.hits.push(...H);
+          const S = new Set(H.map(h => (h.nodeType === 1 ? h : h.parentNode).closest('.rp-sub') || sec)); Q.secs += S.size;
+          S.forEach(x => { const id = (x.querySelector(x === sec ? '.rp-h1' : '.rp-h2') || {}).id, l = id && TOC.get(id); if (l) { l.classList.add('rp-tochit'); Q.toc.push(l); } });
+          if (a) { a.classList.add('rp-tochit'); Q.toc.push(a); } }
+      });
+      if (Q.full) Q.secs = vis;   // the walk stopped early: the subsections shown
+      status();
+    }
+    if (opt.spy) {   // scroll-spy: the last nav entry whose target is above the top of the reading area
+      const toc = root.querySelector('.rp-toc'), links = Array.from(toc.querySelectorAll('a[data-rpto]'));
+      let sc = host.parentElement; while (sc && sc !== document.body && !/(auto|scroll)/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
+      const tgt = sc && sc !== document.body ? sc : window; let raf = 0;
+      const spy = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (!root.isConnected) { tgt.removeEventListener('scroll', spy); return; }
+        const lim = (tgt === window ? 0 : tgt.getBoundingClientRect().top) + (parseFloat(getComputedStyle(root).getPropertyValue('--rp-stick')) || 0) + (parseFloat(getComputedStyle(root).getPropertyValue('--rp-top')) || 64) + 12;
+        let cur = null; for (const a of links) { const h = document.getElementById(a.dataset.rpto); if (!h || !h.offsetParent) continue; if (h.getBoundingClientRect().top <= lim) cur = a; else break; }
+        links.forEach(a => { if (a !== cur) a.classList.remove('on'); });
+        if (cur && !cur.classList.contains('on')) { cur.classList.add('on'); const nr = toc.getBoundingClientRect(), cr = cur.getBoundingClientRect(); if (cr.top < nr.top || cr.bottom > nr.bottom) toc.scrollTop += cr.top - nr.top - toc.clientHeight / 3; } }); };
+      tgt.addEventListener('scroll', spy, { passive: true }); spy();
+    }
+    LIVE = { host, doc, art };
+    return { doc, print: () => print(doc), jump, go };
+  }
+  /* RPTW (2026-11-03): print only. A table whose narrowest layout (min-content) is wider than the page body (letter, 0.6 in side
+     margins in pageCss: 7.3 in, less the table's indent in the report) gets class rp-fit and --rp-fit = 0.98 × body width / table width
+     (2 % for rounding in the zoomed layout); the print CSS zooms it by that factor, so it is scaled to the page instead of clipped (a
+     narrower table wraps its text as before). The screen is unchanged. Sections closed or hidden by the search in the live viewer print
+     open, so they are opened for the measurement and closed again. All tables are measured in one layout pass.
+     RPSP (2026-11-03, engineer): never below FIT_MIN = 0.80 (9.5 pt type → 7.6 pt). A table that would need less is split for print into
+     stacked column blocks (splitTable): each block repeats the first column (the row label) and the header rows, has a caption
+     "Columns 1 and a–b of n (column 1 repeated)", and is as wide as fits at 0.80 or more. The blocks are added after the table
+     (div.rp-split, shown in print only) and the table itself is hidden in print (rp-splitsrc), so the screen and the data are unchanged. */
+  const PAGE_W = 7.3 * 96, FIT_MIN = 0.8;
+  const fitOf = (avail, need) => Math.floor(avail / need * 980) / 1000;
+  function fitTables(root) {
+    if (!root || !root.querySelectorAll) return;
+    (root.matches && root.matches('.rp-doc') ? [root] : Array.from(root.querySelectorAll('.rp-doc'))).forEach(d => {
+      d.querySelectorAll('.rp-tw>.rp-split').forEach(x => x.remove()); d.querySelectorAll('.rp-tw>table.rp-splitsrc').forEach(t => t.classList.remove('rp-splitsrc'));
+      const T = Array.from(d.querySelectorAll('.rp-tw>table.rp-tbl')); if (!T.length) return;
+      const shut = Array.from(d.querySelectorAll('.rp-closed,.rp-hide')).map(e => [e, e.classList.contains('rp-closed'), e.classList.contains('rp-hide')]);
+      shut.forEach(([e]) => e.classList.remove('rp-closed', 'rp-hide'));
+      const w0 = T.map(t => { t.classList.remove('rp-fit'); t.style.removeProperty('--rp-fit'); const w = t.style.width; t.style.width = 'min-content'; return w; });
+      try {
+        const dr = d.getBoundingClientRect(), dc = getComputedStyle(d), x0 = dr.left + (parseFloat(dc.paddingLeft) || 0) + (parseFloat(dc.borderLeftWidth) || 0);
+        const M = T.map(t => { if (!t.getClientRects().length) return null;
+          const need = t.getBoundingClientRect().width, avail = PAGE_W - Math.max(0, t.parentNode.getBoundingClientRect().left - x0);
+          return [need, avail, need > avail + 0.5 && fitOf(avail, need) < FIT_MIN ? colWidths(t) : null]; });
+        const NB = [];   // the column blocks made, [table, avail], measured in a second pass
+        T.forEach((t, i) => { t.style.width = w0[i]; const m = M[i]; if (!m || m[0] <= m[1] + 0.5) return;
+          if (m[2] && splitTable(t, m[2], m[1], NB)) return;
+          t.classList.add('rp-fit'); t.style.setProperty('--rp-fit', String(Math.max(m[2] ? 0.5 : FIT_MIN, fitOf(m[1], m[0])))); });
+        if (NB.length) { NB.forEach(([tb]) => { tb.parentNode.style.display = 'block'; });   // .rp-split is shown in print only
+          const bw = NB.map(([tb]) => { const w = tb.style.width; tb.style.width = 'min-content'; return w; });
+          const need = NB.map(([tb]) => tb.getBoundingClientRect().width);
+          NB.forEach(([tb, avail], k) => { tb.style.width = bw[k]; if (need[k] > avail + 0.5) { tb.classList.add('rp-fit'); tb.style.setProperty('--rp-fit', String(Math.max(0.5, fitOf(avail, need[k])))); } });
+          NB.forEach(([tb]) => { tb.parentNode.style.removeProperty('display'); }); }
+      } finally {
+        T.forEach((t, i) => { t.style.width = w0[i]; });
+        shut.forEach(([e, c, h]) => { if (c) e.classList.add('rp-closed'); if (h) e.classList.add('rp-hide'); });
+      }
+    });
+  }
+  /* the cells of a table row by row with their first column and span; colWidths: each column's width (from its one-column cells) */
+  const grid = t => Array.from(t.rows).map(r => { let c = 0; return Array.from(r.cells).map(td => { const sp = Math.max(1, td.colSpan || 1), o = { td, c, sp }; c += sp; return o; }); });
+  function colWidths(t) {
+    const G = grid(t), n = Math.max(0, ...G.map(r => r.reduce((s, o) => s + o.sp, 0))), w = new Array(n).fill(0);
+    G.forEach(r => r.forEach(o => { if (o.sp === 1) w[o.c] = Math.max(w[o.c], o.td.getBoundingClientRect().width); }));
+    return w;
+  }
+  /* splitTable(t, w, avail, NB): column 1 plus further columns, block after block, each block fitting at FIT_MIN or more; as few blocks as
+     that allows, with the columns shared out evenly by width. false (not split) when the table has fewer than 3 columns, a column of
+     unknown width, or column 1 with one more column does not fit at FIT_MIN. */
+  function splitTable(t, w, avail, NB) {
+    const n = w.length, lim = avail * 0.98 / FIT_MIN; if (n < 3 || w.some(x => !(x > 0))) return false;
+    const cut = L => { const B = []; let a = 1;   // blocks of column 1 + columns a..b, each at most L wide (null if one column alone is wider)
+      while (a < n) { let b = a, sum = w[0] + w[a]; if (sum > L) return null; while (b + 1 < n && sum + w[b + 1] <= L) sum += w[++b]; B.push([a, b]); a = b + 1; }
+      return B; };
+    let B = cut(lim); if (!B || B.length < 2) return false;
+    // balance: the narrowest limit that still gives the same number of blocks, so the last block is not a stub
+    const k = B.length, tot = w.slice(1).reduce((x, y) => x + y, 0);
+    for (let L = w[0] + tot / k; L < lim; L += 4) { const C = cut(L); if (C && C.length <= k) { B = C; break; } }
+    const G = grid(t), box = document.createElement('div'); box.className = 'rp-split';
+    B.forEach(([a, b], k) => {
+      const tb = document.createElement('table'); tb.className = 'rp-tbl rp-blk' + (t.classList.contains('rp-wide') ? ' rp-wide' : '');
+      const sec = { THEAD: null, TBODY: null, TFOOT: null };
+      G.forEach((row, ri) => { const tr0 = t.rows[ri], p = tr0.parentNode, tag = p && /^T(HEAD|BODY|FOOT)$/.test(p.tagName) ? p.tagName : 'TBODY';
+        if (!sec[tag]) { sec[tag] = document.createElement(tag.toLowerCase()); }
+        const tr = document.createElement('tr'); if (tr0.className) tr.className = tr0.className;
+        row.forEach(o => { const ov = (o.c === 0 ? 1 : 0) + Math.max(0, Math.min(b, o.c + o.sp - 1) - Math.max(a, o.c) + 1); if (!ov) return;
+          const td = o.td.cloneNode(true); if (ov > 1) td.colSpan = ov; else td.removeAttribute('colspan'); tr.appendChild(td); });
+        sec[tag].appendChild(tr); });
+      ['THEAD', 'TBODY', 'TFOOT'].forEach(x => { if (sec[x]) tb.appendChild(sec[x]); });
+      NB.push([tb, avail]);
+      const cap = document.createElement('p'); cap.className = 'rp-cap rp-blkcap';
+      cap.textContent = k === 0 ? `Columns 1–${b + 1} of ${n}` : `Columns 1 and ${a + 1 === b + 1 ? a + 1 : (a + 1) + '–' + (b + 1)} of ${n} (column 1 repeated)`;
+      box.appendChild(cap); box.appendChild(tb);
+    });
+    t.classList.add('rp-splitsrc'); t.parentNode.appendChild(box);
+    return true;
+  }
+  /* fitBox(box): the print box (#rp-print) is display:none on screen, so it is laid out off screen for the measurement, then hidden
+     again. Each tool's own Ctrl+P handler fills #rp-print itself (SharedReport.html) after this file's beforeprint listener has run, so
+     a MutationObserver on the box fits its tables as soon as it is filled (a microtask: before the browser lays out the print). */
+  function fitBox(box) {
+    const doc = box && box.querySelector('.rp-doc'); if (!doc || box._rpFit === doc) return; box._rpFit = doc;
+    const cs = box.style.cssText;
+    box.style.cssText = 'display:block;position:absolute;left:-100000px;top:0;width:7.3in;visibility:hidden;';
+    try { fitTables(doc); } catch (e) { /* print without scaling */ } finally { box.style.cssText = cs; }
+  }
+  function watchBox(box) {
+    if (!box || box._rpWatch || typeof MutationObserver === 'undefined') return; box._rpWatch = true;
+    new MutationObserver(() => fitBox(box)).observe(box, { childList: true });
+  }
+  function watchBody() {
+    const b = document.body; if (!b) return;
+    watchBox(document.getElementById('rp-print'));
+    new MutationObserver(R => { for (const r of R) for (const n of r.addedNodes) if (n.id === 'rp-print') { watchBox(n); fitBox(n); } }).observe(b, { childList: true });
+  }
+  /* print(doc): the whole report alone on the page (every section open, every lazy item filled), the running header and page numbers
+     as @page margin boxes (Chromium-based browsers print them; others print the page without). */
+  function print(doc) {
+    css();
+    let box = document.getElementById('rp-print'); if (!box) { box = document.createElement('div'); box.id = 'rp-print'; document.body.appendChild(box); }
+    box.innerHTML = `<div class="rp"><article class="rp-doc">${html(doc, { lazy: false })}</article></div>`;
+    watchBox(box); fitBox(box);   // RPTW
+    setPage(doc); document.body.classList.add('rp-printing');
+    if (typeof window.print === 'function') setTimeout(() => window.print(), 50);
+  }
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('beforeprint', () => { if (document.body.classList.contains('rp-printing')) return;   // Ctrl+P while the Report tab shows
+      if (LIVE && LIVE.host.isConnected && LIVE.host.querySelector('.rp') && LIVE.host.offsetParent !== null) { fillLazy(LIVE.art, LIVE.doc); setPage(LIVE.doc); try { fitTables(LIVE.art); } catch (e) { /* RPTW: print without scaling */ } } });
+    if (typeof document !== 'undefined') { if (document.body) watchBody(); else document.addEventListener('DOMContentLoaded', watchBody); }   // RPTW
+    window.addEventListener('afterprint', () => { document.body.classList.remove('rp-printing'); setPage(null); const b = document.getElementById('rp-print'); if (b) b.innerHTML = ''; });
+  }
+
+  window.SharedReport = { build, html, text, mount, print, ref, keyOf, css };
 })();
 
 </script>

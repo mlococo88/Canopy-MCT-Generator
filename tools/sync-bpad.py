@@ -85,23 +85,32 @@ def inline_shared(repo, html):
 DXF_START, DXF_END = "<!--SHARED-DXF-START-->", "<!--SHARED-DXF-END-->"
 
 
+SHARED_FILES = ["shared/dxf.js", "shared/steps.js", "shared/report.js"]
+
+
 def embed_shared_dxf(repo, index):
-    """Copy All-Structural's shared/dxf.js (window.SharedDxf: SVG sheet preview, pan/zoom viewer,
-    sheet printing) into index.html between the SHARED-DXF markers, for the Drawings tab."""
-    src = (repo / "shared" / "dxf.js").read_text(encoding="utf-8")
-    if "window.SharedDxf" not in src or "</script" in src.lower():
-        sys.exit("shared/dxf.js is missing window.SharedDxf or contains </script — check it before embedding.")
-    try:
-        commit = subprocess.check_output(["git", "-C", str(repo), "log", "-1", "--format=%h", "--", "shared/dxf.js"], text=True).strip()
-    except Exception:
-        commit = "unknown"
-    block = f'{DXF_START}\n<script id="sharedDxf" data-src="All-Structural shared/dxf.js" data-commit="{commit}">\n{src}\n</script>\n{DXF_END}'
+    """Copy All-Structural's shared/dxf.js (window.SharedDxf: sheet preview, pan/zoom, printing; Drawings tab),
+    shared/steps.js (window.SharedSteps) and shared/report.js (window.SharedReport: the report viewer; Output tab)
+    into index.html between the SHARED-DXF markers."""
+    blocks = []
+    for rel in SHARED_FILES:
+        src = (repo / rel).read_text(encoding="utf-8")
+        glob = {"shared/dxf.js": "window.SharedDxf", "shared/steps.js": "window.SharedSteps", "shared/report.js": "window.SharedReport"}[rel]
+        if glob not in src or "</script" in src.lower():
+            sys.exit(f"{rel} is missing {glob} or contains </script: check it before embedding.")
+        try:
+            commit = subprocess.check_output(["git", "-C", str(repo), "log", "-1", "--format=%h", "--", rel], text=True).strip()
+        except Exception:
+            commit = "unknown"
+        sid = "shared" + rel.split("/")[1].split(".")[0].capitalize()
+        blocks.append(f'<script id="{sid}" data-src="All-Structural {rel}" data-commit="{commit}">\n{src}\n</script>')
+        print(f"Embedded {rel} @ {commit}: {len(src):,} chars")
+    block = DXF_START + "\n" + "\n".join(blocks) + "\n" + DXF_END
     if DXF_START in index:
         index = re.sub(re.escape(DXF_START) + r".*?" + re.escape(DXF_END), lambda m: block, index, flags=re.S)
     else:
         j = index.find("<!--BPAD-EMBED-START-->")
         index = index[:j] + block + "\n" + index[j:]
-    print(f"Embedded shared/dxf.js @ {commit}: {len(src):,} chars")
     return index
 
 
