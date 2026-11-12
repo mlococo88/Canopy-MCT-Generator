@@ -7,7 +7,7 @@ Usage:
 Reads the designer from a checkout of the mlococo88/All-Structural repo, appends
 tools/bpad-embed-adapter.js (the API the canopy page drives), gzips it, and writes
 it into index.html between the BPAD-EMBED markers as a base64 block, stamped with
-the source commit. The designer itself is not modified otherwise, so every
+the source commit. Also copies shared/dxf.js (sheet preview / print, Drawings tab). The designer itself is not modified otherwise, so every
 improvement made to it in All-Structural is picked up by re-running this script.
 """
 import argparse, base64, gzip, hashlib, io, pathlib, re, subprocess, sys
@@ -42,6 +42,7 @@ def main():
             commit += "+local"
     except Exception:
         commit = "unknown"
+    src = inline_shared(repo, src)
     adapter = ADAPTER.read_text(encoding="utf-8").replace("__BPAD_COMMIT__", commit)
     i = src.rfind("</body>")
     html = src[:i] + "<script>\n" + adapter + "\n</script>\n" + src[i:]
@@ -60,8 +61,48 @@ def main():
     else:
         j = index.rfind("</body>")
         index = index[:j] + block + "\n" + index[j:]
+    index = embed_shared_dxf(repo, index)
     INDEX.write_text(index, encoding="utf-8")
     print(f"Embedded {a.file} @ {commit} (sha {sha}): {len(raw):,} bytes -> {len(b64):,} base64 chars")
+
+
+def inline_shared(repo, html):
+    """The designer loads All-Structural's shared/*.js with relative <script src> tags; the canopy runs
+    it from an srcdoc iframe, where relative paths do not resolve, so each one is inlined."""
+    def rep(m):
+        path = repo / m.group(1)
+        js = path.read_text(encoding="utf-8")
+        if "</script" in js.lower():
+            sys.exit(f"{m.group(1)} contains </script and cannot be inlined.")
+        return f'<script data-src="{m.group(1)}">\n{js}\n</script>'
+    out, n = re.subn(r'<script src="(shared/[\w.\-]+\.js)"></script>', rep, html)
+    if re.search(r'<script src="(?!https?:)', out):
+        sys.exit("The designer still has a relative <script src>: " + re.search(r'<script src="(?!https?:)[^"]*"', out).group(0))
+    print(f"Inlined {n} shared script(s) into the designer")
+    return out
+
+
+DXF_START, DXF_END = "<!--SHARED-DXF-START-->", "<!--SHARED-DXF-END-->"
+
+
+def embed_shared_dxf(repo, index):
+    """Copy All-Structural's shared/dxf.js (window.SharedDxf: SVG sheet preview, pan/zoom viewer,
+    sheet printing) into index.html between the SHARED-DXF markers, for the Drawings tab."""
+    src = (repo / "shared" / "dxf.js").read_text(encoding="utf-8")
+    if "window.SharedDxf" not in src or "</script" in src.lower():
+        sys.exit("shared/dxf.js is missing window.SharedDxf or contains </script — check it before embedding.")
+    try:
+        commit = subprocess.check_output(["git", "-C", str(repo), "log", "-1", "--format=%h", "--", "shared/dxf.js"], text=True).strip()
+    except Exception:
+        commit = "unknown"
+    block = f'{DXF_START}\n<script id="sharedDxf" data-src="All-Structural shared/dxf.js" data-commit="{commit}">\n{src}\n</script>\n{DXF_END}'
+    if DXF_START in index:
+        index = re.sub(re.escape(DXF_START) + r".*?" + re.escape(DXF_END), lambda m: block, index, flags=re.S)
+    else:
+        j = index.find("<!--BPAD-EMBED-START-->")
+        index = index[:j] + block + "\n" + index[j:]
+    print(f"Embedded shared/dxf.js @ {commit}: {len(src):,} chars")
+    return index
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@
   css.textContent=
     "#hdrBtns > :not(#btnPrint):not(#btnExportProfis){display:none !important}"+
     "#projMetaBtns,.allToolsLink,#restoreStatus{display:none !important}"+
+    /* the designer's own anchor groups (BC-3): the canopy has its anchorage groups, one designer state each */
+    "#bpGroupBar{display:none !important}"+
     "#bpadEmbedNote{margin:4px 0 2px;padding:5px 8px;border:1px solid #c9b46a;background:#fbf6e3;color:#3d3420;font-size:9pt;border-radius:3px}";
   document.head.appendChild(css);
 
