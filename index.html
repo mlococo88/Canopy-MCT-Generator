@@ -730,8 +730,8 @@ table.md-sum tr.mdRow:hover td{background:#f4f1ea}
         <div id="mdPick" style="height:460px;border:1px solid #e2ded4;border-radius:4px"></div>
         <div id="mdHead" style="margin:10px 0 6px"></div>
         <div class="toolbar" style="margin:0 0 4px;gap:8px;align-items:center;flex-wrap:wrap"><label style="font-size:12px">Forces under</label><select id="mdRun" class="inp" style="max-width:300px"></select><label style="font-size:12px">Deflection under</label><select id="mdDset" class="inp" style="max-width:240px"></select></div>
-        <div id="mdDiag" style="height:640px"></div>
-        <div class="hint">Moment, shear, axial force and torsion along the member from the second-order analysis of the chosen combination (values at the element ends; M<sub>x</sub> and the V that goes with it are about the strong axis; for a column, bending in the frame plane). Signs as the analysis rows (MIDAS local axes): for a beam, + M<sub>x</sub> = top fibre in tension (hogging). Deflection: unfactored service loads, first-order; beams relative to the line between each span's supports (overhangs: relative to the support), columns relative to the base.</div>
+        <div id="mdDiag" style="height:660px"></div>
+        <div class="hint">Governing (the default): forces as the envelope of every combination, max (solid) and min (dashed), with the worked check at the member's governing point; deflection under the service load with the member's largest deflection ratio. Or choose one combination or load. Moment, shear, axial force and torsion along the member from the second-order analysis (values at the element ends; M<sub>x</sub> and the V that goes with it are about the strong axis; for a column, bending in the frame plane). Signs as the analysis rows (MIDAS local axes): for a beam, + M<sub>x</sub> = top fibre in tension (hogging). Deflection: unfactored service loads, first-order; beams relative to the line between each span's supports (overhangs: relative to the support), columns relative to the base.</div>
       </div>
     </div>
     <div class="panel">
@@ -7982,6 +7982,11 @@ function mdDraw3D(div, R, sel, opt){
 }
 // internal forces along a member for one analysis run (element end values, straight between nodes)
 function mdDiagData(R, g, rn){
+  if(rn.env){ // envelope: the largest and smallest value at each point over every analysis run
+    const L=rn.runs.map(r=>mdDiagData(R,g,r)), x=L[0].x, q={}, qmin={};
+    ['N','Vx','Vy','Mx','My','T'].forEach(k=>{ q[k]=x.map((_,i)=>Math.max(...L.map(d=>d.q[k][i]))); qmin[k]=x.map((_,i)=>Math.min(...L.map(d=>d.q[k][i]))); });
+    return {x, q, qmin, env:true};
+  }
   const x=[], q={N:[],Vx:[],Vy:[],Mx:[],My:[],T:[]};
   g.elems.forEach((e,i)=>{ const fe=rn.ends.get(e.id); if(!fe) return; const xi=g.sx[i], xj=g.sx[i+1];
     [[xi,-1,0],[xj,1,6]].forEach(([xx,sg,o0])=>{ x.push(xx); const v=k=>sg*fe[o0+k];
@@ -8012,9 +8017,11 @@ function mdDrawDiagrams(div, R, g, rn, set, at, opt){
   const D=mdDiagData(R,g,rn), F=mdDeflData(R,g,set), FL=uForceLbl(), ML=uMomLbl(), DL=uDispLbl();
   const ax=(i)=>i?('y'+(i+1)):'y', xa=(i)=>i?('x'+(i+1)):'x';
   const rows=[[['M_x (major)',D.q.Mx,'#1d4e6b'],['M_y (minor)',D.q.My,'#c98a1a']],[['V (H walls, with M_x)',D.q.Vx,'#1d4e6b'],['V (B walls, with M_y)',D.q.Vy,'#c98a1a']],[['N (+ tension)',D.q.N,'#4a6b22'],['T (torsion, '+ML+')',D.q.T,'#9b6a9b']],F.lines.map((l,i)=>[l[0],l[1],i?'#c98a1a':'#b3502d'])];
-  const titles=[`Moment (${ML}), ${rn.name}`,`Shear (${FL})`,`Axial (${FL}) and torsion`,`Deflection (${DL}), ${set.name}, unfactored`];
-  const tr=[]; rows.forEach((r,i)=>r.forEach(([nm,y,c])=>tr.push({type:'scatter', mode:'lines', x:i===3?F.x:D.x, y, name:nm, xaxis:xa(i), yaxis:ax(i), line:{color:c,width:2}, fill:'tozeroy', fillcolor:c+'22', hovertemplate:nm+': %{y:.3f}<br>x = %{x:.2f} ft<extra></extra>', legendgroup:'r'+i})));
-  const H=(opt&&opt.h)||640, gap=0.06, h=(1-3*gap)/4, layout={height:H, margin:{l:62,r:12,t:24,b:36}, paper_bgcolor:'#fff', plot_bgcolor:'#fff', showlegend:true, legend:{orientation:'h', y:-0.07, font:{size:10}}, shapes:[], annotations:[]};
+  const titles=[`Moment (${ML}), ${D.env?`envelope of all ${rn.runs.length} combinations (max and min)`:rn.name}`,`Shear (${FL})`,`Axial (${FL}) and torsion`,`Deflection (${DL}), ${set.name}, unfactored`];
+  if(D.env){ const mins=[[D.qmin.Mx,D.qmin.My],[D.qmin.Vx,D.qmin.Vy],[D.qmin.N,D.qmin.T]];
+    rows.slice(0,3).forEach((r,i)=>{ const add=r.map(([nm,y,c],j)=>[nm+' min',mins[i][j],c,'dash']); r.forEach(t=>t[0]+=' max'); r.push(...add); }); }
+  const tr=[]; rows.forEach((r,i)=>r.forEach(([nm,y,c,dash])=>tr.push({type:'scatter', mode:'lines', x:i===3?F.x:D.x, y, name:nm, xaxis:xa(i), yaxis:ax(i), line:{color:c,width:2,dash:dash||'solid'}, fill:'tozeroy', fillcolor:c+'22', hovertemplate:nm+': %{y:.3f}<br>x = %{x:.2f} ft<extra></extra>', legendgroup:'r'+i})));
+  const H=(opt&&opt.h)||640, gap=0.06, h=(1-3*gap)/4, layout={height:H, margin:{l:62,r:12,t:24,b:36}, paper_bgcolor:'#fff', plot_bgcolor:'#fff', showlegend:true, legend:{orientation:'h', y:-0.1, font:{size:10}}, shapes:[], annotations:[]};
   for(let i=0;i<4;i++){ const top=1-i*(h+gap), bot=top-h;
     layout[(i?'yaxis'+(i+1):'yaxis')]={domain:[bot,top], zeroline:true, zerolinecolor:'#999', gridcolor:'#eee', tickfont:{size:10}};
     layout[(i?'xaxis'+(i+1):'xaxis')]={anchor:ax(i), matches:i?'x':undefined, showticklabels:i===3, gridcolor:'#eee', tickfont:{size:10}, title:i===3?{text:`distance along the member from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (ft)`, font:{size:11}}:undefined};
@@ -8086,21 +8093,29 @@ function mdSelect(R, key, first){
     +`<div class="hint" style="margin:4px 0">${MD_ROLE[g.type]||''}${g.hss?'':' <b>W-shape: not checked for strength here; the diagrams and deflections are shown.</b>'}</div>`
     +(g.worst?`<div style="font-size:12px">Governing: ${mdStatus(g.worst.r.gov)} ${aesc(MD_CHECK[g.worst.r.govKey](g.worst.r))}, ${aesc(g.worst.run)}, ${f(g.worst.at,2)} ft.</div>`:'');
   // combination and deflection-load selectors
-  const runs=R.full.filter(r=>r.ends), sets=mdServiceSets(R);
-  if(!MD.run || !runs.some(r=>r.name===MD.run)) MD.run=g.worst?g.worst.run:(runs[0]&&runs[0].name);
-  if(!MD.dset || !sets.some(x=>x.name===MD.dset)){ const dr=R.drift.find(x=>x.g===g.label); MD.dset=g.type==='col'?((dr&&sets.find(x=>x.name.endsWith('·'+dr.w)))||sets[2]||sets[0]).name:'D + S'; }
+  const runs=R.full.filter(r=>r.ends), sets=mdServiceSets(R), GOV='__gov__';
+  // governing service load of this member: the largest deflection ratio (beams: S or D + S; columns: the drift's wind case)
+  let gset=null, gratio=null;
+  if(g.type==='col'){ const dr=R.drift.find(x=>x.g===g.label); if(dr){ gset=sets.find(x=>x.name.endsWith('·'+dr.w)); gratio=dr.ratio; } }
+  else { const dl=R.defl.filter(x=>x.g===g.label).reduce((m,x)=>!m||x.ratio>m.ratio?x:m,null); if(dl){ gset=sets.find(x=>x.name===(dl.load==='D+S'?'D + S':dl.load)); gratio=dl.ratio; } }
+  gset=gset||sets[0];
+  if(!MD.run || (MD.run!==GOV && !runs.some(r=>r.name===MD.run))) MD.run=GOV;
+  if(!MD.dset || (MD.dset!==GOV && !sets.some(x=>x.name===MD.dset))) MD.dset=GOV;
   const rs=document.getElementById('mdRun'), ds=document.getElementById('mdDset');
-  rs.innerHTML=runs.map(r=>`<option${r.name===MD.run?' selected':''}>${aesc(r.name)}</option>`).join('');
-  ds.innerHTML=sets.map(x=>`<option${x.name===MD.dset?' selected':''}>${aesc(x.name)}</option>`).join('');
+  rs.innerHTML=`<option value="${GOV}"${MD.run===GOV?' selected':''}>Governing: envelope of all combinations${g.worst?` (worst: ${aesc(g.worst.run)})`:''}</option>`
+    +runs.map(r=>`<option value="${aesc(r.name)}"${r.name===MD.run?' selected':''}>${aesc(r.name)}</option>`).join('');
+  ds.innerHTML=`<option value="${GOV}"${MD.dset===GOV?' selected':''}>Governing: ${aesc(gset.name)}${gratio!=null?` (ratio ${f(gratio,2)})`:''}</option>`
+    +sets.map(x=>`<option value="${aesc(x.name)}"${x.name===MD.dset?' selected':''}>${aesc(x.name)}</option>`).join('');
   rs.onchange=()=>{ MD.run=rs.value; mdSelect(R,key); }; ds.onchange=()=>{ MD.dset=ds.value; mdSelect(R,key); };
-  const rn=runs.find(r=>r.name===MD.run), set=sets.find(x=>x.name===MD.dset);
-  const W=g.hss&&rn?R.evalRun(g,rn):null;
+  const gov=MD.run===GOV, rn=gov?{name:'Envelope', env:true, runs}:runs.find(r=>r.name===MD.run);
+  const set=MD.dset===GOV?Object.assign({},gset,{name:'governing '+gset.name}):sets.find(x=>x.name===MD.dset);
+  const W=g.hss?(gov?g.worst:R.evalRun(g,rn)):null;
   mdDrawDiagrams('mdDiag', R, g, rn, set, W?W.at:null);
   // worked check at the governing point of the chosen combination
   const det=document.getElementById('mdDetail');
   document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
   if(!g.hss){ det.innerHTML='<p class="hint">W-shape: not checked for strength on this tab (rectangular HSS only).</p>'; return; }
-  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${rn.name===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(rn.name)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${rn.name===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W));
+  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W));
 }
 
 // ============================================================================
