@@ -4233,8 +4233,8 @@ async function buildReportModel(){
         rpNote(`Governing point: ${g.worst.run}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member. Ratio ${f(g.worst.r.gov,3)} ${g.worst.r.gov<=1?'OK':'NG'}.`),
         figDiag[t]||null,
         {type:'steps', scope:'md-'+t, steps:mdSteps(g)},
-        (()=>{ const S=mdCheckSummary(R,g,g.worst); return {type:'table', caption:`Summary of the check: ${g.label} (${g.secName}), ${g.worst.run}. Member: strength ${f(S.strength,2)}, overall ${f(S.all,2)} ${S.all<=1?'OK':'NG'}.`,
-          head:['Limit state','AISC 360-16','Demand','Capacity','D/C ratio'], rows:S.rows.map(x=>[x.lim+(x.k===S.gov?' (governs strength)':''),x.ref,(x.dem[0]?`$${x.dem[0]}$ = `:'')+x.dem[1],(x.cap[0]?`$${x.cap[0]}$ = `:'')+x.cap[1],rc(x.ratio)])}; })()].filter(Boolean)}); });
+        (()=>{ const S=mdCheckSummary(R,g,g.worst,g.by); return {type:'table', caption:`Summary of the check: ${g.label} (${g.secName}), ${g.worst.run}. Member: strength ${f(S.strength,2)}, overall ${f(S.all,2)} ${S.all<=1?'OK':'NG'}.`,
+          head:['Limit state','AISC 360-16','Where (combination, location)','Demand','Capacity','D/C ratio'], rows:S.rows.map(x=>[x.lim+(x.k===S.gov?' (governs strength)':''),x.ref,x.where||'',(x.dem[0]?`$${x.dem[0]}$ = `:'')+x.dem[1],(x.cap[0]?`$${x.cap[0]}$ = `:'')+x.cap[1],rc(x.ratio)])}; })()].filter(Boolean)}); });
       const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
       subs.push({title:'Deflection and drift', key:'M-defl', items:[
         rpNote(`Unfactored load cases, nominal stiffness, first-order analysis. Spans: the deflection relative to the line between the span's supports, limit L/${o.defl.S} under S and L/${o.defl.DS} under D + S. Overhangs: the tip relative to the support, limit 2L/${o.defl.S} and 2L/${o.defl.DS} (L = overhang). Columns: drift of the top relative to the base under D + ${o.defl.wFac}W (the wind at a 10-year return period, ASCE 7-16 Commentary C.2.2), limit H/${o.defl.drift}.`),
@@ -7854,11 +7854,15 @@ function mdCompute(){
         const d={P:v(0)/1000, Vy:v(1)/1000, Vx:v(2)/1000, T:v(3)*12/1000, Mx:v(4)*12/1000, My:v(5)*12/1000};
         const topComp=MD_TOP_SIGN*v(4)>0;
         const L=mdLengths(g, e.id, o, topComp), cap=capOf(g,L), r=SharedAiscHss.ratios(cap,d);
-        if(!w || r.gov>w.r.gov) w={r, d, cap, L, run:rn.name, elem:e.id, end, at:g.sx[g.chain.indexOf(end==='I'?e.n1:e.n2)]};
+        const pt={r, d, cap, L, run:rn.name, elem:e.id, end, at:g.sx[g.chain.indexOf(end==='I'?e.n1:e.n2)]};
+        if(!w || r.gov>w.r.gov) w=Object.assign(pt,{by:w?w.by:{}});
+        // each limit state's own largest ratio over the member (by[k]), not only the forces at the governing point
+        const by=w.by; ['P','Mx','My','Vx','Vy','T','H1','H3'].forEach(k=>{ const v=r[k], kk=k==='P'?(r.Pkind==='tension'?'Pt':'Pc'):k; if(v!=null && (!by[kk] || v>by[kk].r[k])) by[kk]=pt; });
       }); });
     return w; };
-  groups.forEach(g=>{ g.worst=null; if(!g.hss) return;
-    runs.forEach(rn=>{ const w=evalRun(g,rn); if(w&&(!g.worst||w.r.gov>g.worst.r.gov)) g.worst=w; }); });
+  groups.forEach(g=>{ g.worst=null; g.by={}; if(!g.hss) return;
+    runs.forEach(rn=>{ const w=evalRun(g,rn); if(!w) return; if(!g.worst||w.r.gov>g.worst.r.gov) g.worst=w;
+      ['Pc','Pt','Mx','My','Vx','Vy','T','H1','H3'].forEach(k=>{ const p=w.by[k], rk=k[0]==='P'?'P':k; if(p && (!g.by[k] || p.r[rk]>g.by[k].r[rk])) g.by[k]=p; }); }); });
   // serviceability (first-order, unfactored cases, nominal stiffness)
   const u=lc=>R.cases[lc]&&R.cases[lc].u, ix=R.nodeIdx, uD=u('DL'), uS=u('Snow');
   const dz=(U,n)=>U?U[6*ix.get(n)+2]:0;
@@ -7908,7 +7912,7 @@ function mdSteps(g, Wp){
   S.push(st('Lcx','Effective length, x','L_{cx}','K_{x}L_{x}',`${f(L.Kx,2)}(${f(L.Lx,2)})`,L.Lcx/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3',meth));
   S.push(st('Lcy','Effective length, y','L_{cy}','K_{y}L_{y}',`${f(L.Ky,2)}(${f(L.Ly,2)})`,L.Lcy/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3'));
   S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' Cantilever: C_b = 1.0 over the overhang length.':'') || null));
-  S.push(st('Pu','Required axial strength ('+(d.P>=0?'tension':'compression')+')','P_{u}','','',Math.abs(d.P),'kip',2,'',`Second-order analysis, ${W.run}, element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from the start of the member.`));
+  S.push(st('Pu','Required axial strength ('+(d.P>=0?'tension':'compression')+')','P_{u}','','',Math.abs(d.P),'kip',2,'',`Second-order analysis, ${W.run}, element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from the start of the member: the point that governs the combined check, with the forces acting there together (each limit state's own maximum is in the summary table).`));
   S.push(st('Mux','Required flexural strength, about x','M_{ux}','','',Math.abs(d.Mx)/12,'kip-ft',2,''));
   S.push(st('Muy','Required flexural strength, about y','M_{uy}','','',Math.abs(d.My)/12,'kip-ft',2,''));
   S.push(st('Vux','Required shear, H walls','V_{ux}','','',Math.abs(d.Vx),'kip',2,''));
@@ -7917,29 +7921,39 @@ function mdSteps(g, Wp){
   return S.concat(SharedAiscHss.capSteps(W.cap,P), SharedAiscHss.demandSteps(W.cap,d,W.r,P));
 }
 // summary of a worked check: each limit state's demand, design strength and D/C ratio, then the serviceability check
-function mdCheckSummary(R, g, W){
-  const c=W.cap, r=W.r, d=W.d, k=(v,n)=>f(v,n==null?2:n), rows=[];
-  const comp=r.Pkind==='compression';
-  rows.push({k:'P', lim:`Axial ${r.Pkind}`, ref:comp?(c.comp.eff.length?'E7':'E3'):'D2', dem:['P_{u}',`${k(Math.abs(d.P))} kip`], cap:[comp?'\\phi_cP_n':'\\phi_tP_n',`${k(r.Pc,1)} kip`], ratio:r.P});
+function mdCheckSummary(R, g, W, by){
+  by=by||W.by||{}; const k=(v,n)=>f(v,n==null?2:n), rows=[], at=q=>`${q.run}, ${f(q.at,2)} ft`;
+  let Q, c, r, d;
+  [['Pc','compression'],['Pt','tension']].forEach(([kk,kind])=>{ const q=by[kk]; if(!q) return; const cc=q.cap, rr=q.r, dd=q.d, comp=kind==='compression';
+    rows.push({k:kk, lim:`Axial ${kind}`, ref:comp?(cc.comp.eff.length?'E7':'E3'):'D2', dem:['P_{u}',`${k(Math.abs(dd.P))} kip`], cap:[comp?'\\phi_cP_n':'\\phi_tP_n',`${k(rr.Pc,1)} kip`], ratio:rr.P}); });
+  Q=by.Mx||W; c=Q.cap; r=Q.r; d=Q.d;
   rows.push({k:'Mx', lim:`Flexure, major axis (${c.fx.gov.name.toLowerCase()})`, ref:'F7', dem:['M_{ux}',`${k(Math.abs(d.Mx)/12)} kip-ft`], cap:['\\phi_bM_{nx}',`${k(c.fx.phiMn/12)} kip-ft`], ratio:r.Mx});
+  Q=by.My||W; c=Q.cap; r=Q.r; d=Q.d;
   rows.push({k:'My', lim:`Flexure, minor axis (${c.fy.gov.name.toLowerCase()})`, ref:'F7', dem:['M_{uy}',`${k(Math.abs(d.My)/12)} kip-ft`], cap:['\\phi_bM_{ny}',`${k(c.fy.phiMn/12)} kip-ft`], ratio:r.My});
+  Q=by.Vx||W; c=Q.cap; r=Q.r; d=Q.d;
   rows.push({k:'Vx', lim:'Shear, H walls (with $M_x$)', ref:'G4', dem:['V_{ux}',`${k(Math.abs(d.Vx))} kip`], cap:['\\phi_vV_{nx}',`${k(c.vx.phiVn,1)} kip`], ratio:r.Vx});
+  Q=by.Vy||W; c=Q.cap; r=Q.r; d=Q.d;
   rows.push({k:'Vy', lim:'Shear, B walls (with $M_y$)', ref:'G4', dem:['V_{uy}',`${k(Math.abs(d.Vy))} kip`], cap:['\\phi_vV_{ny}',`${k(c.vy.phiVn,1)} kip`], ratio:r.Vy});
+  Q=by.T||W; c=Q.cap; r=Q.r; d=Q.d;
   rows.push({k:'T', lim:'Torsion', ref:'H3.1', dem:['T_{u}',`${k(Math.abs(d.T)/12,3)} kip-ft`], cap:['\\phi_TT_n',`${k(c.tor.phiTn/12)} kip-ft`], ratio:r.T});
+  Q=by.H1||W; c=Q.cap; r=Q.r; d=Q.d;
   rows.push({k:'H1', lim:`Combined axial and flexure (${r.H1ref})`, ref:'H1.1', dem:['','interaction'], cap:['','≤ 1.0'], ratio:r.H1});
-  if(r.H3!=null) rows.push({k:'H3', lim:'Combined force with torsion (H3-6)', ref:'H3.2', dem:['','interaction'], cap:['','≤ 1.0'], ratio:r.H3});
+  Q=by.H3||null; if(Q){ c=Q.cap; r=Q.r; d=Q.d; }
+  if(Q&&r.H3!=null) rows.push({k:'H3', lim:'Combined force with torsion (H3-6)', ref:'H3.2', dem:['','interaction'], cap:['','≤ 1.0'], ratio:r.H3});
+  // where each strength row's maximum occurs
+  rows.forEach(x=>{ x.where=at(by[x.k]||W); });
   // serviceability: the member's governing deflection (beams) or drift (columns)
-  if(g.type==='col'){ const x=R.drift.find(z=>z.g===g.label); if(x) rows.push({k:'D', lim:`Drift, D + ${R.o.defl.wFac}·${x.w}`, ref:'serviceability', dem:['\\Delta',`${uDisp(x.d)} ${uDispLbl()}`], cap:[`H/${R.o.defl.drift}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true}); }
+  if(g.type==='col'){ const x=R.drift.find(z=>z.g===g.label); if(x) rows.push({k:'D', lim:`Drift, D + ${R.o.defl.wFac}·${x.w}`, ref:'serviceability', dem:['\\Delta',`${uDisp(x.d)} ${uDispLbl()}`], cap:[`H/${R.o.defl.drift}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true, where:'unfactored'}); }
   else { const x=R.defl.filter(z=>z.g===g.label).reduce((m,z)=>!m||z.ratio>m.ratio?z:m,null);
-    if(x) rows.push({k:'D', lim:`Deflection, ${x.load}, ${x.span}`, ref:'serviceability', dem:['\\delta',`${uDisp(Math.abs(x.d))} ${uDispLbl()}`], cap:[`${x.cant?'2L':'L'}/${x.den}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true}); }
+    if(x) rows.push({k:'D', lim:`Deflection, ${x.load}, ${x.span}`, ref:'serviceability', dem:['\\delta',`${uDisp(Math.abs(x.d))} ${uDispLbl()}`], cap:[`${x.cant?'2L':'L'}/${x.den}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true, where:'unfactored'}); }
   const str=rows.filter(x=>!x.serv), gs=str.reduce((m,x)=>x.ratio>m.ratio?x:m,str[0]);
   return {rows, gov:gs.k, strength:gs.ratio, all:Math.max(...rows.map(x=>x.ratio))};
 }
-function mdCheckSummaryHTML(R,g,W){
-  const S=mdCheckSummary(R,g,W), T=window.SharedSteps, tx=t=>aesc(t).replace(/\$([^$]+)\$/g,(m,q)=>T.toHTML(q)), sub=v=>(v[0]?T.toHTML(v[0])+' = ':'')+aesc(v[1]);
-  return `<h3 style="margin:14px 0 4px;font-size:13px">Summary of the check</h3><table class="rpt md-cs" style="max-width:900px"><thead><tr><th>Limit state</th><th>AISC 360-16</th><th>Demand</th><th>Capacity</th><th>D/C ratio</th></tr></thead><tbody>`
-    +S.rows.map(x=>`<tr${x.k===S.gov?' style="background:#fdf3dd"':''}><td>${tx(x.lim)}${x.k===S.gov?' <b>(governs strength)</b>':''}</td><td>${aesc(x.ref)}</td><td>${sub(x.dem)}</td><td>${sub(x.cap)}</td><td>${mdStatus(x.ratio)}</td></tr>`).join('')
-    +`</tbody></table><div class="hint">Strength rows at the governing point of ${aesc(W.run)} (element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft); the deflection row is the member's governing service load (unfactored, first-order). Member: strength ${mdStatus(S.strength)}, overall ${mdStatus(S.all)}.</div>`;
+function mdCheckSummaryHTML(R,g,W,by){
+  const S=mdCheckSummary(R,g,W,by), T=window.SharedSteps, tx=t=>aesc(t).replace(/\$([^$]+)\$/g,(m,q)=>T.toHTML(q)), sub=v=>(v[0]?T.toHTML(v[0])+' = ':'')+aesc(v[1]);
+  return `<h3 style="margin:14px 0 4px;font-size:13px">Summary of the check</h3><table class="rpt md-cs" style="max-width:900px"><thead><tr><th>Limit state</th><th>AISC 360-16</th><th>Where (combination, location)</th><th>Demand</th><th>Capacity</th><th>D/C ratio</th></tr></thead><tbody>`
+    +S.rows.map(x=>`<tr${x.k===S.gov?' style="background:#fdf3dd"':''}><td>${tx(x.lim)}${x.k===S.gov?' <b>(governs strength)</b>':''}</td><td>${aesc(x.ref)}</td><td>${aesc(x.where||'')}</td><td>${sub(x.dem)}</td><td>${sub(x.cap)}</td><td>${mdStatus(x.ratio)}</td></tr>`).join('')
+    +`</tbody></table><div class="hint">Each strength row is that limit state\u2019s own largest ratio over the whole member (every element end) and ${by===g.by?"every combination":"the chosen combination"}, with the forces at that point, so the shear rows show the largest shear (usually at a support), not the shear at the point of largest moment. The worked steps above are at the point that governs the combined check (H1), with the forces acting there together. The deflection row is the member\u2019s governing service load (unfactored, first-order). Member: strength ${mdStatus(S.strength)}, overall ${mdStatus(S.all)}.</div>`;
 }
 function mdStepsHTML(steps){
   const T=window.SharedSteps; if(!T) return '';
@@ -8142,7 +8156,7 @@ function mdSelect(R, key, first){
   const det=document.getElementById('mdDetail');
   document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
   if(!g.hss){ det.innerHTML='<p class="hint">W-shape: not checked for strength on this tab (rectangular HSS only).</p>'; return; }
-  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W))+mdCheckSummaryHTML(R,g,W);
+  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W))+mdCheckSummaryHTML(R,g,W,gov?g.by:W.by);
 }
 
 // ============================================================================
