@@ -7903,7 +7903,10 @@ const mdStatus=v=>v==null?'—':`<b style="color:${v<=1.0?'var(--moss)':'var(--r
 // worked steps of a member's governing point (shared/steps.js format)
 function mdSteps(g, Wp, by){
   const W=Wp||g.worst; if(!W) return [];
-  const o=MD.res.o, L=W.L, d=W.d, P='md';
+  const o=MD.res.o, P='md';
+  by=by||(Wp?W.by:g.by)||{};
+  // the unbraced lengths shown are those of the point with the largest compression ratio (they set phi_c P_n)
+  const LQ=by.Pc||W, L=LQ.L, d=W.d;
   const st=(id,label,sym,eq,sub,value,unit,dd,ref,note)=>{ const x={id:P+'.'+id,label,sym,eq:eq||'',sub:sub||'',value,unit:unit||'',d:dd==null?2:dd,ref:ref||''}; if(note) x.note=note; return x; };
   const S=[];
   const meth=o.method==='dam'?'Direct Analysis Method: K = 1 (AISC 360-16 C3).':'Effective Length Method: K from the inputs (AISC 360-16 Appendix 7.2.3).';
@@ -7912,7 +7915,6 @@ function mdSteps(g, Wp, by){
   S.push(st('Lcx','Effective length, x','L_{cx}','K_{x}L_{x}',`${f(L.Kx,2)}(${f(L.Lx,2)})`,L.Lcx/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3',meth));
   S.push(st('Lcy','Effective length, y','L_{cy}','K_{y}L_{y}',`${f(L.Ky,2)}(${f(L.Ly,2)})`,L.Lcy/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3'));
   S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' Cantilever: C_b = 1.0 over the overhang length.':'') || null));
-  by=by||(Wp?W.by:g.by)||{};
   const where=q=>`${q.run}, element ${q.elem} ${q.end}-end, ${f(q.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}`;
   const scope=by===g.by?'every combination':'the chosen combination';
   // 1. required strengths: each one's largest value over the member (every element end) and the combinations
@@ -7922,8 +7924,14 @@ function mdSteps(g, Wp, by){
     ['T','Required torsional strength','T_{u}',q=>Math.abs(q.d.T)/12,'kip-ft',3]];
   D.forEach(([k,label,sym,val,unit,dd],i)=>{ const q=by[k]; if(!q) return;
     S.push(st('req.'+k,label,sym,'','',val(q),unit,dd,'',(i===0?`Second-order analysis. Each required strength here is the one giving the largest ratio for its own limit state over the member and ${scope}: `:'')+where(q)+'.')); });
-  // 2. design strengths (at the governing point's unbraced lengths)
-  S.push(...SharedAiscHss.capSteps(W.cap,P));
+  // 2. design strengths: each one at the point of its own check (compression: its unbraced lengths above;
+  //    flexure about x: that point's L_b), so they are the capacities the ratios and the summary table use
+  const capAt=(q,re)=>SharedAiscHss.capSteps(q.cap,P).filter(x=>re.test(x.id.slice(P.length+1)));
+  S.push(...capAt(LQ,/^(b|h|cls\..*|ten|kl|fe|fcr|ae|pn)$/));
+  S.push(...capAt(by.Mx||W,/^fx\..*$/));
+  S.push(...capAt(by.My||W,/^fy\..*$/));
+  S.push(...capAt(W,/^(vx|vy|tor)$/));
+  const Lmx=(by.Mx||W).L; if(Math.abs(Lmx.Lb-L.Lb)>1e-6) S.push(st('Lbx','Unbraced length of the compression flange at the point of largest major-axis flexure ratio','L_{b}','','',Lmx.Lb,'ft',2,'AISC 360-16 F7.4','Used for the flexural strength about x above.'));
   // 3. each limit state at its own maximum
   const R_=(k,label,sym,num,den,dnum,dden,ratio,ref)=>S.push(Object.assign(st('dc.'+k,label,sym,`\\frac{${num}}{${den}}`,`\\frac{${dnum}}{${dden}}`,ratio,'',3,ref),{ok:ratio<=1}));
   const fx=(v,n)=>f(v,n==null?2:n);
@@ -7939,6 +7947,8 @@ function mdSteps(g, Wp, by){
   S.push(st('cc.P','Concurrent axial force at the combined-check point ('+(cd.P>=0?'tension':'compression')+')','P_{r}','','',Math.abs(cd.P),'kip',2,'',`The combined checks use the forces acting together at one point: ${where(G)}.`));
   S.push(st('cc.Mx','Concurrent moment about x','M_{rx}','','',Math.abs(cd.Mx)/12,'kip-ft',2,''));
   S.push(st('cc.My','Concurrent moment about y','M_{ry}','','',Math.abs(cd.My)/12,'kip-ft',2,''));
+  if(Math.abs(G.cap.comp.phiPn-LQ.cap.comp.phiPn)>1e-6 && cd.P<0) S.push(st('cc.pn','Compressive strength at the combined-check point','\\phi_c P_n','0.90F_{cr}A_e',`L_{cx} = ${f(G.L.Lcx/12,2)}\\text{ ft},\\ L_{cy} = ${f(G.L.Lcy/12,2)}\\text{ ft}`,G.cap.comp.phiPn,'kip',1,'AISC 360-16 E3','That point lies in a segment with other unbraced lengths than the one worked above.'));
+  if(Math.abs(G.cap.fx.phiMn-(by.Mx||W).cap.fx.phiMn)>1e-6) S.push(st('cc.mnx','Flexural strength about x at the combined-check point','\\phi_b M_{nx}','0.90M_{nx}',`L_{b} = ${f(G.L.Lb,2)}\\text{ ft}`,G.cap.fx.phiMn/12,'kip-ft',2,'AISC 360-16 F7','That point has another L_b than the one worked above.'));
   const cs=SharedAiscHss.demandSteps(G.cap,cd,G.r,P+'.cc').filter(x=>/\.(rp|h1)$/.test(x.id));
   S.push(...cs);
   const H=by.H3;
