@@ -4219,29 +4219,31 @@ async function buildReportModel(){
           figDiag[t]=rpFig(await rpSnap('plotScratch',760,620),`${g.label} (${g.secName}): moment, shear, axial force and torsion under ${rn.name} (second-order analysis; dotted line: the governing point), and the deflection under ${set.name} (unfactored). For a beam, + M_x = top fibre in tension.`); }
         Plotly.purge(sc); }catch(e){ console.warn('member figures',e); }
       const subs=[{title:'Basis', key:'M-sum', items:F([
-        rpNote(`Rectangular HSS members, AISC 360-16 LRFD, ${R.grade.name} (F_y = ${R.grade.Fy} ksi, F_u = ${R.grade.Fu} ksi${o.grade==='A1085'?', nominal wall thickness':', design wall thickness t_des = 0.93 t_nom'}). Every HSS member is checked at both ends of every analysis element for every LRFD combination: tension (D2), compression (E3, E7), flexure about both axes (F7), shear (G4, k_v = 5), torsion (H3.1) and combined forces (H1.1; H3.2 when T_r > 0.2T_c). Worked on the [[tab:members|Members tab]].`),
-        rpNote(dam?`Direct Analysis Method (AISC 360-16 Ch. C): a second-order elastic (P-Δ) analysis of the in-app model with 0.8τ_b EI and 0.8EA (C2.3, τ_b from each element's axial force), notional loads N_i = 0.002Y_i at every node (C2.2b) in every combination: in each of ±X${is3d?' and ±Y':''} for the gravity-only combinations and in the direction of the net lateral load for the others; K = 1 for every member (C3).`
+        rpNote(`Rectangular HSS members, AISC 360-16 LRFD, ${R.grade.name} (F_y = ${R.grade.Fy} ksi, F_u = ${R.grade.Fu} ksi${o.grade==='A1085'?', nominal wall thickness for the slenderness ratios; the area and section moduli are the AISC table values at t_des = 0.93 t_nom (conservative)':', design wall thickness t_des = 0.93 t_nom'}). Every HSS member is checked at both ends of every analysis element for every LRFD combination: tension (D2), compression (E3, E7), flexure about both axes (F7), shear (G4, k_v = 5), torsion (H3.1) and combined forces (H1.1; H3.2 when T_r > 0.2T_c). Worked on the [[tab:members|Members tab]].`),
+        rpNote(dam?`Direct Analysis Method (AISC 360-16 Ch. C): a second-order elastic (P-Δ) analysis of the in-app model with 0.8τ_b EI and 0.8EA (C2.3, τ_b from each element's axial force), notional loads N_i = 0.002Y_i at every node (C2.2b) in every combination: in each of ±X${is3d?' and ±Y':''} for the gravity-only combinations and in the direction of the net lateral load for the others; K = 1 (C3)${is3d?'':'; this is a plane (2D) model, whose out-of-plane sway is not analysed, so buckling about the weak axis uses K_y from the inputs (columns '+o.K.col[1]+')'}.`
           :`Effective Length Method (AISC 360-16 Appendix 7): a second-order elastic (P-Δ) analysis of the in-app model with nominal stiffness; notional loads N_i = 0.002Y_i as minimum lateral loads in the gravity-only combinations, in each of ±X${is3d?' and ±Y':''} (App. 7.2.2); effective length factors K: ${MD_TYPES.map(([k,nm])=>`${nm.toLowerCase()} K_x = ${o.K[k][0]}, K_y = ${o.K[k][1]}`).join('; ')} (App. 7.2.3). The method is permitted while Δ_2nd/Δ_1st ≤ 1.5 (App. 7.2.1).`),
         rpNote(`${R.nRuns} second-order analyses; the largest ratio of second-order to first-order sway displacement Δ_2nd/Δ_1st = ${f(R.worstRatio,3)} (${R.worstRun||'—'}).`+(!dam&&R.worstRatio>1.5?' This exceeds 1.5: the Effective Length Method is not permitted; use the Direct Analysis Method.':''), !dam&&R.worstRatio>1.5),
-        rpNote('P-δ inside the members: each member is modelled with 3 or more elements, each with its geometric stiffness, so the second-order analysis includes it (no separate B_1 amplification).'),
-        rpNote(`Unbraced lengths: columns from the base to the roof beam; rafters between the columns in the frame plane and between the eave beams and purlins out of it; eave beams and purlins between the frames. L_b of a rafter: ${o.rafterLb==='sign'?'by the flange in compression (top flange braced by the purlins and eaves; bottom flange, under uplift, braced at the columns only)':o.rafterLb==='columns'?'between the columns':'between the purlins and eaves'}; C_b = ${o.Cb}. Square HSS: no lateral-torsional buckling (F7.4 User Note).`),
+        R.errs.length?rpNote(`NOT CHECKED: the second-order analysis failed for ${R.errs.length} run${R.errs.length>1?'s':''} (${R.errs.slice(0,3).join('; ')}${R.errs.length>3?' …':''}). The axial loads reach a buckling load of the structure; the members are not adequate for those combinations.`,true):null,
+        R.notConv.length?rpNote(`The second-order iteration did not converge for ${R.notConv.join(', ')}; their results are approximate.`,true):null,
+        rpNote('P-δ inside the members: every element has its geometric stiffness (consistent with a cubic deflected shape), so the second-order analysis includes the member curvature; the results changed by less than 0.1 % between 2 and 18 elements per column in a check. The forces are checked at both ends of every element, at its quarter points, and at any peak of the moment between its nodes (the element\'s uniform-load solution); no separate B_1 amplification.'),
+        rpNote(`Unbraced lengths: columns from the base to the roof beam; rafters between the columns in the frame plane and between the eave beams and purlins out of it; eave beams and purlins between the frames. L_b of a rafter: ${o.rafterLb==='sign'?'by the flange in compression (top flange braced by the purlins and eaves; bottom flange (hogging: over the columns, along the overhangs, under uplift) braced at the columns only)':o.rafterLb==='columns'?'between the columns':'between the purlins and eaves'}${o.roofBraced===false?'; no roof bracing: rafters braced at the columns only':'; the purlins and eave beams are taken as braces of the rafters (a roof diaphragm or bracing must anchor them, AISC 360-16 Appendix 6)'}. Each member is checked at every point with its governing unbraced length (its longest segment; an overhang counts as ${dam?'its length (K = 1)':'2.1 × its length'}). C_b = ${o.Cb} for beams, 1.0 for columns and where an overhang sets L_b. Square HSS: no lateral-torsional buckling (F7.4 User Note).`),
         rpNote('Tension: A_e = A_g (welded end connections, no holes, U = 1.0). Flat widths b = B − 3t, h = H − 3t (B4.1b(d)). Torsion with biaxial bending (H3-6): both flexure ratios and the larger shear ratio. Connections are not checked.'),
         other.length?rpNote(`Not checked for strength (W-shapes): ${[...new Set(other.map(g=>g.secName))].join(', ')}, ${other.length} member${other.length>1?'s':''}. Their deflections are checked in [[M-defl]].`,true):null,
         {type:'table', caption:'Governing ratio of every HSS member.', head:['Member','Section','Ratio','Governing check','Combination','Location','P / M_x / M_y / V / T'],
           rows:hss.map(g=>{ const W=g.worst; return [g.label,g.secName,rc(W.r.gov),MD_CHECK[W.r.govKey](W.r),W.run,f(W.at,2)+' ft',`${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}`]; }), wide:true}, fig3d])}];
       types.forEach(t=>{ const g=govOf(t); subs.push({title:`${dW[t]||t}: governing member ${g.label} (${g.secName})`, items:[
-        rpNote(`Governing point: ${g.worst.run}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member. Ratio ${f(g.worst.r.gov,3)} ${g.worst.r.gov<=1?'OK':'NG'}.`),
+        rpNote(`Governing point: ${g.worst.run}, element ${g.worst.elem} ${g.worst.pos}, ${f(g.worst.at,2)} ft from the start of the member. Ratio ${f(g.worst.r.gov,3)} ${g.worst.r.gov<=1?'OK':'NG'}.`),
         figDiag[t]||null,
         {type:'steps', scope:'md-'+t, steps:mdSteps(g)},
         (()=>{ const S=mdCheckSummary(R,g,g.worst,g.by); return {type:'table', caption:`Summary of the check: ${g.label} (${g.secName}), ${g.worst.run}. Member: strength ${f(S.strength,2)}, overall ${f(S.all,2)} ${S.all<=1?'OK':'NG'}.`,
           head:['Limit state','AISC 360-16','Where (combination, location)','Demand','Capacity','D/C ratio'], rows:S.rows.map(x=>[x.lim+(x.k===S.gov?' (governs strength)':''),x.ref,x.where||'',(x.dem[0]?`$${x.dem[0]}$ = `:'')+x.dem[1],(x.cap[0]?`$${x.cap[0]}$ = `:'')+x.cap[1],rc(x.ratio)])}; })()].filter(Boolean)}); });
       const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
       subs.push({title:'Deflection and drift', key:'M-defl', items:[
-        rpNote(`Unfactored load cases, nominal stiffness, first-order analysis. Spans: the deflection relative to the line between the span's supports, limit L/${o.defl.S} under S and L/${o.defl.DS} under D + S. Overhangs: the tip relative to the support, limit 2L/${o.defl.S} and 2L/${o.defl.DS} (L = overhang). Columns: drift of the top relative to the base under D + ${o.defl.wFac}W (the wind at a 10-year return period, ASCE 7-16 Commentary C.2.2), limit H/${o.defl.drift}.`),
+        rpNote(`Unfactored load cases, nominal stiffness, first-order analysis. Spans: the deflection relative to the line between the span's supports, limit L/${o.defl.S} under S and L/${o.defl.DS} under D + S. Overhangs: the tip relative to the support, limit 2L/${o.defl.S} and 2L/${o.defl.DS} (L = overhang). Checked at the nodes and along each element (its bending between the nodes). Columns: drift of the top relative to the base under ${o.defl.wFac}W (the wind at a 10-year return period, ASCE 7-16 Commentary C.2.2), limit H/${o.defl.drift}.`),
         {type:'table', caption:'Largest deflection ratio of each member and load.', head:['Member','Section','Span','Load',`Deflection (${uDispLbl()})`,`Limit (${uDispLbl()})`,'Ratio'],
           rows:dmax.map(x=>[x.g,x.sec,x.span,x.load,{t:uDisp(Math.abs(x.d)),n:true},{t:uDisp(x.lim)+` (${x.cant?'2L':'L'}/${x.den})`,n:true},rc(x.ratio)]), wide:true},
         {type:'table', caption:'Column drift.', head:['Column','Section','Height','Load',`Drift (${uDispLbl()})`,`Limit (${uDispLbl()})`,'Ratio'],
-          rows:R.drift.map(x=>[x.g,x.sec,f(x.H,2)+' ft',`D + ${o.defl.wFac}·${x.w}`,{t:uDisp(x.d),n:true},{t:uDisp(x.lim)+` (H/${o.defl.drift})`,n:true},rc(x.ratio)])}]});
+          rows:R.drift.map(x=>[x.g,x.sec,f(x.H,2)+' ft',`${o.defl.wFac}·${x.w}`,{t:uDisp(x.d),n:true},{t:uDisp(x.lim)+` (H/${o.defl.drift})`,n:true},rc(x.ratio)])}]});
       sections.push({title:'Member design', subs});
     }
   }
@@ -7714,7 +7716,7 @@ function anaSecond(R, combo, opt){
     if((opt.gravity||[]).includes(lc)) for(let d=0;d<6*NN;d++) Fg[d]+=fac*c.F[d];
     c.fef.forEach((v,id)=>{ const p=fef.get(id)||new Float64Array(12); for(let r=0;r<12;r++) p[r]+=fac*v[r]; fef.set(id,p); }); });
   let Ysum=0;
-  if(opt.dir){ for(let i=0;i<NN;i++){ const Y=-Fg[6*i+2]; if(Y>0){ F[6*i]+=0.002*Y*opt.dir[0]; F[6*i+1]+=0.002*Y*opt.dir[1]; Ysum+=Y; } } }
+  if(opt.dir){ for(let i=0;i<NN;i++){ const Y=-Fg[6*i+2]; if(Y>0){ F[6*i]+=0.002*Y*opt.dir[0]; F[6*i+1]+=0.002*Y*opt.dir[1]; if((opt.dir[0]&&eq[6*i]>=0)||(opt.dir[1]&&eq[6*i+1]>=0)) Ysum+=Y; } } }   // the total reported: nodes free to sway only
   const Ff=new Float64Array(n); for(let d=0;d<6*NN;d++) if(eq[d]>=0) Ff[eq[d]]=F[d];
   const Nax=new Map(); EL.forEach((D,id)=>Nax.set(id,0));
   const tau=new Map();
@@ -7749,7 +7751,8 @@ function anaSecond(R, combo, opt){
     if(it>0 && dN<=tol*mN+1e-6){ conv=true; break; }
   }
   // sway amplification Delta2/Delta1: the largest horizontal node displacement, second-order over first-order
-  let d1=0, d2=0; for(let i=0;i<NN;i++){ d1=Math.max(d1,Math.hypot(u1[6*i],u1[6*i+1])); d2=Math.max(d2,Math.hypot(u[6*i],u[6*i+1])); }
+  // at the node of largest second-order sway, its first-order sway (the same node)
+  let d1=0, d2=0; for(let i=0;i<NN;i++){ const h2=Math.hypot(u[6*i],u[6*i+1]); if(h2>d2){ d2=h2; d1=Math.hypot(u1[6*i],u1[6*i+1]); } }
   return {u, u1, ends, it:it+1, conv, d1, d2, ratio:d1>1e-12?d2/d1:1, tau, Ysum, notional:opt.dir?0.002*Ysum:0};
 }
 
@@ -7759,7 +7762,7 @@ function anaSecond(R, combo, opt){
 //   (anaSecond): Effective Length Method (Appendix 7, default) or Direct Analysis Method (Ch. C)
 //   serviceability: roof member spans and overhangs (S, D+S), column drift (D + a W)
 // ============================================================================
-const MD_DEF={method:'elm', grade:'A500C', K:{col:[2.1,2.1], rafter:[1,1], eave:[1,1], purlin:[1,1]}, rafterLb:'sign', Cb:1,
+const MD_DEF={method:'elm', grade:'A500C', K:{col:[2.1,2.1], rafter:[1,1], eave:[1,1], purlin:[1,1]}, rafterLb:'sign', roofBraced:true, Cb:1,
   defl:{S:240, DS:180, drift:100, wFac:0.42}};
 const MD_TYPES=[['col','Columns'],['rafter','Rafters (roof beams)'],['eave','Eave beams'],['purlin','Purlins']];
 function mdOpts(){
@@ -7808,6 +7811,26 @@ function mdGroups(s, mesh, M){
 // segment of an element in a segment list
 const mdSegOf=(segs,eid)=>segs.find(sg=>sg.elems.some(e=>e.id===eid));
 // the analyses: each LRFD combination once, gravity-only combinations once per notional-load direction
+// internal forces at points along an element from its end forces f (local, MIDAS layout; uniform load between the
+// nodes): N, V, T linear; M parabolic, exact at both ends, with the curvature of the load: dM_y/dx = V_z, dM_z/dx = -V_y
+// (the analysis' sign convention, checked on every element of the model: 2(M_J - M_I)/(L(V_I + V_J)) = +1 and -1)
+function mdAlong(f, L, xsIn){
+  const I=k=>-f[k], J=k=>f[6+k];
+  const lin=(k,x)=>I(k)+(J(k)-I(k))*x/L;
+  const qy=(J(2)-I(2))/L, qz=-(J(1)-I(1))/L;   // curvature terms of M_y and M_z
+  const par=(mk,q,x)=>I(mk)+(J(mk)-I(mk))*x/L+q*x*(x-L)/2;
+  const at=x=>({P:lin(0,x), Vy:lin(1,x), Vx:lin(2,x), T:lin(3,x), Mx:par(4,qy,x), My:par(5,qz,x)});
+  const xs=(xsIn||[0,0.25,0.5,0.75,1]).map(t=>t*L);
+  [[4,qy],[5,qz]].forEach(([mk,q])=>{ if(Math.abs(q)>1e-12){ const xv=L/2-(J(mk)-I(mk))/(q*L); if(xv>1e-9*L && xv<L*(1-1e-9)) xs.push(xv); } });
+  return [...new Set(xs.map(x=>+x.toFixed(9)))].sort((a,b)=>a-b).map(x=>({x, d:at(x)}));
+}
+// deflection of an element relative to its chord, in the local z direction (strong-axis bending), from the parabolic
+// moment: w'' = -M_y/EI (+M_y hogging), w(0) = w(L) = 0. EI in lbf-ft^2, M in lbf-ft, result ft
+function mdBulge(f, L, EI, x){
+  const I=k=>-f[k], J=k=>f[6+k], q=(J(2)-I(2))/L;
+  const a=I(4), b=(J(4)-I(4))/L-q*L/2, c=q/2;
+  return -(a*(x*x-L*x)/2 + b*(x*x*x-L*L*x)/6 + c*(x*x*x*x-L*L*L*x)/12)/EI;
+}
 function mdRuns(R, s, o){
   const grav=['DL','Snow'], is3=is3D(s), dirs=is3?[[1,0,'+X'],[-1,0,'−X'],[0,1,'+Y'],[0,-1,'−Y']]:[[1,0,'+X'],[-1,0,'−X']];
   const runs=[];
@@ -7817,27 +7840,48 @@ function mdRuns(R, s, o){
     else if(o.method==='dam'){
       // notional loads added in the direction of the combination's net lateral load
       let hx=0, hy=0; cb.terms.forEach(([k,lc,fac])=>{ if(grav.includes(lc)) return; const F=R._int.CF[lc]&&R._int.CF[lc].F; if(!F) return; for(let i=0;i<R._int.N;i++){ hx+=fac*F[6*i]; hy+=fac*F[6*i+1]; } });
-      const d=Math.abs(hx)>=Math.abs(hy)?[Math.sign(hx)||1,0]:[0,Math.sign(hy)||1];
-      runs.push({combo:cb, dir:d, dirName:(d[0]?(d[0]>0?'+X':'−X'):(d[1]>0?'+Y':'−Y')), name:`${cb.name}, N ${(d[0]?(d[0]>0?'+X':'−X'):(d[1]>0?'+Y':'−Y'))}`});
+      // in the direction of the net lateral load, and (3D) both ways in the orthogonal direction: the direction of
+      // greatest destabilizing effect (C2.2b(3)) is not known in advance
+      const nm=d=>d[0]?(d[0]>0?'+X':'−X'):(d[1]>0?'+Y':'−Y');
+      const main=Math.abs(hx)>=Math.abs(hy)?[Math.sign(hx)||1,0]:[0,Math.sign(hy)||1];
+      const all=[main].concat(is3?(main[0]?[[0,1],[0,-1]]:[[1,0],[-1,0]]):[]);
+      all.forEach(d=>runs.push({combo:cb, dir:d, dirName:nm(d), name:`${cb.name}, N ${nm(d)}`}));
     }
     else runs.push({combo:cb, dir:null, dirName:'', name:cb.name});
   });
   return runs;
 }
+// the governing unbraced length of a member: its longest segment between brace points, an overhang (cantilever,
+// free end) counted as twice its length (the effective length of a fixed-free member, K = 2); used for every point of
+// the member, so a check near a short segment never uses less than the member's span
+function mdGovLen(g, segs, cf){
+  cf=cf||1; let best=null; (segs||[]).forEach(sg=>{ const Le=sg.cant?cf*sg.L:sg.L; if(!best||Le>best.Le) best={Le, sg}; });
+  if(!best) return {L:g.L, desc:`${f(g.L,2)} ft`};
+  const sg=best.sg, x0=g.sx[sg.i0];
+  const where=sg.cant?(cf>1?`the overhang, ${f(sg.L,2)} ft, counted as ${cf} × ${f(sg.L,2)} = ${f(cf*sg.L,2)} ft (cantilever, free end: K = ${cf}, AISC Commentary Table C-A-7.1)`:`the overhang, ${f(sg.L,2)} ft (cantilever; K = 1, its sway is in the second-order analysis)`):`${f(sg.L,2)} ft, from ${f(x0,2)} to ${f(x0+sg.L,2)} ft`;
+  return {L:best.Le, cant:!!sg.cant, desc:where, n:(segs||[]).length};
+}
 function mdLengths(g, eid, o, topComp){
-  const sB=mdSegOf(g.segB,eid), sX=mdSegOf(g.segX,eid), K=o.K[g.type]||[1,1], dam=o.method==='dam';
-  const Kx=dam?1:K[0], Ky=dam?1:K[1];
-  const Lx=sX.L, Ly=sB.L;
-  let Lb=g.type==='rafter'?(o.rafterLb==='columns'?Lx:(o.rafterLb==='purlins'?Ly:(topComp?Ly:Lx))):Ly;
-  return {Kx, Ky, Lx, Ly, Lb, Lcx:Kx*Lx*12, Lcy:Ky*Ly*12, LbIn:Lb*12, cant:sB.cant||sX.cant, sB, sX};
+  const K=o.K[g.type]||[1,1], dam=o.method==='dam';
+  // Direct Analysis Method: K = 1 only where the analysis captures the sway; a plane (2D) model restrains the
+  // out-of-plane DOFs, so buckling about y keeps the K of the inputs there (and an overhang about y is a cantilever)
+  const dmx=dam, dmy=dam&&!o.planar;
+  const Kx=dmx?1:K[0], Ky=dmy?1:K[1];
+  const segY=(g.type==='rafter'&&o.roofBraced===false)?g.segX:g.segB;   // rafters without roof bracing: braced at the columns only
+  if(!g._gx) g._gx=mdGovLen(g,g.segX,dmx?1:2.1); if(!g._gy) g._gy=mdGovLen(g,segY,dmy?1:2.1);
+  const Lx=g._gx.L, Ly=g._gy.L;
+  const useX=g.type==='rafter'&&(o.roofBraced===false||o.rafterLb==='columns'||(o.rafterLb!=='purlins'&&!topComp));
+  const Lb=useX?Lx:Ly, cantLb=useX?g._gx.cant:g._gy.cant;
+  return {Kx, Ky, Lx, Ly, Lb, Lcx:Kx*Lx*12, Lcy:Ky*Ly*12, LbIn:Lb*12, gx:g._gx, gy:g._gy, cant:g._gx.cant||g._gy.cant, cantLb, KyFixed:dam&&!dmy};
 }
 // a rafter's top flange is in compression when its internal local momentY is negative: in the analysis rows (MIDAS layout) a
 // positive momentY of a member whose local z points up is hogging (top fibre in tension), e.g. + over the column of a loaded overhang
 const MD_TOP_SIGN=-1;
 function mdCompute(){
-  const s=state, o=mdOpts(), t0=performance.now();
+  const s=state, t0=performance.now(); let o=mdOpts();
   if(!window.SharedAiscHss) return {error:'The AISC HSS engine (shared/aisc-hss.js) is not embedded in this file; run tools/sync-bpad.py.'};
   const B=buildMCT(s), R=anaRun(B.text), mesh=B.mesh;
+  o=Object.assign({},o,{planar:R.planar});
   const groups=mdGroups(s, mesh, R.model), runs=mdRuns(R, s, o);
   const Fy=SharedAiscHss.grades[o.grade].Fy;
   const res=[]; let worstRatio=1, worstRun=null, notConv=[], errs=[];
@@ -7846,15 +7890,18 @@ function mdCompute(){
     rn.ratio=r.ratio; rn.it=r.it; rn.notional=r.notional; rn.ends=r.ends;
     if(r.ratio>worstRatio){ worstRatio=r.ratio; worstRun=rn.name; } });
   const capCache=new Map();
-  const capOf=(g,L)=>{ const k=g.secName+'|'+[L.Lcx,L.Lcy,L.LbIn].map(v=>v.toFixed(3)).join('|'); if(!capCache.has(k)) capCache.set(k,SharedAiscHss.capacities(SharedAiscHss.section(g.secName,o.grade),{Lcx:L.Lcx,Lcy:L.Lcy,Lb:L.LbIn,Cb:o.Cb})); return capCache.get(k); };
+  // C_b: the input for beams; 1.0 for columns and where an overhang (free end) sets L_b. E: the model's modulus
+  const capOf=(g,L)=>{ const Cb=(g.type==='col'||L.cantLb)?1:o.Cb, k=g.secName+'|'+[L.Lcx,L.Lcy,L.LbIn,Cb].map(v=>(+v).toFixed(3)).join('|'); L.Cb=Cb;
+    if(!capCache.has(k)) capCache.set(k,SharedAiscHss.capacities(SharedAiscHss.section(g.secName,o.grade,{E:+s.E_ksi||29000}),{Lcx:L.Lcx,Lcy:L.Lcy,Lb:L.LbIn,Cb})); return capCache.get(k); };
   const evalRun=(g,rn)=>{ let w=null; if(!g.hss||!rn.ends) return null;
-    g.elems.forEach(e=>{ const fe=rn.ends.get(e.id); if(!fe) return;
-      [['I',-1,0],['J',1,6]].forEach(([end,sg,o0])=>{
-        const v=k=>sg*fe[o0+k];
-        const d={P:v(0)/1000, Vy:v(1)/1000, Vx:v(2)/1000, T:v(3)*12/1000, Mx:v(4)*12/1000, My:v(5)*12/1000};
-        const topComp=MD_TOP_SIGN*v(4)>0;
+    g.elems.forEach((e,ie)=>{ const fe=rn.ends.get(e.id); if(!fe) return; const Le=g.sx[ie+1]-g.sx[ie];
+      // both ends, the quarter points and any peak of the moment between the nodes
+      mdAlong(fe, Le).forEach(({x,d:q})=>{
+        const d={P:q.P/1000, Vy:q.Vy/1000, Vx:q.Vx/1000, T:q.T*12/1000, Mx:q.Mx*12/1000, My:q.My*12/1000};
+        const topComp=MD_TOP_SIGN*q.Mx>0;
         const L=mdLengths(g, e.id, o, topComp), cap=capOf(g,L), r=SharedAiscHss.ratios(cap,d);
-        const pt={r, d, cap, L, run:rn.name, elem:e.id, end, at:g.sx[g.chain.indexOf(end==='I'?e.n1:e.n2)]};
+        const end=x<1e-9?'I':x>Le*(1-1e-9)?'J':'x', pos=end==='x'?`${f(x/Le,2)} of its length`:`${end}-end`;
+        const pt={r, d, cap, L, run:rn.name, elem:e.id, end, pos, at:g.sx[ie]+x};
         if(!w || r.gov>w.r.gov) w=Object.assign(pt,{by:w?w.by:{}});
         // each limit state's own largest ratio over the member (by[k]), not only the forces at the governing point
         const by=w.by; ['P','Mx','My','Vx','Vy','T','H1','H3'].forEach(k=>{ const v=r[k], kk=k==='P'?(r.Pkind==='tension'?'Pt':'Pc'):k; if(v!=null && (!by[kk] || v>by[kk].r[k])) by[kk]=pt; });
@@ -7863,33 +7910,32 @@ function mdCompute(){
   groups.forEach(g=>{ g.worst=null; g.by={}; if(!g.hss) return;
     runs.forEach(rn=>{ const w=evalRun(g,rn); if(!w) return; if(!g.worst||w.r.gov>g.worst.r.gov) g.worst=w;
       ['Pc','Pt','Mx','My','Vx','Vy','T','H1','H3'].forEach(k=>{ const p=w.by[k], rk=k[0]==='P'?'P':k; if(p && (!g.by[k] || p.r[rk]>g.by[k].r[rk])) g.by[k]=p; }); }); });
-  // serviceability (first-order, unfactored cases, nominal stiffness)
-  const u=lc=>R.cases[lc]&&R.cases[lc].u, ix=R.nodeIdx, uD=u('DL'), uS=u('Snow');
-  const dz=(U,n)=>U?U[6*ix.get(n)+2]:0;
+  // serviceability (first-order, unfactored cases, nominal stiffness): the vertical deflection along each member, at
+  // the nodes and at the quarter points of every element (mdServiceZ), relative to each span's supports
+  const sets=mdServiceSets({ana:R, o});
   const defl=[];
   const roofSpans=g=>(g.type==='rafter'?g.segX:g.segB).filter(sg=>sg.L>1e-6);
   groups.filter(g=>g.type!=='col').forEach(g=>{
-    roofSpans(g).forEach((sg,si)=>{
-      const nodes=g.chain.slice(sg.i0,sg.i1+1), x0=g.sx[sg.i0];
-      const Leff=sg.cant?2*sg.L:sg.L;
-      [['S',[uS],o.defl.S],['D+S',[uD,uS],o.defl.DS]].forEach(([nm,Us,den])=>{
-        const z=n=>Us.reduce((a,U)=>a+dz(U,n),0);
+    [['S',o.defl.S],['D + S',o.defl.DS]].forEach(([nm,den])=>{ const set=sets.find(x=>x.name===nm); if(!set) return;
+      const Z=mdServiceZ(R,g,set);
+      roofSpans(g).forEach(sg=>{
+        const x0=g.sx[sg.i0], x1=g.sx[sg.i1], z0=Z.atNode(sg.i0), z1=Z.atNode(sg.i1), Leff=sg.cant?2*sg.L:sg.L;
         let best=0, bx=0;
-        nodes.forEach((n,k)=>{ const t=(g.sx[sg.i0+k]-x0)/(sg.L||1);
-          let d;
-          if(sg.cant==='start') d=z(n)-z(nodes[nodes.length-1]); else if(sg.cant==='end') d=z(n)-z(nodes[0]);
-          else d=z(n)-(z(nodes[0])+(z(nodes[nodes.length-1])-z(nodes[0]))*t);
-          if(Math.abs(d)>Math.abs(best)){ best=d; bx=g.sx[sg.i0+k]; } });
+        Z.pts.forEach(([x,z])=>{ if(x<x0-1e-9||x>x1+1e-9) return; const t=(x-x0)/(sg.L||1);
+          const d=sg.cant==='start'?z-z1:sg.cant==='end'?z-z0:z-(z0+(z1-z0)*t);
+          if(Math.abs(d)>Math.abs(best)){ best=d; bx=x; } });
         const lim=Leff/den;
-        defl.push({g:g.label, type:g.type, sec:g.secName, span:sg.cant?`overhang (${f(sg.L,2)} ft)`:`span ${f(x0,2)}–${f(x0+sg.L,2)} ft`, cant:!!sg.cant, L:sg.L, load:nm, den, d:best, lim, ratio:Math.abs(best)/lim, at:bx});
+        defl.push({g:g.label, type:g.type, sec:g.secName, span:sg.cant?`overhang (${f(sg.L,2)} ft)`:`span ${f(x0,2)}–${f(x1,2)} ft`, cant:!!sg.cant, L:sg.L, load:nm, den, d:best, lim, ratio:Math.abs(best)/lim, at:bx});
       });
     });
   });
+  // column drift: top relative to the base under a·W alone (the dead load sway of an unbalanced canopy is not drift)
+  const u=lc=>R.cases[lc]&&R.cases[lc].u, ix=R.nodeIdx;
   const wcs=R.model.cases.filter(c=>c!=='DL'&&c!=='Snow'), drift=[];
   groups.filter(g=>g.type==='col').forEach(g=>{
     const nb=g.chain[0], nt=g.chain[g.chain.length-1], H=g.L, lim=H/o.defl.drift;
     let best=null;
-    wcs.forEach(w=>{ const Uw=u(w); if(!Uw) return; const h=k=>(uD?uD[6*ix.get(nt)+k]-uD[6*ix.get(nb)+k]:0)+o.defl.wFac*(Uw[6*ix.get(nt)+k]-Uw[6*ix.get(nb)+k]);
+    wcs.forEach(w=>{ const Uw=u(w); if(!Uw) return; const h=k=>o.defl.wFac*(Uw[6*ix.get(nt)+k]-Uw[6*ix.get(nb)+k]);
       const d=Math.hypot(h(0),h(1)); if(!best||d>best.d) best={d,w}; });
     if(best) drift.push({g:g.label, sec:g.secName, H, d:best.d, w:best.w, lim, ratio:best.d/lim});
   });
@@ -7910,12 +7956,13 @@ function mdSteps(g, Wp, by){
   const st=(id,label,sym,eq,sub,value,unit,dd,ref,note)=>{ const x={id:P+'.'+id,label,sym,eq:eq||'',sub:sub||'',value,unit:unit||'',d:dd==null?2:dd,ref:ref||''}; if(note) x.note=note; return x; };
   const S=[];
   const meth=o.method==='dam'?'Direct Analysis Method: K = 1 (AISC 360-16 C3).':'Effective Length Method: K from the inputs (AISC 360-16 Appendix 7.2.3).';
-  S.push(st('Lx','Unbraced length for buckling about x (strong axis)','L_{x}','','',L.Lx,'ft',2,'', g.type==='rafter'?'In the frame plane: between the columns (or column to the roof tip).':(g.type==='col'?'Base to the roof beam.':'Between the frames (or frame to the end).')));
-  S.push(st('Ly','Unbraced length for buckling about y (weak axis)','L_{y}','','',L.Ly,'ft',2,'', g.type==='rafter'?'Out of the frame plane: between the eave beams and purlins that frame into the rafter.':null));
+  const segTxt=g.type==='col'?'Base to the roof beam.':g.type==='rafter'?null:'Between the frames (the overhangs counted as twice their length).';
+  S.push(st('Lx','Unbraced length for buckling about x (strong axis)','L_{x}','','',L.Lx,'ft',2,'', (g.type==='rafter'?'In the frame plane, between the columns; the longest segment: ':'Longest unbraced segment of the member: ')+L.gx.desc+'.'+(segTxt&&g.type!=='col'?' '+segTxt:g.type==='col'?' '+segTxt:'')));
+  S.push(st('Ly','Unbraced length for buckling about y (weak axis)','L_{y}','','',L.Ly,'ft',2,'', (g.type==='rafter'?'Out of the frame plane, between the eave beams and purlins that brace the rafter; the longest segment: ':'Longest unbraced segment of the member: ')+L.gy.desc+'. The member is checked at every point with these lengths.'));
   S.push(st('Lcx','Effective length, x','L_{cx}','K_{x}L_{x}',`${f(L.Kx,2)}(${f(L.Lx,2)})`,L.Lcx/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3',meth));
   S.push(st('Lcy','Effective length, y','L_{cy}','K_{y}L_{y}',`${f(L.Ky,2)}(${f(L.Ly,2)})`,L.Lcy/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3'));
-  S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' Cantilever: C_b = 1.0 over the overhang length.':'') || null));
-  const where=q=>`${q.run}, element ${q.elem} ${q.end}-end, ${f(q.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}`;
+  S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.roofBraced===false?'No roof bracing: the rafter is braced at the columns only.':o.rafterLb==='sign'?'By the flange in compression at the point: top flange (sagging) braced by the purlins and eaves; bottom flange (hogging: over the columns, along the overhangs, and under uplift) braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+` C_b = ${f(L.Cb||1,2)}`+(g.type==='col'?' (columns: 1.0).':L.cantLb?' (an overhang sets L_b: 1.0).':'.')));
+  const where=q=>`${q.run}, element ${q.elem} ${q.pos}, ${f(q.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}`;
   const scope=by===g.by?'every combination':'the chosen combination';
   // 1. required strengths: each one's largest value over the member (every element end) and the combinations
   const D=[['Pc','Required axial strength, compression','P_{u}',q=>Math.abs(q.d.P),'kip',2],['Pt','Required axial strength, tension','P_{u}',q=>Math.abs(q.d.P),'kip',2],
@@ -7981,7 +8028,7 @@ function mdCheckSummary(R, g, W, by){
   // where each strength row's maximum occurs
   rows.forEach(x=>{ x.where=at(by[x.k]||W); });
   // serviceability: the member's governing deflection (beams) or drift (columns)
-  if(g.type==='col'){ const x=R.drift.find(z=>z.g===g.label); if(x) rows.push({k:'D', lim:`Drift, D + ${R.o.defl.wFac}·${x.w}`, ref:'serviceability', dem:['\\Delta',`${uDisp(x.d)} ${uDispLbl()}`], cap:[`H/${R.o.defl.drift}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true, where:'unfactored'}); }
+  if(g.type==='col'){ const x=R.drift.find(z=>z.g===g.label); if(x) rows.push({k:'D', lim:`Drift, ${R.o.defl.wFac}·${x.w}`, ref:'serviceability', dem:['\\Delta',`${uDisp(x.d)} ${uDispLbl()}`], cap:[`H/${R.o.defl.drift}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true, where:'unfactored'}); }
   else { const x=R.defl.filter(z=>z.g===g.label).reduce((m,z)=>!m||z.ratio>m.ratio?z:m,null);
     if(x) rows.push({k:'D', lim:`Deflection, ${x.load}, ${x.span}`, ref:'serviceability', dem:['\\delta',`${uDisp(Math.abs(x.d))} ${uDispLbl()}`], cap:[`${x.cant?'2L':'L'}/${x.den}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true, where:'unfactored'}); }
   const str=rows.filter(x=>!x.serv), gs=str.reduce((m,x)=>x.ratio>m.ratio?x:m,str[0]);
@@ -8006,23 +8053,25 @@ function mdRenderInputs(){
     <label>Stability design method</label><select id="mdMethod" class="inp"><option value="elm"${!dam?' selected':''}>Effective Length Method (App. 7)</option><option value="dam"${dam?' selected':''}>Direct Analysis Method (Ch. C)</option></select>
     <label>HSS material</label><select id="mdGrade" class="inp">${grades.map(g=>`<option value="${g.id}"${g.id===o.grade?' selected':''}>${aesc(g.name)} (F<sub>y</sub> = ${g.Fy} ksi)</option>`).join('')}</select>
     <label>Rafter L<sub>b</sub> (LTB)</label><select id="mdRafLb" class="inp"><option value="sign"${o.rafterLb==='sign'?' selected':''}>By flange in compression (Recommended)</option><option value="columns"${o.rafterLb==='columns'?' selected':''}>Between columns</option><option value="purlins"${o.rafterLb==='purlins'?' selected':''}>Between purlins</option></select>
+    <label>Roof bracing</label><select id="mdRoofBr" class="inp"><option value="1"${o.roofBraced!==false?' selected':''}>Purlins and eaves brace the rafters (roof diaphragm or bracing present)</option><option value="0"${o.roofBraced===false?' selected':''}>Not braced: rafters braced at the columns only</option></select>
     <label>C<sub>b</sub></label><input id="mdCb" class="inp" type="number" step="0.05" min="1" max="3" value="${o.Cb}">
   </div>
   <table class="rpt md-k" style="max-width:520px;margin-top:8px"><thead><tr><th>Member</th><th>K<sub>x</sub> (strong axis)</th><th>K<sub>y</sub> (weak axis)</th></tr></thead><tbody>
-  ${MD_TYPES.map(([k,nm])=>`<tr><td>${nm}</td>${[0,1].map(a=>`<td><input class="inp mdK" data-k="${k}" data-a="${a}" type="number" step="0.05" min="0.5" value="${dam?1:o.K[k][a]}"${dam?' disabled':''} style="width:80px"></td>`).join('')}</tr>`).join('')}
+  ${MD_TYPES.map(([k,nm])=>`<tr><td>${nm}</td>${[0,1].map(a=>`<td><input class="inp mdK" data-k="${k}" data-a="${a}" type="number" step="0.05" min="0.5" value="${(dam&&(a===0||is3D(state)))?1:o.K[k][a]}"${(dam&&(a===0||is3D(state)))?' disabled':''} style="width:80px"></td>`).join('')}</tr>`).join('')}
   </tbody></table>
-  <div class="hint" style="margin-top:4px">${dam?'Direct Analysis Method: K = 1 for every member (AISC 360-16 C3); the analysis uses 0.8τ<sub>b</sub>EI and 0.8EA, with notional loads 0.002Y<sub>i</sub> in every combination.':'Effective Length Method: K from the sidesway buckling of the frame (AISC 360-16 App. 7.2.3). The defaults are conservative: 2.1 for the columns (a cantilever with a fixed base, the AISC Commentary Table C-A-7.1 design value); 1.0 for the roof members (braced at their ends). K = 1 may be used for a member of a frame whose Δ<sub>2nd</sub>/Δ<sub>1st</sub> ≤ 1.1 (App. 7.2.3(b)).'}</div>
+  <div class="hint" style="margin-top:4px">${dam?'Direct Analysis Method: K = 1 (AISC 360-16 C3) wherever the analysis captures the sway; the analysis uses 0.8τ<sub>b</sub>EI and 0.8EA, with notional loads 0.002Y<sub>i</sub> in every combination.'+(is3D(state)?'':' This is a plane (2D) model: the out-of-plane sway is not analysed, so buckling about the weak axis (K<sub>y</sub>) keeps the values entered here (columns: 2.1, a fixed-base cantilever).'):'Effective Length Method: K from the sidesway buckling of the frame (AISC 360-16 App. 7.2.3). The defaults are conservative: 2.1 for the columns (a cantilever with a fixed base, the AISC Commentary Table C-A-7.1 design value); 1.0 for the roof members (braced at their ends). An overhang (free end) uses 2.1 × its length. K = 1 may be used for a member of a frame whose Δ<sub>2nd</sub>/Δ<sub>1st</sub> ≤ 1.1 (App. 7.2.3(b)).'}</div>
   <h3 style="margin:12px 0 4px;font-size:13px">Deflection limits</h3>
   <div class="md-grid">
     <label>Roof members, snow S</label><span>L / <input id="mdDS" class="inp mdD" data-k="S" type="number" min="60" step="10" value="${o.defl.S}" style="width:70px"></span>
     <label>Roof members, D + S</label><span>L / <input class="inp mdD" data-k="DS" type="number" min="60" step="10" value="${o.defl.DS}" style="width:70px"></span>
-    <label>Column drift, D + a·W</label><span>H / <input class="inp mdD" data-k="drift" type="number" min="20" step="10" value="${o.defl.drift}" style="width:70px">, a = <input class="inp mdD" data-k="wFac" type="number" min="0.1" max="1" step="0.01" value="${o.defl.wFac}" style="width:60px"></span>
+    <label>Column drift, a·W</label><span>H / <input class="inp mdD" data-k="drift" type="number" min="20" step="10" value="${o.defl.drift}" style="width:70px">, a = <input class="inp mdD" data-k="wFac" type="number" min="0.1" max="1" step="0.01" value="${o.defl.wFac}" style="width:60px"></span>
   </div>
-  <div class="hint" style="margin-top:4px">Spans: the deflection relative to the line between the span's supports. Overhangs (cantilevers): the tip deflection relative to the support, against 2L/limit (L = overhang length). The column drift uses a·W, the wind at a 10-year return period (a ≈ 0.42 for the ASCE 7-16 Risk Category II wind speed; ASCE 7-16 Commentary C.2.2). Unfactored load cases, nominal stiffness, first-order analysis.</div>`;
+  <div class="hint" style="margin-top:4px">Spans: the deflection relative to the line between the span's supports. Overhangs (cantilevers): the tip deflection relative to the support, against 2L/limit (L = overhang length). The column drift uses a·W, the wind at a 10-year return period (a ≈ 0.42 for the ASCE 7-16 Risk Category II wind speed; ASCE 7-16 Commentary C.2.2). Unfactored load cases, nominal stiffness, first-order analysis; checked at the nodes and along each element. The defaults are the IBC Table 1604.3 roof values for members supporting a non-plaster ceiling; for a roof with no ceiling the table allows L/180 (S) and L/120 (D + S).</div>`;
   const chg=()=>{ MD.sel=null; mdRender(true); };
   document.getElementById('mdMethod').onchange=e=>{ state.md.method=e.target.value; mdRenderInputs(); chg(); };
   document.getElementById('mdGrade').onchange=e=>{ state.md.grade=e.target.value; chg(); };
   document.getElementById('mdRafLb').onchange=e=>{ state.md.rafterLb=e.target.value; chg(); };
+  document.getElementById('mdRoofBr').onchange=e=>{ state.md.roofBraced=e.target.value==='1'; chg(); };
   document.getElementById('mdCb').onchange=e=>{ const v=+e.target.value; state.md.Cb=v>=1?v:1; chg(); };
   host.querySelectorAll('.mdK').forEach(el=>el.onchange=()=>{ const v=+el.value; if(v>0){ const K=state.md.K[el.dataset.k].slice(); K[+el.dataset.a]=v; state.md.K=Object.assign({},state.md.K,{[el.dataset.k]:K}); } chg(); });
   host.querySelectorAll('.mdD').forEach(el=>el.onchange=()=>{ const v=+el.value; if(v>0) state.md.defl=Object.assign({},state.md.defl,{[el.dataset.k]:v}); chg(); });
@@ -8067,28 +8116,40 @@ function mdDiagData(R, g, rn){
     return {x, q, qmin, env:true};
   }
   const x=[], q={N:[],Vx:[],Vy:[],Mx:[],My:[],T:[]};
-  g.elems.forEach((e,i)=>{ const fe=rn.ends.get(e.id); if(!fe) return; const xi=g.sx[i], xj=g.sx[i+1];
-    [[xi,-1,0],[xj,1,6]].forEach(([xx,sg,o0])=>{ x.push(xx); const v=k=>sg*fe[o0+k];
-      q.N.push(uForceVal(v(0))); q.Vy.push(uForceVal(v(1))); q.Vx.push(uForceVal(v(2))); q.T.push(uMomVal(v(3))); q.Mx.push(uMomVal(v(4))); q.My.push(uMomVal(v(5))); }); });
+  g.elems.forEach((e,i)=>{ const fe=rn.ends.get(e.id); if(!fe) return; const Le=g.sx[i+1]-g.sx[i];
+    mdAlong(fe,Le,[0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1]).forEach(({x:xx,d})=>{ x.push(g.sx[i]+xx);
+      q.N.push(uForceVal(d.P)); q.Vy.push(uForceVal(d.Vy)); q.Vx.push(uForceVal(d.Vx)); q.T.push(uMomVal(d.T)); q.Mx.push(uMomVal(d.Mx)); q.My.push(uMomVal(d.My)); }); });
   return {x, q};
 }
 // service deflections along a member: beams, vertical relative to each span's supports (overhangs: to the support);
 // columns, horizontal relative to the base (X and Y)
 function mdServiceSets(R){
-  const A=R.ana, u=lc=>A.cases[lc]&&A.cases[lc].u, wf=R.o.defl.wFac, out=[];
-  if(u('Snow')) out.push({name:'S', U:[[u('Snow'),1]]});
-  out.push({name:'D + S', U:[[u('DL'),1],[u('Snow'),1]].filter(x=>x[0])});
-  A.model.cases.filter(c=>c!=='DL'&&c!=='Snow').forEach(w=>out.push({name:`D + ${wf}·${w}`, U:[[u('DL'),1],[u(w),wf]].filter(x=>x[0])}));
+  const A=R.ana, wf=R.o.defl.wFac, has=lc=>!!(A.cases[lc]&&A.cases[lc].u), out=[];
+  if(has('Snow')) out.push({name:'S', terms:[['Snow',1]]});
+  out.push({name:'D + S', terms:[['DL',1],['Snow',1]].filter(t=>has(t[0]))});
+  A.model.cases.filter(c=>c!=='DL'&&c!=='Snow').forEach(w=>out.push({name:`${wf}·${w}`, terms:[[w,wf]]}));
+  out.forEach(x=>{ x.U=x.terms.map(([lc,fc])=>[A.cases[lc].u,fc]); });
   return out;
+}
+// vertical deflection along a member for a service set: node values plus each element's bending between its nodes
+// (mdBulge, from the element's end forces, so a released end needs no rotation); returns points [x, z] and node values
+function mdServiceZ(A, g, set){
+  const ix=A.nodeIdx, EL=A._int.EL, E=A._int.E, val=(n,k)=>set.U.reduce((a,[U,fc])=>a+fc*U[6*ix.get(n)+k],0);
+  const nodeZ=g.chain.map(n=>val(n,2)), pts=[];
+  g.elems.forEach((e,i)=>{ const D=EL.get(e.id), L=g.sx[i+1]-g.sx[i], f=new Float64Array(12);
+    set.terms.forEach(([lc,fc])=>{ const fe=A.cases[lc].ends.get(e.id); if(fe) for(let r=0;r<12;r++) f[r]+=fc*fe[r]; });
+    const EI=E*D.S.Iy, ezz=D.R[2][2];
+    [0,0.125,0.25,0.375,0.5,0.625,0.75,0.875].forEach(t=>{ const x=t*L, zl=nodeZ[i]+(nodeZ[i+1]-nodeZ[i])*t; pts.push([g.sx[i]+x, zl+(t>0?ezz*mdBulge(f,L,EI,x):0)]); }); });
+  pts.push([g.sx[g.sx.length-1], nodeZ[nodeZ.length-1]]);
+  return {pts, atNode:i=>nodeZ[i]};
 }
 function mdDeflData(R, g, set){
   const ix=R.ana.nodeIdx, val=(n,k)=>set.U.reduce((a,[U,fc])=>a+fc*U[6*ix.get(n)+k],0);
   if(g.type==='col'){ const b=g.chain[0]; return {x:g.sx.slice(), lines:[['ΔX',g.chain.map(n=>uDispVal(val(n,0)-val(b,0)))],['ΔY',g.chain.map(n=>uDispVal(val(n,1)-val(b,1)))]], kind:'col'}; }
-  const segs=(g.type==='rafter'?g.segX:g.segB), x=[], y=[];
-  segs.forEach(sg=>{ const nodes=g.chain.slice(sg.i0,sg.i1+1), z=n=>val(n,2), x0=g.sx[sg.i0];
-    nodes.forEach((n,k)=>{ const t=(g.sx[sg.i0+k]-x0)/(sg.L||1); let d;
-      if(sg.cant==='start') d=z(n)-z(nodes[nodes.length-1]); else if(sg.cant==='end') d=z(n)-z(nodes[0]); else d=z(n)-(z(nodes[0])+(z(nodes[nodes.length-1])-z(nodes[0]))*t);
-      x.push(g.sx[sg.i0+k]); y.push(uDispVal(d)); }); x.push(null); y.push(null); });
+  const segs=(g.type==='rafter'?g.segX:g.segB), x=[], y=[], Z=mdServiceZ(R.ana,g,set);
+  segs.forEach(sg=>{ const x0=g.sx[sg.i0], x1=g.sx[sg.i1], z0=Z.atNode(sg.i0), z1=Z.atNode(sg.i1);
+    Z.pts.forEach(([xx,z])=>{ if(xx<x0-1e-9||xx>x1+1e-9) return; const t=(xx-x0)/(sg.L||1);
+      const d=sg.cant==='start'?z-z1:sg.cant==='end'?z-z0:z-(z0+(z1-z0)*t); x.push(xx); y.push(uDispVal(d)); }); x.push(null); y.push(null); });
   return {x, lines:[['δ (vertical, relative to the supports)',y]], kind:'beam'};
 }
 function mdDrawDiagrams(div, R, g, rn, set, at, opt){
@@ -8128,7 +8189,7 @@ function mdRenderResults(R){
   document.getElementById('mdExplorer').style.display='';
   const dam=R.method==='dam', hssN=R.groups.filter(g=>g.hss).length, other=R.groups.filter(g=>!g.hss);
   const worst=R.groups.filter(g=>g.worst).reduce((m,g)=>!m||g.worst.r.gov>m.worst.r.gov?g:m,null);
-  const ng=R.groups.filter(g=>g.worst&&g.worst.r.gov>1).length + R.defl.filter(x=>x.ratio>1).length + R.drift.filter(x=>x.ratio>1).length;
+  const ng=R.groups.filter(g=>g.worst&&g.worst.r.gov>1).length + R.defl.filter(x=>x.ratio>1).length + R.drift.filter(x=>x.ratio>1).length + R.errs.length;
   let warn='';
   if(R.errs.length) warn+=`<br><b style="color:var(--rust)">⚠ ${aesc(R.errs[0])}${R.errs.length>1?` (and ${R.errs.length-1} more)`:''}.</b>`;
   if(R.notConv.length) warn+=`<br><span style="color:var(--rust)">The second-order iteration did not converge for ${aesc(R.notConv.join(', '))}.</span>`;
@@ -8146,7 +8207,7 @@ function mdRenderResults(R){
   // deflection table
   const drow=x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>${aesc(x.span)}</td><td>${aesc(x.load)}</td><td>${uDisp(Math.abs(x.d))} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (${x.cant?'2L':'L'}/${x.den})</td><td>${mdStatus(x.ratio)}</td></tr>`;
   const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
-  const dd=R.drift.map(x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>H = ${f(x.H,2)} ft</td><td>D + ${R.o.defl.wFac}·${aesc(x.w)}</td><td>${uDisp(x.d)} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (H/${R.o.defl.drift})</td><td>${mdStatus(x.ratio)}</td></tr>`).join('');
+  const dd=R.drift.map(x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>H = ${f(x.H,2)} ft</td><td>${R.o.defl.wFac}·${aesc(x.w)}</td><td>${uDisp(x.d)} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (H/${R.o.defl.drift})</td><td>${mdStatus(x.ratio)}</td></tr>`).join('');
   const dh='<thead><tr><th>Member</th><th>Section</th><th>Span</th><th>Load</th><th>Deflection</th><th>Limit</th><th>Ratio</th></tr></thead>';
   dfl.innerHTML=`<table class="rpt md-dfl">${dh}<tbody>${dmax.map(drow).join('')}${dd}</tbody></table><div class="hint">The largest ratio of each member and load, and the drift of each column.</div>`
     +`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px">Every span and overhang (${R.defl.length} rows)</summary><table class="rpt md-dfl">${dh}<tbody>${R.defl.map(drow).join('')}</tbody></table></details>`;
@@ -8194,7 +8255,7 @@ function mdSelect(R, key, first){
   const det=document.getElementById('mdDetail');
   document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
   if(!g.hss){ det.innerHTML='<p class="hint">W-shape: not checked for strength on this tab (rectangular HSS only).</p>'; return; }
-  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W,gov?g.by:W.by))+mdCheckSummaryHTML(R,g,W,gov?g.by:W.by);
+  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.pos}, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W,gov?g.by:W.by))+mdCheckSummaryHTML(R,g,W,gov?g.by:W.by);
 }
 
 // ============================================================================
