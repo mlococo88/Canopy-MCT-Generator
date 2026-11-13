@@ -4232,7 +4232,9 @@ async function buildReportModel(){
       types.forEach(t=>{ const g=govOf(t); subs.push({title:`${dW[t]||t}: governing member ${g.label} (${g.secName})`, items:[
         rpNote(`Governing point: ${g.worst.run}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member. Ratio ${f(g.worst.r.gov,3)} ${g.worst.r.gov<=1?'OK':'NG'}.`),
         figDiag[t]||null,
-        {type:'steps', scope:'md-'+t, steps:mdSteps(g)}].filter(Boolean)}); });
+        {type:'steps', scope:'md-'+t, steps:mdSteps(g)},
+        (()=>{ const S=mdCheckSummary(R,g,g.worst); return {type:'table', caption:`Summary of the check: ${g.label} (${g.secName}), ${g.worst.run}. Member: strength ${f(S.strength,2)}, overall ${f(S.all,2)} ${S.all<=1?'OK':'NG'}.`,
+          head:['Limit state','AISC 360-16','Demand','Capacity','D/C ratio'], rows:S.rows.map(x=>[x.lim+(x.k===S.gov?' (governs strength)':''),x.ref,(x.dem[0]?`$${x.dem[0]}$ = `:'')+x.dem[1],(x.cap[0]?`$${x.cap[0]}$ = `:'')+x.cap[1],rc(x.ratio)])}; })()].filter(Boolean)}); });
       const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
       subs.push({title:'Deflection and drift', key:'M-defl', items:[
         rpNote(`Unfactored load cases, nominal stiffness, first-order analysis. Spans: the deflection relative to the line between the span's supports, limit L/${o.defl.S} under S and L/${o.defl.DS} under D + S. Overhangs: the tip relative to the support, limit 2L/${o.defl.S} and 2L/${o.defl.DS} (L = overhang). Columns: drift of the top relative to the base under D + ${o.defl.wFac}W (the wind at a 10-year return period, ASCE 7-16 Commentary C.2.2), limit H/${o.defl.drift}.`),
@@ -7914,6 +7916,31 @@ function mdSteps(g, Wp){
   S.push(st('Tu','Required torsional strength','T_{u}','','',Math.abs(d.T)/12,'kip-ft',3,''));
   return S.concat(SharedAiscHss.capSteps(W.cap,P), SharedAiscHss.demandSteps(W.cap,d,W.r,P));
 }
+// summary of a worked check: each limit state's demand, design strength and D/C ratio, then the serviceability check
+function mdCheckSummary(R, g, W){
+  const c=W.cap, r=W.r, d=W.d, k=(v,n)=>f(v,n==null?2:n), rows=[];
+  const comp=r.Pkind==='compression';
+  rows.push({k:'P', lim:`Axial ${r.Pkind}`, ref:comp?(c.comp.eff.length?'E7':'E3'):'D2', dem:['P_{u}',`${k(Math.abs(d.P))} kip`], cap:[comp?'\\phi_cP_n':'\\phi_tP_n',`${k(r.Pc,1)} kip`], ratio:r.P});
+  rows.push({k:'Mx', lim:`Flexure, major axis (${c.fx.gov.name.toLowerCase()})`, ref:'F7', dem:['M_{ux}',`${k(Math.abs(d.Mx)/12)} kip-ft`], cap:['\\phi_bM_{nx}',`${k(c.fx.phiMn/12)} kip-ft`], ratio:r.Mx});
+  rows.push({k:'My', lim:`Flexure, minor axis (${c.fy.gov.name.toLowerCase()})`, ref:'F7', dem:['M_{uy}',`${k(Math.abs(d.My)/12)} kip-ft`], cap:['\\phi_bM_{ny}',`${k(c.fy.phiMn/12)} kip-ft`], ratio:r.My});
+  rows.push({k:'Vx', lim:'Shear, H walls (with $M_x$)', ref:'G4', dem:['V_{ux}',`${k(Math.abs(d.Vx))} kip`], cap:['\\phi_vV_{nx}',`${k(c.vx.phiVn,1)} kip`], ratio:r.Vx});
+  rows.push({k:'Vy', lim:'Shear, B walls (with $M_y$)', ref:'G4', dem:['V_{uy}',`${k(Math.abs(d.Vy))} kip`], cap:['\\phi_vV_{ny}',`${k(c.vy.phiVn,1)} kip`], ratio:r.Vy});
+  rows.push({k:'T', lim:'Torsion', ref:'H3.1', dem:['T_{u}',`${k(Math.abs(d.T)/12,3)} kip-ft`], cap:['\\phi_TT_n',`${k(c.tor.phiTn/12)} kip-ft`], ratio:r.T});
+  rows.push({k:'H1', lim:`Combined axial and flexure (${r.H1ref})`, ref:'H1.1', dem:['','interaction'], cap:['','≤ 1.0'], ratio:r.H1});
+  if(r.H3!=null) rows.push({k:'H3', lim:'Combined force with torsion (H3-6)', ref:'H3.2', dem:['','interaction'], cap:['','≤ 1.0'], ratio:r.H3});
+  // serviceability: the member's governing deflection (beams) or drift (columns)
+  if(g.type==='col'){ const x=R.drift.find(z=>z.g===g.label); if(x) rows.push({k:'D', lim:`Drift, D + ${R.o.defl.wFac}·${x.w}`, ref:'serviceability', dem:['\\Delta',`${uDisp(x.d)} ${uDispLbl()}`], cap:[`H/${R.o.defl.drift}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true}); }
+  else { const x=R.defl.filter(z=>z.g===g.label).reduce((m,z)=>!m||z.ratio>m.ratio?z:m,null);
+    if(x) rows.push({k:'D', lim:`Deflection, ${x.load}, ${x.span}`, ref:'serviceability', dem:['\\delta',`${uDisp(Math.abs(x.d))} ${uDispLbl()}`], cap:[`${x.cant?'2L':'L'}/${x.den}`,`${uDisp(x.lim)} ${uDispLbl()}`], ratio:x.ratio, serv:true}); }
+  const str=rows.filter(x=>!x.serv), gs=str.reduce((m,x)=>x.ratio>m.ratio?x:m,str[0]);
+  return {rows, gov:gs.k, strength:gs.ratio, all:Math.max(...rows.map(x=>x.ratio))};
+}
+function mdCheckSummaryHTML(R,g,W){
+  const S=mdCheckSummary(R,g,W), T=window.SharedSteps, tx=t=>aesc(t).replace(/\$([^$]+)\$/g,(m,q)=>T.toHTML(q)), sub=v=>(v[0]?T.toHTML(v[0])+' = ':'')+aesc(v[1]);
+  return `<h3 style="margin:14px 0 4px;font-size:13px">Summary of the check</h3><table class="rpt md-cs" style="max-width:900px"><thead><tr><th>Limit state</th><th>AISC 360-16</th><th>Demand</th><th>Capacity</th><th>D/C ratio</th></tr></thead><tbody>`
+    +S.rows.map(x=>`<tr${x.k===S.gov?' style="background:#fdf3dd"':''}><td>${tx(x.lim)}${x.k===S.gov?' <b>(governs strength)</b>':''}</td><td>${aesc(x.ref)}</td><td>${sub(x.dem)}</td><td>${sub(x.cap)}</td><td>${mdStatus(x.ratio)}</td></tr>`).join('')
+    +`</tbody></table><div class="hint">Strength rows at the governing point of ${aesc(W.run)} (element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft); the deflection row is the member's governing service load (unfactored, first-order). Member: strength ${mdStatus(S.strength)}, overall ${mdStatus(S.all)}.</div>`;
+}
 function mdStepsHTML(steps){
   const T=window.SharedSteps; if(!T) return '';
   const note=n=>n?`<div class="md-nt">${aesc(T.noteText(n)).replace(/\$([^$]+)\$/g,(m,t)=>T.toHTML(t.replace(/&lt;/g,'<').replace(/&amp;/g,'&').replace(/&quot;/g,'"')))}</div>`:'';
@@ -8115,7 +8142,7 @@ function mdSelect(R, key, first){
   const det=document.getElementById('mdDetail');
   document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
   if(!g.hss){ det.innerHTML='<p class="hint">W-shape: not checked for strength on this tab (rectangular HSS only).</p>'; return; }
-  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W));
+  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W))+mdCheckSummaryHTML(R,g,W);
 }
 
 // ============================================================================
