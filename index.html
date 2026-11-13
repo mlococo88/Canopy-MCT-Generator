@@ -7824,12 +7824,23 @@ function mdRuns(R, s, o){
   });
   return runs;
 }
+// the governing unbraced length of a member: its longest segment between brace points, an overhang (cantilever,
+// free end) counted as twice its length (the effective length of a fixed-free member, K = 2); used for every point of
+// the member, so a check near a short segment never uses less than the member's span
+function mdGovLen(g, segs){
+  let best=null; (segs||[]).forEach(sg=>{ const Le=sg.cant?2*sg.L:sg.L; if(!best||Le>best.Le) best={Le, sg}; });
+  if(!best) return {L:g.L, desc:`${f(g.L,2)} ft`};
+  const sg=best.sg, x0=g.sx[sg.i0];
+  const where=sg.cant?`the overhang, ${f(sg.L,2)} ft, counted as 2 × ${f(sg.L,2)} = ${f(2*sg.L,2)} ft (cantilever, free end)`:`${f(sg.L,2)} ft, from ${f(x0,2)} to ${f(x0+sg.L,2)} ft`;
+  return {L:best.Le, cant:!!sg.cant, desc:where, n:(segs||[]).length};
+}
 function mdLengths(g, eid, o, topComp){
-  const sB=mdSegOf(g.segB,eid), sX=mdSegOf(g.segX,eid), K=o.K[g.type]||[1,1], dam=o.method==='dam';
+  const K=o.K[g.type]||[1,1], dam=o.method==='dam';
   const Kx=dam?1:K[0], Ky=dam?1:K[1];
-  const Lx=sX.L, Ly=sB.L;
+  if(!g._gx) g._gx=mdGovLen(g,g.segX); if(!g._gy) g._gy=mdGovLen(g,g.segB);
+  const Lx=g._gx.L, Ly=g._gy.L;
   let Lb=g.type==='rafter'?(o.rafterLb==='columns'?Lx:(o.rafterLb==='purlins'?Ly:(topComp?Ly:Lx))):Ly;
-  return {Kx, Ky, Lx, Ly, Lb, Lcx:Kx*Lx*12, Lcy:Ky*Ly*12, LbIn:Lb*12, cant:sB.cant||sX.cant, sB, sX};
+  return {Kx, Ky, Lx, Ly, Lb, Lcx:Kx*Lx*12, Lcy:Ky*Ly*12, LbIn:Lb*12, gx:g._gx, gy:g._gy, cant:g._gx.cant||g._gy.cant};
 }
 // a rafter's top flange is in compression when its internal local momentY is negative: in the analysis rows (MIDAS layout) a
 // positive momentY of a member whose local z points up is hogging (top fibre in tension), e.g. + over the column of a loaded overhang
@@ -7910,11 +7921,12 @@ function mdSteps(g, Wp, by){
   const st=(id,label,sym,eq,sub,value,unit,dd,ref,note)=>{ const x={id:P+'.'+id,label,sym,eq:eq||'',sub:sub||'',value,unit:unit||'',d:dd==null?2:dd,ref:ref||''}; if(note) x.note=note; return x; };
   const S=[];
   const meth=o.method==='dam'?'Direct Analysis Method: K = 1 (AISC 360-16 C3).':'Effective Length Method: K from the inputs (AISC 360-16 Appendix 7.2.3).';
-  S.push(st('Lx','Unbraced length for buckling about x (strong axis)','L_{x}','','',L.Lx,'ft',2,'', g.type==='rafter'?'In the frame plane: between the columns (or column to the roof tip).':(g.type==='col'?'Base to the roof beam.':'Between the frames (or frame to the end).')));
-  S.push(st('Ly','Unbraced length for buckling about y (weak axis)','L_{y}','','',L.Ly,'ft',2,'', g.type==='rafter'?'Out of the frame plane: between the eave beams and purlins that frame into the rafter.':null));
+  const segTxt=g.type==='col'?'Base to the roof beam.':g.type==='rafter'?null:'Between the frames (the overhangs counted as twice their length).';
+  S.push(st('Lx','Unbraced length for buckling about x (strong axis)','L_{x}','','',L.Lx,'ft',2,'', (g.type==='rafter'?'In the frame plane, between the columns; the longest segment: ':'Longest unbraced segment of the member: ')+L.gx.desc+'.'+(segTxt&&g.type!=='col'?' '+segTxt:g.type==='col'?' '+segTxt:'')));
+  S.push(st('Ly','Unbraced length for buckling about y (weak axis)','L_{y}','','',L.Ly,'ft',2,'', (g.type==='rafter'?'Out of the frame plane, between the eave beams and purlins that brace the rafter; the longest segment: ':'Longest unbraced segment of the member: ')+L.gy.desc+'. The member is checked at every point with these lengths.'));
   S.push(st('Lcx','Effective length, x','L_{cx}','K_{x}L_{x}',`${f(L.Kx,2)}(${f(L.Lx,2)})`,L.Lcx/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3',meth));
   S.push(st('Lcy','Effective length, y','L_{cy}','K_{y}L_{y}',`${f(L.Ky,2)}(${f(L.Ly,2)})`,L.Lcy/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3'));
-  S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' Cantilever: C_b = 1.0 over the overhang length.':'') || null));
+  S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' An overhang governs: twice its length, C_b = 1.0.':'') || null));
   const where=q=>`${q.run}, element ${q.elem} ${q.end}-end, ${f(q.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}`;
   const scope=by===g.by?'every combination':'the chosen combination';
   // 1. required strengths: each one's largest value over the member (every element end) and the combinations
