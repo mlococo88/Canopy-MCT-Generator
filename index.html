@@ -723,8 +723,19 @@ table.md-sum tr.mdRow:hover td{background:#f4f1ea}
       <div class="panel-head"><h2>Deflection and drift</h2><span class="tag">serviceability · unfactored loads</span></div>
       <div class="panel-body"><div id="mdDefl"></div></div>
     </div>
+    <div class="panel" id="mdExplorer">
+      <div class="panel-head"><h2>Member explorer</h2><span class="tag">select a member · forces · deflection · worked check</span></div>
+      <div class="panel-body">
+        <div class="toolbar" style="margin:0 0 6px;gap:8px;align-items:center"><label style="font-size:12px">Member</label><select id="mdPickSel" class="inp" style="max-width:420px"></select><span id="mdLegend"></span></div>
+        <div id="mdPick" style="height:460px;border:1px solid #e2ded4;border-radius:4px"></div>
+        <div id="mdHead" style="margin:10px 0 6px"></div>
+        <div class="toolbar" style="margin:0 0 4px;gap:8px;align-items:center;flex-wrap:wrap"><label style="font-size:12px">Forces under</label><select id="mdRun" class="inp" style="max-width:300px"></select><label style="font-size:12px">Deflection under</label><select id="mdDset" class="inp" style="max-width:240px"></select></div>
+        <div id="mdDiag" style="height:640px"></div>
+        <div class="hint">Moment, shear, axial force and torsion along the member from the second-order analysis of the chosen combination (values at the element ends; M<sub>x</sub> and the V that goes with it are about the strong axis; for a column, bending in the frame plane). Signs as the analysis rows (MIDAS local axes): for a beam, + M<sub>x</sub> = top fibre in tension (hogging). Deflection: unfactored service loads, first-order; beams relative to the line between each span's supports (overhangs: relative to the support), columns relative to the base.</div>
+      </div>
+    </div>
     <div class="panel">
-      <div class="panel-head"><h2 id="mdDetailTitle">Worked check</h2><span class="tag">governing point of the selected member</span></div>
+      <div class="panel-head"><h2 id="mdDetailTitle">Worked check</h2><span class="tag">governing point of the chosen combination</span></div>
       <div class="panel-body"><div id="mdDetail"></div></div>
     </div>
   </div>
@@ -4200,6 +4211,13 @@ async function buildReportModel(){
       const dW=MD_TYPES.reduce((m,[k,nm])=>(m[k]=nm,m),{});
       sumItems.push({type:'table', caption:'HSS members: governing ratio of each member type (AISC 360-16, details in [[M-sum]]).', head:['Member type','Governing member','Section','Ratio','Check','Combination'],
         rows:types.map(t=>{ const g=govOf(t); return [dW[t]||t, g.label, g.secName, rc(g.worst.r.gov), MD_CHECK[g.worst.r.govKey](g.worst.r), g.worst.run]; })});
+      let fig3d=null; const figDiag={};
+      try{ const sc=document.getElementById('plotScratch'); mdDraw3D(sc,R,null,{h:440}); fig3d=rpFig(await rpSnap('plotScratch',760,440),'HSS members coloured by their governing ratio: green ≤ 0.5, olive ≤ 0.8, amber ≤ 1.0, red > 1.0; grey: W-shape, not checked for strength.');
+        const sets=mdServiceSets(R);
+        for(const t of types){ const g=govOf(t), rn=R.full.find(r=>r.name===g.worst.run), dr=R.drift.find(x=>x.g===g.label), set=g.type==='col'?((dr&&sets.find(x=>x.name.endsWith('·'+dr.w)))||sets[2]||sets[0]):(sets.find(x=>x.name==='D + S')||sets[0]);
+          if(!rn||!set) continue; mdDrawDiagrams(sc,R,g,rn,set,g.worst.at,{h:620});
+          figDiag[t]=rpFig(await rpSnap('plotScratch',760,620),`${g.label} (${g.secName}): moment, shear, axial force and torsion under ${rn.name} (second-order analysis; dotted line: the governing point), and the deflection under ${set.name} (unfactored). For a beam, + M_x = top fibre in tension.`); }
+        Plotly.purge(sc); }catch(e){ console.warn('member figures',e); }
       const subs=[{title:'Basis', key:'M-sum', items:F([
         rpNote(`Rectangular HSS members, AISC 360-16 LRFD, ${R.grade.name} (F_y = ${R.grade.Fy} ksi, F_u = ${R.grade.Fu} ksi${o.grade==='A1085'?', nominal wall thickness':', design wall thickness t_des = 0.93 t_nom'}). Every HSS member is checked at both ends of every analysis element for every LRFD combination: tension (D2), compression (E3, E7), flexure about both axes (F7), shear (G4, k_v = 5), torsion (H3.1) and combined forces (H1.1; H3.2 when T_r > 0.2T_c). Worked on the [[tab:members|Members tab]].`),
         rpNote(dam?`Direct Analysis Method (AISC 360-16 Ch. C): a second-order elastic (P-Δ) analysis of the in-app model with 0.8τ_b EI and 0.8EA (C2.3, τ_b from each element's axial force), notional loads N_i = 0.002Y_i at every node (C2.2b) in every combination: in each of ±X${is3d?' and ±Y':''} for the gravity-only combinations and in the direction of the net lateral load for the others; K = 1 for every member (C3).`
@@ -4210,10 +4228,11 @@ async function buildReportModel(){
         rpNote('Tension: A_e = A_g (welded end connections, no holes, U = 1.0). Flat widths b = B − 3t, h = H − 3t (B4.1b(d)). Torsion with biaxial bending (H3-6): both flexure ratios and the larger shear ratio. Connections are not checked.'),
         other.length?rpNote(`Not checked for strength (W-shapes): ${[...new Set(other.map(g=>g.secName))].join(', ')}, ${other.length} member${other.length>1?'s':''}. Their deflections are checked in [[M-defl]].`,true):null,
         {type:'table', caption:'Governing ratio of every HSS member.', head:['Member','Section','Ratio','Governing check','Combination','Location','P / M_x / M_y / V / T'],
-          rows:hss.map(g=>{ const W=g.worst; return [g.label,g.secName,rc(W.r.gov),MD_CHECK[W.r.govKey](W.r),W.run,f(W.at,2)+' ft',`${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}`]; }), wide:true}])}];
+          rows:hss.map(g=>{ const W=g.worst; return [g.label,g.secName,rc(W.r.gov),MD_CHECK[W.r.govKey](W.r),W.run,f(W.at,2)+' ft',`${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}`]; }), wide:true}, fig3d])}];
       types.forEach(t=>{ const g=govOf(t); subs.push({title:`${dW[t]||t}: governing member ${g.label} (${g.secName})`, items:[
         rpNote(`Governing point: ${g.worst.run}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member. Ratio ${f(g.worst.r.gov,3)} ${g.worst.r.gov<=1?'OK':'NG'}.`),
-        {type:'steps', scope:'md-'+t, steps:mdSteps(g)}]}); });
+        figDiag[t]||null,
+        {type:'steps', scope:'md-'+t, steps:mdSteps(g)}].filter(Boolean)}); });
       const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
       subs.push({title:'Deflection and drift', key:'M-defl', items:[
         rpNote(`Unfactored load cases, nominal stiffness, first-order analysis. Spans: the deflection relative to the line between the span's supports, limit L/${o.defl.S} under S and L/${o.defl.DS} under D + S. Overhangs: the tip relative to the support, limit 2L/${o.defl.S} and 2L/${o.defl.DS} (L = overhang). Columns: drift of the top relative to the base under D + ${o.defl.wFac}W (the wind at a 10-year return period, ASCE 7-16 Commentary C.2.2), limit H/${o.defl.drift}.`),
@@ -7810,8 +7829,9 @@ function mdLengths(g, eid, o, topComp){
   let Lb=g.type==='rafter'?(o.rafterLb==='columns'?Lx:(o.rafterLb==='purlins'?Ly:(topComp?Ly:Lx))):Ly;
   return {Kx, Ky, Lx, Ly, Lb, Lcx:Kx*Lx*12, Lcy:Ky*Ly*12, LbIn:Lb*12, cant:sB.cant||sX.cant, sB, sX};
 }
-// a rafter's top flange is in compression when its local momentY is positive (MIDAS sign: + = sagging for a member whose local z points up)
-const MD_TOP_SIGN=+1;
+// a rafter's top flange is in compression when its internal local momentY is negative: in the analysis rows (MIDAS layout) a
+// positive momentY of a member whose local z points up is hogging (top fibre in tension), e.g. + over the column of a loaded overhang
+const MD_TOP_SIGN=-1;
 function mdCompute(){
   const s=state, o=mdOpts(), t0=performance.now();
   if(!window.SharedAiscHss) return {error:'The AISC HSS engine (shared/aisc-hss.js) is not embedded in this file; run tools/sync-bpad.py.'};
@@ -7825,24 +7845,18 @@ function mdCompute(){
     if(r.ratio>worstRatio){ worstRatio=r.ratio; worstRun=rn.name; } });
   const capCache=new Map();
   const capOf=(g,L)=>{ const k=g.secName+'|'+[L.Lcx,L.Lcy,L.LbIn].map(v=>v.toFixed(3)).join('|'); if(!capCache.has(k)) capCache.set(k,SharedAiscHss.capacities(SharedAiscHss.section(g.secName,o.grade),{Lcx:L.Lcx,Lcy:L.Lcy,Lb:L.LbIn,Cb:o.Cb})); return capCache.get(k); };
-  groups.forEach(g=>{
-    g.worst=null;
-    if(!g.hss) return;
-    g.elems.forEach(e=>{
-      runs.forEach(rn=>{ if(!rn.ends) return; const fe=rn.ends.get(e.id); if(!fe) return;
-        [['I',-1,0],['J',1,6]].forEach(([end,sg,o0])=>{
-          const v=k=>sg*fe[o0+k];
-          const d={P:v(0)/1000, Vy:v(1)/1000, Vx:v(2)/1000, T:v(3)*12/1000, Mx:v(4)*12/1000, My:v(5)*12/1000};
-          const topComp=MD_TOP_SIGN*v(4)>0;
-          const L=mdLengths(g, e.id, o, topComp), cap=capOf(g,L), r=SharedAiscHss.ratios(cap,d);
-          if(!g.worst || r.gov>g.worst.r.gov){
-            const at=g.sx[g.chain.indexOf(end==='I'?e.n1:e.n2)];
-            g.worst={r, d, cap, L, run:rn.name, elem:e.id, end, at};
-          }
-        });
-      });
-    });
-  });
+  const evalRun=(g,rn)=>{ let w=null; if(!g.hss||!rn.ends) return null;
+    g.elems.forEach(e=>{ const fe=rn.ends.get(e.id); if(!fe) return;
+      [['I',-1,0],['J',1,6]].forEach(([end,sg,o0])=>{
+        const v=k=>sg*fe[o0+k];
+        const d={P:v(0)/1000, Vy:v(1)/1000, Vx:v(2)/1000, T:v(3)*12/1000, Mx:v(4)*12/1000, My:v(5)*12/1000};
+        const topComp=MD_TOP_SIGN*v(4)>0;
+        const L=mdLengths(g, e.id, o, topComp), cap=capOf(g,L), r=SharedAiscHss.ratios(cap,d);
+        if(!w || r.gov>w.r.gov) w={r, d, cap, L, run:rn.name, elem:e.id, end, at:g.sx[g.chain.indexOf(end==='I'?e.n1:e.n2)]};
+      }); });
+    return w; };
+  groups.forEach(g=>{ g.worst=null; if(!g.hss) return;
+    runs.forEach(rn=>{ const w=evalRun(g,rn); if(w&&(!g.worst||w.r.gov>g.worst.r.gov)) g.worst=w; }); });
   // serviceability (first-order, unfactored cases, nominal stiffness)
   const u=lc=>R.cases[lc]&&R.cases[lc].u, ix=R.nodeIdx, uD=u('DL'), uS=u('Snow');
   const dz=(U,n)=>U?U[6*ix.get(n)+2]:0;
@@ -7874,15 +7888,15 @@ function mdCompute(){
     if(best) drift.push({g:g.label, sec:g.secName, H, d:best.d, w:best.w, lim, ratio:best.d/lim});
   });
   const ms=performance.now()-t0;
-  return {o, groups, runs:runs.map(r=>({name:r.name, ratio:r.ratio, it:r.it, notional:r.notional})), worstRatio, worstRun, notConv, errs, defl, drift, ms, nRuns:runs.length, method:o.method, grade:SharedAiscHss.grades[o.grade]};
+  return {o, groups, evalRun, full:runs, ana:R, mesh, runs:runs.map(r=>({name:r.name, ratio:r.ratio, it:r.it, notional:r.notional})), worstRatio, worstRun, notConv, errs, defl, drift, ms, nRuns:runs.length, method:o.method, grade:SharedAiscHss.grades[o.grade]};
 }
 function mdSig(){ return modelSignature()+'|'+JSON.stringify(mdOpts()); }
 function mdEnsure(){ const sig=mdSig(); if(MD.sig!==sig || !MD.res){ try{ MD.res=mdCompute(); }catch(e){ console.error(e); MD.res={error:e.message}; } MD.sig=sig; } return MD.res; }
 const MD_CHECK={P:r=>'Axial ('+r.Pkind+')', Mx:()=>'Flexure, major axis', My:()=>'Flexure, minor axis', Vx:()=>'Shear (H walls)', Vy:()=>'Shear (B walls)', T:()=>'Torsion', H1:r=>'Combined axial + flexure, '+r.H1ref, H3:()=>'Combined with torsion, H3-6'};
 const mdStatus=v=>v==null?'—':`<b style="color:${v<=1.0?'var(--moss)':'var(--rust)'}">${isFinite(v)?f(v,2):'∞'} ${v<=1.0?'OK':'NG'}</b>`;
 // worked steps of a member's governing point (shared/steps.js format)
-function mdSteps(g){
-  const W=g.worst; if(!W) return [];
+function mdSteps(g, Wp){
+  const W=Wp||g.worst; if(!W) return [];
   const o=MD.res.o, L=W.L, d=W.d, P='md';
   const st=(id,label,sym,eq,sub,value,unit,dd,ref,note)=>{ const x={id:P+'.'+id,label,sym,eq:eq||'',sub:sub||'',value,unit:unit||'',d:dd==null?2:dd,ref:ref||''}; if(note) x.note=note; return x; };
   const S=[];
@@ -7942,9 +7956,90 @@ function mdRender(force){
   st.innerHTML='<span style="color:var(--muted)">Running the second-order analysis…</span>';
   setTimeout(()=>{ const R=mdEnsure(); mdRenderResults(R); },20);
 }
+const MD_ROLE={col:'Column: a beam-column. Axial force with bending about both axes (combined, AISC 360-16 H1.1); buckling length from the base to the roof beam.',
+  rafter:'Beam (rafter): bending and shear in the frame plane, with the frame’s axial force (checked as a beam-column, H1.1); braced by the eave beams and purlins out of plane.',
+  eave:'Beam (eave beam): spans between the frames; bending about both axes (gravity, and wind along the length), shear and torsion.',
+  purlin:'Beam (purlin): spans between the frames; bending, shear and torsion.'};
+const MD_TYPE_NM={col:'Column', rafter:'Rafter', eave:'Eave beam', purlin:'Purlin', other:'Member'};
+const mdColor=v=>v==null?'#a8a29a':v<=0.5?'#4a8c3a':v<=0.8?'#8aa531':v<=1.0?'#d39a1e':'#b3502d';
+const MD_LEGEND='<span style="font-size:11px;color:var(--muted)">Colour by governing ratio: <b style="color:#4a8c3a">■</b> ≤ 0.5 <b style="color:#8aa531">■</b> ≤ 0.8 <b style="color:#d39a1e">■</b> ≤ 1.0 <b style="color:#b3502d">■</b> &gt; 1.0 <b style="color:#a8a29a">■</b> not checked (W-shape). Click a member to select it.</span>';
+// 3D view of the structure, members coloured by their governing ratio; sel = the selected member (thick)
+function mdDraw3D(div, R, sel, opt){
+  const el=typeof div==='string'?document.getElementById(div):div; if(!el||typeof Plotly==='undefined') return;
+  const N=R.ana.model.nodes, tr=[];
+  R.groups.forEach(g=>{ const P=g.chain.map(n=>N.get(n)), v=g.worst?g.worst.r.gov:null, on=g.key===sel;
+    const ht=`${g.label} (${MD_TYPE_NM[g.type]||''})<br>${g.secName}<br>${v==null?'not checked (W-shape)':'ratio '+f(v,2)+(v<=1?' OK':' NG')}`;
+    tr.push({type:'scatter3d', mode:'lines+markers', x:P.map(p=>p[0]), y:P.map(p=>p[1]), z:P.map(p=>p[2]), meta:g.key, customdata:P.map(()=>g.key),
+      line:{color:on?'#1d4e6b':mdColor(v), width:on?11:6}, marker:{size:on?3:2, color:on?'#1d4e6b':mdColor(v)}, hovertext:ht, hoverinfo:'text', showlegend:false}); });
+  const g=R.groups.find(x=>x.key===sel);
+  if(g){ const P=N.get(g.chain[Math.floor(g.chain.length/2)]); tr.push({type:'scatter3d', mode:'text', x:[P[0]], y:[P[1]], z:[P[2]], text:[' '+g.label], textfont:{size:13,color:'#1d4e6b'}, textposition:'top center', hoverinfo:'skip', showlegend:false}); }
+  const flat=R.ana.planar;
+  const layout={margin:{l:0,r:0,t:0,b:0}, height:(opt&&opt.h)||460, paper_bgcolor:'#fff', showlegend:false,
+    scene:{aspectmode:'data', xaxis:{title:'X (ft)'}, yaxis:{title:'Y (ft)'}, zaxis:{title:'Z (ft)'}, camera:flat?{eye:{x:0.01,y:-2.2,z:0.35}}:{eye:{x:-1.5,y:-1.6,z:0.9}}}};
+  if(opt&&opt.keepCam&&el._fullLayout&&el._fullLayout.scene&&el._fullLayout.scene.camera) layout.scene.camera=el._fullLayout.scene.camera;
+  Plotly.react(el, tr, layout, Object.assign({}, PLOT_CFG, {responsive:true}));
+  if(opt&&opt.onPick && !el._mdBound){ el._mdBound=true; el.on('plotly_click', ev=>{ const pt=ev.points&&ev.points[0]; const k=pt&&(pt.customdata||(pt.data&&pt.data.meta)); if(k) opt.onPick(k); }); }
+}
+// internal forces along a member for one analysis run (element end values, straight between nodes)
+function mdDiagData(R, g, rn){
+  const x=[], q={N:[],Vx:[],Vy:[],Mx:[],My:[],T:[]};
+  g.elems.forEach((e,i)=>{ const fe=rn.ends.get(e.id); if(!fe) return; const xi=g.sx[i], xj=g.sx[i+1];
+    [[xi,-1,0],[xj,1,6]].forEach(([xx,sg,o0])=>{ x.push(xx); const v=k=>sg*fe[o0+k];
+      q.N.push(uForceVal(v(0))); q.Vy.push(uForceVal(v(1))); q.Vx.push(uForceVal(v(2))); q.T.push(uMomVal(v(3))); q.Mx.push(uMomVal(v(4))); q.My.push(uMomVal(v(5))); }); });
+  return {x, q};
+}
+// service deflections along a member: beams, vertical relative to each span's supports (overhangs: to the support);
+// columns, horizontal relative to the base (X and Y)
+function mdServiceSets(R){
+  const A=R.ana, u=lc=>A.cases[lc]&&A.cases[lc].u, wf=R.o.defl.wFac, out=[];
+  if(u('Snow')) out.push({name:'S', U:[[u('Snow'),1]]});
+  out.push({name:'D + S', U:[[u('DL'),1],[u('Snow'),1]].filter(x=>x[0])});
+  A.model.cases.filter(c=>c!=='DL'&&c!=='Snow').forEach(w=>out.push({name:`D + ${wf}·${w}`, U:[[u('DL'),1],[u(w),wf]].filter(x=>x[0])}));
+  return out;
+}
+function mdDeflData(R, g, set){
+  const ix=R.ana.nodeIdx, val=(n,k)=>set.U.reduce((a,[U,fc])=>a+fc*U[6*ix.get(n)+k],0);
+  if(g.type==='col'){ const b=g.chain[0]; return {x:g.sx.slice(), lines:[['ΔX',g.chain.map(n=>uDispVal(val(n,0)-val(b,0)))],['ΔY',g.chain.map(n=>uDispVal(val(n,1)-val(b,1)))]], kind:'col'}; }
+  const segs=(g.type==='rafter'?g.segX:g.segB), x=[], y=[];
+  segs.forEach(sg=>{ const nodes=g.chain.slice(sg.i0,sg.i1+1), z=n=>val(n,2), x0=g.sx[sg.i0];
+    nodes.forEach((n,k)=>{ const t=(g.sx[sg.i0+k]-x0)/(sg.L||1); let d;
+      if(sg.cant==='start') d=z(n)-z(nodes[nodes.length-1]); else if(sg.cant==='end') d=z(n)-z(nodes[0]); else d=z(n)-(z(nodes[0])+(z(nodes[nodes.length-1])-z(nodes[0]))*t);
+      x.push(g.sx[sg.i0+k]); y.push(uDispVal(d)); }); x.push(null); y.push(null); });
+  return {x, lines:[['δ (vertical, relative to the supports)',y]], kind:'beam'};
+}
+function mdDrawDiagrams(div, R, g, rn, set, at, opt){
+  const el=typeof div==='string'?document.getElementById(div):div; if(!el||typeof Plotly==='undefined') return;
+  const D=mdDiagData(R,g,rn), F=mdDeflData(R,g,set), FL=uForceLbl(), ML=uMomLbl(), DL=uDispLbl();
+  const ax=(i)=>i?('y'+(i+1)):'y', xa=(i)=>i?('x'+(i+1)):'x';
+  const rows=[[['M_x (major)',D.q.Mx,'#1d4e6b'],['M_y (minor)',D.q.My,'#c98a1a']],[['V (H walls, with M_x)',D.q.Vx,'#1d4e6b'],['V (B walls, with M_y)',D.q.Vy,'#c98a1a']],[['N (+ tension)',D.q.N,'#4a6b22'],['T (torsion, '+ML+')',D.q.T,'#9b6a9b']],F.lines.map((l,i)=>[l[0],l[1],i?'#c98a1a':'#b3502d'])];
+  const titles=[`Moment (${ML}), ${rn.name}`,`Shear (${FL})`,`Axial (${FL}) and torsion`,`Deflection (${DL}), ${set.name}, unfactored`];
+  const tr=[]; rows.forEach((r,i)=>r.forEach(([nm,y,c])=>tr.push({type:'scatter', mode:'lines', x:i===3?F.x:D.x, y, name:nm, xaxis:xa(i), yaxis:ax(i), line:{color:c,width:2}, fill:'tozeroy', fillcolor:c+'22', hovertemplate:nm+': %{y:.3f}<br>x = %{x:.2f} ft<extra></extra>', legendgroup:'r'+i})));
+  const H=(opt&&opt.h)||640, gap=0.06, h=(1-3*gap)/4, layout={height:H, margin:{l:62,r:12,t:24,b:36}, paper_bgcolor:'#fff', plot_bgcolor:'#fff', showlegend:true, legend:{orientation:'h', y:-0.07, font:{size:10}}, shapes:[], annotations:[]};
+  for(let i=0;i<4;i++){ const top=1-i*(h+gap), bot=top-h;
+    layout[(i?'yaxis'+(i+1):'yaxis')]={domain:[bot,top], zeroline:true, zerolinecolor:'#999', gridcolor:'#eee', tickfont:{size:10}};
+    layout[(i?'xaxis'+(i+1):'xaxis')]={anchor:ax(i), matches:i?'x':undefined, showticklabels:i===3, gridcolor:'#eee', tickfont:{size:10}, title:i===3?{text:`distance along the member from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (ft)`, font:{size:11}}:undefined};
+    layout.annotations.push({text:titles[i], xref:'paper', yref:'paper', x:0, y:top+0.005, xanchor:'left', yanchor:'bottom', showarrow:false, font:{size:11,color:'#16191d'}});
+    if(at!=null && i<3) layout.shapes.push({type:'line', xref:xa(i), yref:'paper', x0:at, x1:at, y0:bot, y1:top, line:{color:'#b3502d',width:1,dash:'dot'}}); }
+  // supports / brace points of the member
+  Plotly.react(el, tr, layout, PLOT_CFG);
+}
+function mdSummaryHTML(R){
+  const hss=R.groups.filter(g=>g.hss&&g.worst);
+  if(MD.view==='size'){
+    const by={}; hss.forEach(g=>{ const k=g.type+'|'+g.secName; (by[k]=by[k]||[]).push(g); });
+    const rows=Object.values(by).map(L=>{ const g=L.reduce((m,x)=>x.worst.r.gov>m.worst.r.gov?x:m,L[0]), W=g.worst;
+      return `<tr class="mdRow${MD.sel===g.key?' sel':''}" data-k="${aesc(g.key)}" style="cursor:pointer"><td>${MD_TYPE_NM[g.type]}</td><td>${aesc(g.secName)}</td><td>${L.length}</td><td>${aesc(g.label)}</td><td>${mdStatus(W.r.gov)}</td><td>${aesc(MD_CHECK[W.r.govKey](W.r))}</td><td>${aesc(W.run)}</td></tr>`; }).join('');
+    return `<table class="rpt md-sum"><thead><tr><th>Type</th><th>Section</th><th>Members</th><th>Governing member</th><th>Ratio</th><th>Governing check</th><th>Combination</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  const rows=hss.map(g=>{ const W=g.worst;
+    return `<tr class="mdRow${MD.sel===g.key?' sel':''}" data-k="${aesc(g.key)}" style="cursor:pointer"><td>${aesc(g.label)}</td><td>${MD_TYPE_NM[g.type]}</td><td>${aesc(g.secName)}</td><td>${mdStatus(W.r.gov)}</td><td>${aesc(MD_CHECK[W.r.govKey](W.r))}</td><td>${aesc(W.run)}</td><td>${f(W.at,2)} ft</td>`
+      +`<td>${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}</td></tr>`; }).join('');
+  return `<table class="rpt md-sum"><thead><tr><th>Member</th><th>Type</th><th>Section</th><th>Ratio</th><th>Governing check</th><th>Combination</th><th>Location</th><th>P / M<sub>x</sub> / M<sub>y</sub> / V / T ratios</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 function mdRenderResults(R){
-  const st=document.getElementById('mdStatus'), sum=document.getElementById('mdSummary'), dfl=document.getElementById('mdDefl'), det=document.getElementById('mdDetail');
-  if(R.error){ st.innerHTML=`<b style="color:var(--rust)">⚠ ${aesc(R.error)}</b>`; sum.innerHTML=dfl.innerHTML=det.innerHTML=''; return; }
+  const st=document.getElementById('mdStatus'), sum=document.getElementById('mdSummary'), dfl=document.getElementById('mdDefl');
+  if(R.error){ st.innerHTML=`<b style="color:var(--rust)">⚠ ${aesc(R.error)}</b>`; sum.innerHTML=dfl.innerHTML=''; document.getElementById('mdExplorer').style.display='none'; return; }
+  document.getElementById('mdExplorer').style.display='';
   const dam=R.method==='dam', hssN=R.groups.filter(g=>g.hss).length, other=R.groups.filter(g=>!g.hss);
   const worst=R.groups.filter(g=>g.worst).reduce((m,g)=>!m||g.worst.r.gov>m.worst.r.gov?g:m,null);
   const ng=R.groups.filter(g=>g.worst&&g.worst.r.gov>1).length + R.defl.filter(x=>x.ratio>1).length + R.drift.filter(x=>x.ratio>1).length;
@@ -7957,23 +8052,55 @@ function mdRenderResults(R){
     + (worst?` Governing: <b>${aesc(worst.label)}</b> ${mdStatus(worst.worst.r.gov)}.`:'')
     + (other.length?`<br><span style="color:var(--muted)">Not checked for strength (W-shapes; this tab checks rectangular HSS only): ${aesc([...new Set(other.map(g=>g.secName))].join(', '))} — ${other.length} member${other.length>1?'s':''}. Their deflections are checked below.</span>`:'')
     + warn;
-  const rows=R.groups.filter(g=>g.hss).map(g=>{ const W=g.worst; if(!W) return `<tr><td>${aesc(g.label)}</td><td>${aesc(g.secName)}</td><td colspan="5">no results</td></tr>`;
-    return `<tr class="mdRow${MD.sel===g.key?' sel':''}" data-k="${aesc(g.key)}" style="cursor:pointer"><td>${aesc(g.label)}</td><td>${aesc(g.secName)}</td><td>${mdStatus(W.r.gov)}</td><td>${aesc(MD_CHECK[W.r.govKey](W.r))}</td><td>${aesc(W.run)}</td><td>${f(W.at,2)} ft</td>`
-      +`<td>${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}</td></tr>`; }).join('');
-  sum.innerHTML=hssN?`<table class="rpt md-sum"><thead><tr><th>Member</th><th>Section</th><th>Ratio</th><th>Governing check</th><th>Combination</th><th>Location</th><th>P / M<sub>x</sub> / M<sub>y</sub> / V / T ratios</th></tr></thead><tbody>${rows}</tbody></table><div class="hint">Click a member for its worked check. The ratios in the last column are at the governing point.</div>`:'<p class="hint">No HSS members in the model.</p>';
-  sum.querySelectorAll('.mdRow').forEach(tr=>tr.onclick=()=>{ MD.sel=tr.dataset.k; mdRenderResults(R); });
+  MD.view=MD.view||'member';
+  sum.innerHTML=(hssN?`<div class="seg" id="mdView" style="margin-bottom:6px;max-width:320px"><button data-v="member" class="${MD.view==='member'?'on':''}">By member</button><button data-v="size" class="${MD.view==='size'?'on':''}">By section size</button></div>`+mdSummaryHTML(R)
+    +`<div class="hint">${MD.view==='size'?'One row per member type and section: the governing member of all the members of that size.':'One row per member: its governing point over every element end and combination.'} Click a row (or a member in the 3D view below) to see its diagrams and worked check.</div>`:'<p class="hint">No HSS members in the model.</p>');
+  const vw=document.getElementById('mdView'); if(vw) vw.onclick=e=>{ const b=e.target.closest('button[data-v]'); if(!b) return; MD.view=b.dataset.v; mdRenderResults(R); };
+  sum.querySelectorAll('.mdRow').forEach(tr=>tr.onclick=()=>{ mdSelect(R,tr.dataset.k); document.getElementById('mdExplorer').scrollIntoView({behavior:'smooth',block:'start'}); });
+  // deflection table
   const drow=x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>${aesc(x.span)}</td><td>${aesc(x.load)}</td><td>${uDisp(Math.abs(x.d))} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (${x.cant?'2L':'L'}/${x.den})</td><td>${mdStatus(x.ratio)}</td></tr>`;
   const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
-  const dr=dmax.map(drow).join(''), dall=R.defl.map(drow).join('');
   const dd=R.drift.map(x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>H = ${f(x.H,2)} ft</td><td>D + ${R.o.defl.wFac}·${aesc(x.w)}</td><td>${uDisp(x.d)} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (H/${R.o.defl.drift})</td><td>${mdStatus(x.ratio)}</td></tr>`).join('');
   const dh='<thead><tr><th>Member</th><th>Section</th><th>Span</th><th>Load</th><th>Deflection</th><th>Limit</th><th>Ratio</th></tr></thead>';
-  dfl.innerHTML=`<table class="rpt md-dfl">${dh}<tbody>${dr}${dd}</tbody></table><div class="hint">The largest ratio of each member and load, and the drift of each column.</div>`
-    +`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px">Every span and overhang (${R.defl.length} rows)</summary><table class="rpt md-dfl">${dh}<tbody>${dall}</tbody></table></details>`;
-  const g=R.groups.find(x=>x.key===MD.sel) || worst;
-  if(g&&g.worst){ MD.sel=g.key; sum.querySelectorAll('.mdRow').forEach(tr=>tr.classList.toggle('sel',tr.dataset.k===g.key));
-    document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
-    det.innerHTML=`<div class="hint" style="margin-bottom:6px">Governing point: ${aesc(g.worst.run)}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member (${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}). Ratio ${mdStatus(g.worst.r.gov)}.</div>`+mdStepsHTML(mdSteps(g)); }
-  else det.innerHTML='';
+  dfl.innerHTML=`<table class="rpt md-dfl">${dh}<tbody>${dmax.map(drow).join('')}${dd}</tbody></table><div class="hint">The largest ratio of each member and load, and the drift of each column.</div>`
+    +`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px">Every span and overhang (${R.defl.length} rows)</summary><table class="rpt md-dfl">${dh}<tbody>${R.defl.map(drow).join('')}</tbody></table></details>`;
+  // member picker
+  const pick=document.getElementById('mdPickSel');
+  pick.innerHTML=R.groups.map(g=>`<option value="${aesc(g.key)}">${aesc(g.label)} · ${MD_TYPE_NM[g.type]} · ${aesc(g.secName)}${g.worst?' · '+f(g.worst.r.gov,2):' · not checked'}</option>`).join('');
+  pick.onchange=()=>mdSelect(R,pick.value);
+  document.getElementById('mdLegend').innerHTML=MD_LEGEND;
+  const g=R.groups.find(x=>x.key===MD.sel) || worst || R.groups[0];
+  mdSelect(R, g&&g.key, true);
+}
+function mdSelect(R, key, first){
+  const g=R.groups.find(x=>x.key===key); if(!g) return;
+  if(MD.sel!==key){ MD.run=null; MD.dset=null; }
+  MD.sel=key;
+  document.querySelectorAll('#mdSummary .mdRow').forEach(tr=>tr.classList.toggle('sel',tr.dataset.k===key));
+  const pick=document.getElementById('mdPickSel'); if(pick) pick.value=key;
+  mdDraw3D('mdPick', R, key, {keepCam:!first, onPick:k=>mdSelect(MD.res,k)});
+  // header: what the member is, how it is checked
+  const lenTxt=g.type==='rafter'?`${f(g.L,2)} ft long; in-plane spans ${g.segX.map(s=>f(s.L,2)).join(', ')} ft; braced out of plane at ${g.segB.length-1} point${g.segB.length===2?'':'s'}`
+    :`${f(g.L,2)} ft long`+(g.type!=='col'?`; spans ${g.segB.map(s=>f(s.L,2)+(s.cant?' (overhang)':'')).join(', ')} ft`:'');
+  document.getElementById('mdHead').innerHTML=`<div style="font-size:14px;font-weight:700">${aesc(g.label)} <span style="font-weight:400;color:var(--muted)">· ${MD_TYPE_NM[g.type]} · ${aesc(g.secName)} · ${lenTxt}</span></div>`
+    +`<div class="hint" style="margin:4px 0">${MD_ROLE[g.type]||''}${g.hss?'':' <b>W-shape: not checked for strength here; the diagrams and deflections are shown.</b>'}</div>`
+    +(g.worst?`<div style="font-size:12px">Governing: ${mdStatus(g.worst.r.gov)} ${aesc(MD_CHECK[g.worst.r.govKey](g.worst.r))}, ${aesc(g.worst.run)}, ${f(g.worst.at,2)} ft.</div>`:'');
+  // combination and deflection-load selectors
+  const runs=R.full.filter(r=>r.ends), sets=mdServiceSets(R);
+  if(!MD.run || !runs.some(r=>r.name===MD.run)) MD.run=g.worst?g.worst.run:(runs[0]&&runs[0].name);
+  if(!MD.dset || !sets.some(x=>x.name===MD.dset)){ const dr=R.drift.find(x=>x.g===g.label); MD.dset=g.type==='col'?((dr&&sets.find(x=>x.name.endsWith('·'+dr.w)))||sets[2]||sets[0]).name:'D + S'; }
+  const rs=document.getElementById('mdRun'), ds=document.getElementById('mdDset');
+  rs.innerHTML=runs.map(r=>`<option${r.name===MD.run?' selected':''}>${aesc(r.name)}</option>`).join('');
+  ds.innerHTML=sets.map(x=>`<option${x.name===MD.dset?' selected':''}>${aesc(x.name)}</option>`).join('');
+  rs.onchange=()=>{ MD.run=rs.value; mdSelect(R,key); }; ds.onchange=()=>{ MD.dset=ds.value; mdSelect(R,key); };
+  const rn=runs.find(r=>r.name===MD.run), set=sets.find(x=>x.name===MD.dset);
+  const W=g.hss&&rn?R.evalRun(g,rn):null;
+  mdDrawDiagrams('mdDiag', R, g, rn, set, W?W.at:null);
+  // worked check at the governing point of the chosen combination
+  const det=document.getElementById('mdDetail');
+  document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
+  if(!g.hss){ det.innerHTML='<p class="hint">W-shape: not checked for strength on this tab (rectangular HSS only).</p>'; return; }
+  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${rn.name===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(rn.name)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${rn.name===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W));
 }
 
 // ============================================================================
