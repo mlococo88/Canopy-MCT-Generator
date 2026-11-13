@@ -7901,7 +7901,7 @@ function mdEnsure(){ const sig=mdSig(); if(MD.sig!==sig || !MD.res){ try{ MD.res
 const MD_CHECK={P:r=>'Axial ('+r.Pkind+')', Mx:()=>'Flexure, major axis', My:()=>'Flexure, minor axis', Vx:()=>'Shear (H walls)', Vy:()=>'Shear (B walls)', T:()=>'Torsion', H1:r=>'Combined axial + flexure, '+r.H1ref, H3:()=>'Combined with torsion, H3-6'};
 const mdStatus=v=>v==null?'—':`<b style="color:${v<=1.0?'var(--moss)':'var(--rust)'}">${isFinite(v)?f(v,2):'∞'} ${v<=1.0?'OK':'NG'}</b>`;
 // worked steps of a member's governing point (shared/steps.js format)
-function mdSteps(g, Wp){
+function mdSteps(g, Wp, by){
   const W=Wp||g.worst; if(!W) return [];
   const o=MD.res.o, L=W.L, d=W.d, P='md';
   const st=(id,label,sym,eq,sub,value,unit,dd,ref,note)=>{ const x={id:P+'.'+id,label,sym,eq:eq||'',sub:sub||'',value,unit:unit||'',d:dd==null?2:dd,ref:ref||''}; if(note) x.note=note; return x; };
@@ -7912,13 +7912,41 @@ function mdSteps(g, Wp){
   S.push(st('Lcx','Effective length, x','L_{cx}','K_{x}L_{x}',`${f(L.Kx,2)}(${f(L.Lx,2)})`,L.Lcx/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3',meth));
   S.push(st('Lcy','Effective length, y','L_{cy}','K_{y}L_{y}',`${f(L.Ky,2)}(${f(L.Ly,2)})`,L.Lcy/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3'));
   S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' Cantilever: C_b = 1.0 over the overhang length.':'') || null));
-  S.push(st('Pu','Required axial strength ('+(d.P>=0?'tension':'compression')+')','P_{u}','','',Math.abs(d.P),'kip',2,'',`Second-order analysis, ${W.run}, element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from the start of the member: the point that governs the combined check, with the forces acting there together (each limit state's own maximum is in the summary table).`));
-  S.push(st('Mux','Required flexural strength, about x','M_{ux}','','',Math.abs(d.Mx)/12,'kip-ft',2,''));
-  S.push(st('Muy','Required flexural strength, about y','M_{uy}','','',Math.abs(d.My)/12,'kip-ft',2,''));
-  S.push(st('Vux','Required shear, H walls','V_{ux}','','',Math.abs(d.Vx),'kip',2,''));
-  S.push(st('Vuy','Required shear, B walls','V_{uy}','','',Math.abs(d.Vy),'kip',2,''));
-  S.push(st('Tu','Required torsional strength','T_{u}','','',Math.abs(d.T)/12,'kip-ft',3,''));
-  return S.concat(SharedAiscHss.capSteps(W.cap,P), SharedAiscHss.demandSteps(W.cap,d,W.r,P));
+  by=by||(Wp?W.by:g.by)||{};
+  const where=q=>`${q.run}, element ${q.elem} ${q.end}-end, ${f(q.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}`;
+  const scope=by===g.by?'every combination':'the chosen combination';
+  // 1. required strengths: each one's largest value over the member (every element end) and the combinations
+  const D=[['Pc','Required axial strength, compression','P_{u}',q=>Math.abs(q.d.P),'kip',2],['Pt','Required axial strength, tension','P_{u}',q=>Math.abs(q.d.P),'kip',2],
+    ['Mx','Required flexural strength, about x','M_{ux}',q=>Math.abs(q.d.Mx)/12,'kip-ft',2],['My','Required flexural strength, about y','M_{uy}',q=>Math.abs(q.d.My)/12,'kip-ft',2],
+    ['Vx','Required shear strength, H walls (with Mx)','V_{ux}',q=>Math.abs(q.d.Vx),'kip',2],['Vy','Required shear strength, B walls (with My)','V_{uy}',q=>Math.abs(q.d.Vy),'kip',2],
+    ['T','Required torsional strength','T_{u}',q=>Math.abs(q.d.T)/12,'kip-ft',3]];
+  D.forEach(([k,label,sym,val,unit,dd],i)=>{ const q=by[k]; if(!q) return;
+    S.push(st('req.'+k,label,sym,'','',val(q),unit,dd,'',(i===0?`Second-order analysis. Each required strength here is the one giving the largest ratio for its own limit state over the member and ${scope}: `:'')+where(q)+'.')); });
+  // 2. design strengths (at the governing point's unbraced lengths)
+  S.push(...SharedAiscHss.capSteps(W.cap,P));
+  // 3. each limit state at its own maximum
+  const R_=(k,label,sym,num,den,dnum,dden,ratio,ref)=>S.push(Object.assign(st('dc.'+k,label,sym,`\\frac{${num}}{${den}}`,`\\frac{${dnum}}{${dden}}`,ratio,'',3,ref),{ok:ratio<=1}));
+  const fx=(v,n)=>f(v,n==null?2:n);
+  if(by.Pc){ const q=by.Pc; R_('Pc','Axial compression ratio','\\frac{P_u}{\\phi_cP_n}','P_u','\\phi_cP_n',fx(Math.abs(q.d.P)),fx(q.cap.comp.phiPn,1),q.r.P,'AISC 360-16 E3'); }
+  if(by.Pt){ const q=by.Pt; R_('Pt','Axial tension ratio','\\frac{P_u}{\\phi_tP_n}','P_u','\\phi_tP_n',fx(Math.abs(q.d.P)),fx(q.cap.ten.phiPn,1),q.r.P,'AISC 360-16 D2'); }
+  if(by.Mx){ const q=by.Mx; R_('Mx','Flexure ratio, about x','\\frac{M_{ux}}{\\phi_bM_{nx}}','M_{ux}','\\phi_bM_{nx}',fx(Math.abs(q.d.Mx)/12),fx(q.cap.fx.phiMn/12),q.r.Mx,'AISC 360-16 F7'); }
+  if(by.My){ const q=by.My; R_('My','Flexure ratio, about y','\\frac{M_{uy}}{\\phi_bM_{ny}}','M_{uy}','\\phi_bM_{ny}',fx(Math.abs(q.d.My)/12),fx(q.cap.fy.phiMn/12),q.r.My,'AISC 360-16 F7'); }
+  if(by.Vx){ const q=by.Vx; R_('Vx','Shear ratio, H walls','\\frac{V_{ux}}{\\phi_vV_{nx}}','V_{ux}','\\phi_vV_{nx}',fx(Math.abs(q.d.Vx)),fx(q.cap.vx.phiVn,1),q.r.Vx,'AISC 360-16 G4'); }
+  if(by.Vy){ const q=by.Vy; R_('Vy','Shear ratio, B walls','\\frac{V_{uy}}{\\phi_vV_{ny}}','V_{uy}','\\phi_vV_{ny}',fx(Math.abs(q.d.Vy)),fx(q.cap.vy.phiVn,1),q.r.Vy,'AISC 360-16 G4'); }
+  if(by.T){ const q=by.T; R_('T','Torsion ratio','\\frac{T_u}{\\phi_TT_n}','T_u','\\phi_TT_n',fx(Math.abs(q.d.T)/12,3),fx(q.cap.tor.phiTn/12),q.r.T,'AISC 360-16 H3.1'); }
+  // 4. combined forces: at the point that governs the interaction, with the forces acting there together
+  const G=by.H1||W, cd=G.d;
+  S.push(st('cc.P','Concurrent axial force at the combined-check point ('+(cd.P>=0?'tension':'compression')+')','P_{r}','','',Math.abs(cd.P),'kip',2,'',`The combined checks use the forces acting together at one point: ${where(G)}.`));
+  S.push(st('cc.Mx','Concurrent moment about x','M_{rx}','','',Math.abs(cd.Mx)/12,'kip-ft',2,''));
+  S.push(st('cc.My','Concurrent moment about y','M_{ry}','','',Math.abs(cd.My)/12,'kip-ft',2,''));
+  const cs=SharedAiscHss.demandSteps(G.cap,cd,G.r,P+'.cc').filter(x=>/\.(rp|h1)$/.test(x.id));
+  S.push(...cs);
+  const H=by.H3;
+  if(H){ const hd=H.d;
+    S.push(st('t3.V','Concurrent shear at the torsion-interaction point','V_{r}','','',Math.max(Math.abs(hd.Vx),Math.abs(hd.Vy)),'kip',2,'',`H3.2 applies (T_r > 0.2T_c) at: ${where(H)}.`));
+    S.push(st('t3.T','Concurrent torsion','T_{r}','','',Math.abs(hd.T)/12,'kip-ft',3,''));
+    S.push(...SharedAiscHss.demandSteps(H.cap,hd,H.r,P+'.t3').filter(x=>/\.h3$/.test(x.id))); }
+  return S;
 }
 // summary of a worked check: each limit state's demand, design strength and D/C ratio, then the serviceability check
 function mdCheckSummary(R, g, W, by){
@@ -8156,7 +8184,7 @@ function mdSelect(R, key, first){
   const det=document.getElementById('mdDetail');
   document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
   if(!g.hss){ det.innerHTML='<p class="hint">W-shape: not checked for strength on this tab (rectangular HSS only).</p>'; return; }
-  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W))+mdCheckSummaryHTML(R,g,W,gov?g.by:W.by);
+  det.innerHTML=`<div class="hint" style="margin-bottom:6px">${gov||W.run===g.worst.run?'Governing combination':'Selected combination'} <b>${aesc(W.run)}</b>: its governing point is element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from ${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'} (dotted line on the diagrams). Ratio ${mdStatus(W.r.gov)}${W.run===g.worst.run?'':` (the member's governing ratio is ${f(g.worst.r.gov,2)} under ${aesc(g.worst.run)})`}.</div>`+mdStepsHTML(mdSteps(g,W,gov?g.by:W.by))+mdCheckSummaryHTML(R,g,W,gov?g.by:W.by);
 }
 
 // ============================================================================
