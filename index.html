@@ -193,6 +193,13 @@
     .controls { max-height: none; border-right: none; border-bottom: 1px solid var(--line); }
     .canvas-col { max-height: none; }
   }
+.md-grid{display:grid;grid-template-columns:210px minmax(0,1fr);gap:6px 12px;align-items:center;max-width:720px;font-size:12px}
+.md-grid select.inp{max-width:360px}
+table.md-sum tr.sel td{background:#fdf3dd}
+table.md-sum tr.mdRow:hover td{background:#f4f1ea}
+.md-st{padding:5px 0;border-bottom:1px dotted #e2ded4;font-size:12px}
+.md-lb{font-weight:600;color:var(--ink)} .md-ref{font-weight:400;color:var(--muted);font-size:11px;margin-left:6px}
+.md-ln{margin:2px 0 0 12px;overflow-x:auto} .md-nt{margin:2px 0 0 12px;color:var(--muted);font-style:italic;font-size:11.5px}
 </style>
 </head>
 <body>
@@ -252,9 +259,10 @@
     <button data-tab="threed"><span class="step">3D</span>3D View</button>
     <button data-tab="mct"><span class="step">4</span>MCT</button>
     <button data-tab="results"><span class="step">5</span>Results</button>
-    <button data-tab="anchor"><span class="step">6</span>Anchorage</button>
-    <button data-tab="output"><span class="step">7</span>Output</button>
-    <button data-tab="drawings"><span class="step">8</span>Drawings</button>
+    <button data-tab="members"><span class="step">6</span>Members</button>
+    <button data-tab="anchor"><span class="step">7</span>Anchorage</button>
+    <button data-tab="output"><span class="step">8</span>Output</button>
+    <button data-tab="drawings"><span class="step">9</span>Drawings</button>
   </nav>
 </header>
 <div id="globalWarn" style="display:none;margin:0 18px 0;background:var(--rust-light);border:1px solid var(--rust);border-radius:5px;padding:8px 14px;font-size:12px;color:var(--rust)"></div>
@@ -697,6 +705,31 @@
 </section>
 
 <!-- ============ TAB 6: ANCHORAGE ============ -->
+<!-- ============ TAB 6: MEMBER DESIGN ============ -->
+<section class="tabpage" id="tab-members">
+  <div class="onecol">
+    <div class="panel">
+      <div class="panel-head"><h2>Member design</h2><span class="tag">rectangular HSS · AISC 360-16 LRFD · second-order analysis</span></div>
+      <div class="panel-body">
+        <div class="hint" style="margin-bottom:8px">Every HSS member (columns, and the rafters, eave beams and purlins when they are HSS) is checked at both ends of every analysis element, for every LRFD combination: tension (D2), compression (E3, E7), flexure about both axes (F7), shear (G4), torsion (H3), and combined forces (H1.1, H3.2). The forces come from a second-order elastic (P-Δ) analysis of the same model the in-app analysis solves (AISC 360-16 C2.1(2)); each member's 3 or more elements carry the P-δ effect. Deflections and column drift are checked under unfactored loads.</div>
+        <div id="mdInputs"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Strength checks</h2><span class="tag">governing ratio per member</span></div>
+      <div class="panel-body"><div id="mdStatus" style="font-size:12px;margin-bottom:8px"></div><div id="mdSummary"></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Deflection and drift</h2><span class="tag">serviceability · unfactored loads</span></div>
+      <div class="panel-body"><div id="mdDefl"></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2 id="mdDetailTitle">Worked check</h2><span class="tag">governing point of the selected member</span></div>
+      <div class="panel-body"><div id="mdDetail"></div></div>
+    </div>
+  </div>
+</section>
+
 <section class="tabpage" id="tab-anchor">
   <div class="onecol">
     <div class="panel">
@@ -971,6 +1004,7 @@ const state = Object.assign({}, DEFAULTS, {
   snowMode: 'manual', windMode: 'manual',   // 'manual' or 'calc'
   riskCat: 'II', exposure: 'C',
   beamSect: 'W12X26', colSect: 'HSS6X6X.250',   // AISC designations
+  md: null,                      // Member Design tab options (mdOpts fills the defaults, MD_DEF)
   midasPaste: ''                 // raw pasted MIDAS beam-force text (saved with project)
 });
 
@@ -4156,6 +4190,41 @@ async function buildReportModel(){
       {title:'Moment and shear diagrams'+fTxt, items:F([rpNote(`The ${RES_SRC==='app'?'analysis':'MIDAS'} node values plotted along the members (straight between nodes), every case and combination, each with its members' max / min.${is3d?' The frame is the one selected on the Results tab; choose another there and refresh the report for its diagrams.':''}`), figKey, ...diagItems])}]});
   }
 
+  // ---- Member design ----
+  if(window.SharedAiscHss){ let R=null; try{ R=mdEnsure(); }catch(e){ console.warn('member design',e); }
+    if(R && !R.error){
+      const o=R.o, dam=o.method==='dam', hss=R.groups.filter(g=>g.hss&&g.worst), other=R.groups.filter(g=>!g.hss);
+      const rc=v=>({t:f(v,2)+(v<=1?' OK':' NG'),n:true,cls:v<=1?'ok':'ng'});
+      const types=[...new Set(hss.map(g=>g.type))];
+      const govOf=t=>hss.filter(g=>g.type===t).reduce((m,g)=>!m||g.worst.r.gov>m.worst.r.gov?g:m,null);
+      const dW=MD_TYPES.reduce((m,[k,nm])=>(m[k]=nm,m),{});
+      sumItems.push({type:'table', caption:'HSS members: governing ratio of each member type (AISC 360-16, details in [[M-sum]]).', head:['Member type','Governing member','Section','Ratio','Check','Combination'],
+        rows:types.map(t=>{ const g=govOf(t); return [dW[t]||t, g.label, g.secName, rc(g.worst.r.gov), MD_CHECK[g.worst.r.govKey](g.worst.r), g.worst.run]; })});
+      const subs=[{title:'Basis', key:'M-sum', items:F([
+        rpNote(`Rectangular HSS members, AISC 360-16 LRFD, ${R.grade.name} (F_y = ${R.grade.Fy} ksi, F_u = ${R.grade.Fu} ksi${o.grade==='A1085'?', nominal wall thickness':', design wall thickness t_des = 0.93 t_nom'}). Every HSS member is checked at both ends of every analysis element for every LRFD combination: tension (D2), compression (E3, E7), flexure about both axes (F7), shear (G4, k_v = 5), torsion (H3.1) and combined forces (H1.1; H3.2 when T_r > 0.2T_c). Worked on the [[tab:members|Members tab]].`),
+        rpNote(dam?`Direct Analysis Method (AISC 360-16 Ch. C): a second-order elastic (P-Δ) analysis of the in-app model with 0.8τ_b EI and 0.8EA (C2.3, τ_b from each element's axial force), notional loads N_i = 0.002Y_i at every node (C2.2b) in every combination: in each of ±X${is3d?' and ±Y':''} for the gravity-only combinations and in the direction of the net lateral load for the others; K = 1 for every member (C3).`
+          :`Effective Length Method (AISC 360-16 Appendix 7): a second-order elastic (P-Δ) analysis of the in-app model with nominal stiffness; notional loads N_i = 0.002Y_i as minimum lateral loads in the gravity-only combinations, in each of ±X${is3d?' and ±Y':''} (App. 7.2.2); effective length factors K: ${MD_TYPES.map(([k,nm])=>`${nm.toLowerCase()} K_x = ${o.K[k][0]}, K_y = ${o.K[k][1]}`).join('; ')} (App. 7.2.3). The method is permitted while Δ_2nd/Δ_1st ≤ 1.5 (App. 7.2.1).`),
+        rpNote(`${R.nRuns} second-order analyses; the largest ratio of second-order to first-order sway displacement Δ_2nd/Δ_1st = ${f(R.worstRatio,3)} (${R.worstRun||'—'}).`+(!dam&&R.worstRatio>1.5?' This exceeds 1.5: the Effective Length Method is not permitted; use the Direct Analysis Method.':''), !dam&&R.worstRatio>1.5),
+        rpNote('P-δ inside the members: each member is modelled with 3 or more elements, each with its geometric stiffness, so the second-order analysis includes it (no separate B_1 amplification).'),
+        rpNote(`Unbraced lengths: columns from the base to the roof beam; rafters between the columns in the frame plane and between the eave beams and purlins out of it; eave beams and purlins between the frames. L_b of a rafter: ${o.rafterLb==='sign'?'by the flange in compression (top flange braced by the purlins and eaves; bottom flange, under uplift, braced at the columns only)':o.rafterLb==='columns'?'between the columns':'between the purlins and eaves'}; C_b = ${o.Cb}. Square HSS: no lateral-torsional buckling (F7.4 User Note).`),
+        rpNote('Tension: A_e = A_g (welded end connections, no holes, U = 1.0). Flat widths b = B − 3t, h = H − 3t (B4.1b(d)). Torsion with biaxial bending (H3-6): both flexure ratios and the larger shear ratio. Connections are not checked.'),
+        other.length?rpNote(`Not checked for strength (W-shapes): ${[...new Set(other.map(g=>g.secName))].join(', ')}, ${other.length} member${other.length>1?'s':''}. Their deflections are checked in [[M-defl]].`,true):null,
+        {type:'table', caption:'Governing ratio of every HSS member.', head:['Member','Section','Ratio','Governing check','Combination','Location','P / M_x / M_y / V / T'],
+          rows:hss.map(g=>{ const W=g.worst; return [g.label,g.secName,rc(W.r.gov),MD_CHECK[W.r.govKey](W.r),W.run,f(W.at,2)+' ft',`${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}`]; }), wide:true}])}];
+      types.forEach(t=>{ const g=govOf(t); subs.push({title:`${dW[t]||t}: governing member ${g.label} (${g.secName})`, items:[
+        rpNote(`Governing point: ${g.worst.run}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member. Ratio ${f(g.worst.r.gov,3)} ${g.worst.r.gov<=1?'OK':'NG'}.`),
+        {type:'steps', scope:'md-'+t, steps:mdSteps(g)}]}); });
+      const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
+      subs.push({title:'Deflection and drift', key:'M-defl', items:[
+        rpNote(`Unfactored load cases, nominal stiffness, first-order analysis. Spans: the deflection relative to the line between the span's supports, limit L/${o.defl.S} under S and L/${o.defl.DS} under D + S. Overhangs: the tip relative to the support, limit 2L/${o.defl.S} and 2L/${o.defl.DS} (L = overhang). Columns: drift of the top relative to the base under D + ${o.defl.wFac}W (the wind at a 10-year return period, ASCE 7-16 Commentary C.2.2), limit H/${o.defl.drift}.`),
+        {type:'table', caption:'Largest deflection ratio of each member and load.', head:['Member','Section','Span','Load',`Deflection (${uDispLbl()})`,`Limit (${uDispLbl()})`,'Ratio'],
+          rows:dmax.map(x=>[x.g,x.sec,x.span,x.load,{t:uDisp(Math.abs(x.d)),n:true},{t:uDisp(x.lim)+` (${x.cant?'2L':'L'}/${x.den})`,n:true},rc(x.ratio)]), wide:true},
+        {type:'table', caption:'Column drift.', head:['Column','Section','Height','Load',`Drift (${uDispLbl()})`,`Limit (${uDispLbl()})`,'Ratio'],
+          rows:R.drift.map(x=>[x.g,x.sec,f(x.H,2)+' ft',`D + ${o.defl.wFac}·${x.w}`,{t:uDisp(x.d),n:true},{t:uDisp(x.lim)+` (H/${o.defl.drift})`,n:true},rc(x.ratio)])}]});
+      sections.push({title:'Member design', subs});
+    }
+  }
+
   // ---- 9 Anchorage ----
   if(hasRes && anchorInUse()){ try{ await anchorEvaluateAll(); }catch(e){ console.warn('anchorage',e); }
     const A2=anchorState(), gs=A2.groups.filter(gr=>anchorColumnsOf(gr.id).length);
@@ -4183,7 +4252,7 @@ async function buildReportModel(){
     {title:'Not included: verify separately where applicable', items:[
       rpNote('Unbalanced, drift, partial and sliding snow (ASCE 7-16 §7.5 to §7.9): only balanced snow is applied (a monoslope roof has no unbalanced case under §7.6).'),
       rpNote('Seismic loads (ASCE 7-16 Ch. 12); rain, ponding, ice and thermal loads.'),
-      rpNote('Member design and code checks (AISC 360) and serviceability limits.'),
+      rpNote('Member design of W-shape members (only rectangular HSS members are checked), connections, and base plate welds.'),
       rpNote(anchorInUse()?'Foundation design: the base plates and anchor rods are checked (anchorage only); the pedestal and footing are not designed.':'Foundation and anchorage design: the base reactions are reported for the foundation engineer.'),
       rpNote('C_N is interpolated within Fig. 27.3-4 and limited to its 0° to 45° range; the snow slope factor C_s uses the all-other-surfaces curve.')]},
     {title:'Engineer of record', items:[rpNote('Verify the inputs (sections, material, mean roof height, exposure and risk category, pressures), that all load types for the project and jurisdiction are considered, and the MIDAS local axes against the reaction extraction (Axial → N, Shear-z → V, Moment-y → M).')]}]});
@@ -6625,6 +6694,7 @@ function onTabShown(tab){
   else if(tab==='wind'){drawWind();}
   else if(tab==='threed'){draw3D();}
   else if(tab==='results'){drawResultsPlot(); refreshReactionPanel();}
+  else if(tab==='members'){ mdRender(false); }
   else if(tab==='anchor'){ refreshAnchorage(false); }
   else if(tab==='output'){ buildReport(); }
   else if(tab==='drawings'){ dwgDirty(); dwgRender(); }
@@ -7544,7 +7614,7 @@ function anaRun(text){
     for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<=Math.min(n-1,i+bw);k++) s-=B[k*W1+(k-i)]*y[k]; y[i]=s/B[i*W1]; }
     return y; };
   // load cases: equivalent nodal loads (fixed-end forces condensed for releases)
-  const CASE={};
+  const CASE={}, CF={};   // CF: each case's nodal load vector and fixed-end forces, kept for the second-order analysis (anaSecond)
   M.cases.forEach(c=>{ const L=M.loads[c]||{sw:null,con:[],beam:[]}, F=new Float64Array(6*N), Fcon=new Float64Array(6*N), fef=new Map(), app=[0,0,0];
     const addUniform=(id,qg)=>{ const D=EL.get(id), ql=[0,1,2].map(i=>D.R[i][0]*qg[0]+D.R[i][1]*qg[1]+D.R[i][2]*qg[2]), Le=D.L, f=new Float64Array(12);
       f[0]=f[6]=ql[0]*Le/2; f[1]=f[7]=ql[1]*Le/2; f[5]=ql[1]*Le*Le/12; f[11]=-ql[1]*Le*Le/12; f[2]=f[8]=ql[2]*Le/2; f[4]=-ql[2]*Le*Le/12; f[10]=ql[2]*Le*Le/12;
@@ -7568,7 +7638,7 @@ function anaRun(text){
     const reac=new Map(); M.sup.forEach((cst,nd)=>{ const i=idx.get(nd), r=[0,1,2,3,4,5].map(j=>fixed[6*i+j]?Rn[6*i+j]-Fcon[6*i+j]:0); reac.set(nd,r); });
     let umax=0, unode=null; for(let i=0;i<N;i++){ const m=Math.hypot(u[6*i],u[6*i+1],u[6*i+2]); if(m>umax){ umax=m; unode=ids[i]; } }
     let sR=[0,0,0]; reac.forEach(r=>{ sR[0]+=r[0]; sR[1]+=r[1]; sR[2]+=r[2]; });
-    CASE[c]={u,ends,reac,umax,unode,applied:app,sumR:sR}; });
+    CASE[c]={u,ends,reac,umax,unode,applied:app,sumR:sR}; CF[c]={F,fef}; });
   // beam-force rows (MIDAS layout) for cases, combinations and the envelope
   const rows=[], elemIds=[...M.elems.keys()].sort((a,b)=>a-b);
   const pushRows=(load,get)=>elemIds.forEach(id=>{ const e=M.elems.get(id), f=get(id);
@@ -7588,7 +7658,322 @@ function anaRun(text){
       mx.set(id,a.map((v,r)=>r<6?-v:v)); mn.set(id,b.map((v,r)=>r<6?-v:v)); });
     pushRows(`${cb.name}(max)`,id=>mx.get(id)); pushRows(`${cb.name}(min)`,id=>mn.get(id)); });
   const ms=performance.now()-t0;
-  return {rows, cases:CASE, combos:Object.keys(combEnds), combU, nodeIdx:idx, planar, autoFix, n, bw, nodes:N, elems:M.elems.size, ms, warn:[...new Set(warn)], model:M};
+  return {rows, cases:CASE, combos:Object.keys(combEnds), combU, nodeIdx:idx, planar, autoFix, n, bw, nodes:N, elems:M.elems.size, ms, warn:[...new Set(warn)], model:M,
+    _int:{EL, eq, n, bw, idx, ids, N, fixed, dofs, CF, E, G}};
+}
+
+// ============================================================================
+// SECOND-ORDER ELASTIC ANALYSIS (P-Delta) of one LRFD combination, for the Member Design tab.
+// AISC 360-16 C2.1(2) / Appendix 7: the in-app frame model above, with each element's consistent
+// geometric stiffness for its axial force (P-Delta; P-delta inside a member through its 3+ elements),
+// iterated to convergence. Effective Length Method (Appendix 7.2): nominal stiffness, notional loads
+// 0.002 Y_i in gravity-only combinations (7.2.2). Direct Analysis Method (C2): 0.8 tau_b EI and 0.8 EA,
+// 0.8 GJ / GA (C2.3), notional loads 0.002 Y_i (C2.2b) in every combination.
+// Units as the MCT: lbf, ft. Axial force N: + tension.
+// ============================================================================
+function anaKgeo(L,N,S){
+  const k=Array.from({length:12},()=>new Float64Array(12)), a=N/L, ip=(S.Iy+S.Iz)/S.A;
+  // x-y plane (v, theta_z: 1,5,7,11) and x-z plane (w, theta_y: 2,4,8,10; theta_y sign as anaKloc)
+  [[1,5,1],[2,4,-1]].forEach(([v,th,s])=>{ const V=v+6, T=th+6;
+    const set=(i,j,x)=>{ k[i][j]+=x; if(i!==j) k[j][i]+=x; };
+    set(v,v,6/5*a); set(V,V,6/5*a); set(v,V,-6/5*a);
+    set(v,th,s*L/10*a); set(v,T,s*L/10*a); set(V,th,-s*L/10*a); set(V,T,-s*L/10*a);
+    set(th,th,2*L*L/15*a); set(T,T,2*L*L/15*a); set(th,T,-L*L/30*a); });
+  k[3][3]+=a*ip; k[9][9]+=a*ip; k[3][9]-=a*ip; k[9][3]-=a*ip;
+  return k;
+}
+// opt: {method:'elm'|'dam', Fy (ksi), gravity:[case names], dir:[dx,dy] notional direction or null, maxIt, tol}
+function anaSecond(R, combo, opt){
+  const I=R._int; if(!I) throw new Error('run the in-app analysis first');
+  const {EL,eq,n,bw,idx,ids,N:NN,dofs,CF}=I, W1=bw+1, dam=opt.method==='dam';
+  const E=dam?0.8*I.E:I.E, G=dam?0.8*I.G:I.G, FyLbf=(opt.Fy||50)*1000;
+  // combination loads (case factors), gravity part for the notional loads
+  const F=new Float64Array(6*NN), Fg=new Float64Array(6*NN), fef=new Map();
+  combo.terms.forEach(([k,lc,fac])=>{ const c=CF[lc]; if(!c) return; for(let d=0;d<6*NN;d++) F[d]+=fac*c.F[d];
+    if((opt.gravity||[]).includes(lc)) for(let d=0;d<6*NN;d++) Fg[d]+=fac*c.F[d];
+    c.fef.forEach((v,id)=>{ const p=fef.get(id)||new Float64Array(12); for(let r=0;r<12;r++) p[r]+=fac*v[r]; fef.set(id,p); }); });
+  let Ysum=0;
+  if(opt.dir){ for(let i=0;i<NN;i++){ const Y=-Fg[6*i+2]; if(Y>0){ F[6*i]+=0.002*Y*opt.dir[0]; F[6*i+1]+=0.002*Y*opt.dir[1]; Ysum+=Y; } } }
+  const Ff=new Float64Array(n); for(let d=0;d<6*NN;d++) if(eq[d]>=0) Ff[eq[d]]=F[d];
+  const Nax=new Map(); EL.forEach((D,id)=>Nax.set(id,0));
+  const tau=new Map();
+  let u=null, u1=null, it=0, conv=false, ends=null;
+  const maxIt=opt.maxIt||15, tol=opt.tol||1e-4;
+  for(it=0; it<maxIt; it++){
+    const B=new Float64Array(n*W1), kcs=new Map();
+    EL.forEach((D,id)=>{
+      let S=D.S, tb=1;
+      if(dam){ const Pr=Math.max(0,-Nax.get(id)), Py=FyLbf*S.A*144, r=Pr/Py; tb=r<=0.5?1:Math.max(1e-3,4*r*(1-r)); S=Object.assign({},S,{Iy:S.Iy*tb,Iz:S.Iz*tb}); tau.set(id,tb); }
+      const k=(dam||it>0)?anaKloc(D.L,S,E,G):D.k, kg=it>0?anaKgeo(D.L,Nax.get(id),D.S):null;
+      let kl=k; if(kg){ kl=k.map((row,r)=>row.map((v,c)=>v+kg[r][c])); }
+      const kc=D.rel?anaCondense(kl,new Float64Array(12),D.rel).k:kl; kcs.set(id,kc);
+      const R_=D.R, d=dofs(D.e);
+      for(let c=0;c<12;c++){ const ib=eq[d[c]]; if(ib<0) continue; const ec=new Float64Array(12); ec[c]=1; const lc=anaToLocal(R_,ec), kv=new Float64Array(12);
+        for(let r=0;r<12;r++){ let s=0; for(let m=0;m<12;m++) s+=kc[r][m]*lc[m]; kv[r]=s; } const g=anaToGlobal(R_,kv);
+        for(let r=0;r<12;r++){ const ia=eq[d[r]]; if(ia<0||ib>ia) continue; B[ia*W1+(ia-ib)]+=g[r]; } } });
+    const diag0=new Float64Array(n); for(let i=0;i<n;i++) diag0[i]=B[i*W1];
+    for(let i=0;i<n;i++){ const j0=Math.max(0,i-bw);
+      for(let j=j0;j<=i;j++){ let s=B[i*W1+(i-j)]; const k0=Math.max(j0,j-bw); for(let k=k0;k<j;k++) s-=B[i*W1+(i-k)]*B[j*W1+(j-k)];
+        if(i===j){ if(!(s>1e-10*Math.max(1e-30,Math.abs(diag0[i])))) return {error:`unstable under ${combo.name}: the second-order stiffness is not positive definite (the axial loads reach a buckling load of the structure)`, it}; B[i*W1]=Math.sqrt(s); }
+        else B[i*W1+(i-j)]=s/B[j*W1]; } }
+    const y=Float64Array.from(Ff);
+    for(let i=0;i<n;i++){ let s=y[i]; for(let k=Math.max(0,i-bw);k<i;k++) s-=B[i*W1+(i-k)]*y[k]; y[i]=s/B[i*W1]; }
+    for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<=Math.min(n-1,i+bw);k++) s-=B[k*W1+(k-i)]*y[k]; y[i]=s/B[i*W1]; }
+    u=new Float64Array(6*NN); for(let d=0;d<6*NN;d++) if(eq[d]>=0) u[d]=y[eq[d]];
+    ends=new Map(); let dN=0, mN=0;
+    EL.forEach((D,id)=>{ const d=dofs(D.e), ul=anaToLocal(D.R,Float64Array.from(d.map(q=>u[q]))), fe=fef.get(id), kc=kcs.get(id), f=new Float64Array(12);
+      for(let r=0;r<12;r++){ let s=0; for(let m=0;m<12;m++) s+=kc[r][m]*ul[m]; f[r]=s-(fe?fe[r]:0); }
+      ends.set(id,f); const Nn=(f[6]-f[0])/2; dN=Math.max(dN,Math.abs(Nn-Nax.get(id))); mN=Math.max(mN,Math.abs(Nn)); Nax.set(id,Nn); });
+    if(it===0) u1=u;
+    if(it>0 && dN<=tol*mN+1e-6){ conv=true; break; }
+  }
+  // sway amplification Delta2/Delta1: the largest horizontal node displacement, second-order over first-order
+  let d1=0, d2=0; for(let i=0;i<NN;i++){ d1=Math.max(d1,Math.hypot(u1[6*i],u1[6*i+1])); d2=Math.max(d2,Math.hypot(u[6*i],u[6*i+1])); }
+  return {u, u1, ends, it:it+1, conv, d1, d2, ratio:d1>1e-12?d2/d1:1, tau, Ysum, notional:opt.dir?0.002*Ysum:0};
+}
+
+// ============================================================================
+// MEMBER DESIGN — HSS members, AISC 360-16 LRFD (shared/aisc-hss.js, SharedAiscHss)
+//   strength: every element end, every LRFD combination, from a second-order elastic analysis
+//   (anaSecond): Effective Length Method (Appendix 7, default) or Direct Analysis Method (Ch. C)
+//   serviceability: roof member spans and overhangs (S, D+S), column drift (D + a W)
+// ============================================================================
+const MD_DEF={method:'elm', grade:'A500C', K:{col:[2.1,2.1], rafter:[1,1], eave:[1,1], purlin:[1,1]}, rafterLb:'sign', Cb:1,
+  defl:{S:240, DS:180, drift:100, wFac:0.42}};
+const MD_TYPES=[['col','Columns'],['rafter','Rafters (roof beams)'],['eave','Eave beams'],['purlin','Purlins']];
+function mdOpts(){
+  const o=state.md&&typeof state.md==='object'?state.md:{};
+  const K=Object.assign({},MD_DEF.K,o.K||{}), defl=Object.assign({},MD_DEF.defl,o.defl||{});
+  state.md=Object.assign({},MD_DEF,o,{K,defl});
+  return state.md;
+}
+const MD={sig:null, res:null, sel:null, busy:false};
+// the members of the model: one group per member line (column, rafter, eave / purlin line), split into
+// segments at the points that brace it (where another member frames in, or a support)
+function mdGroups(s, mesh, M){
+  const secName={1:s.colSect, 2:s.beamSect, 3:s.longSect, 4:s.purlinSect}, typeOf={1:'col',2:'rafter',3:'eave',4:'purlin'};
+  const G=new Map(), nodeG=new Map(), sup=new Set([...M.sup.keys()]);
+  mesh.elements.forEach(e=>{ const k=e.member+'|'+(e.frame==null?'':e.frame); if(!G.has(k)) G.set(k,{key:k, member:e.member, frame:e.frame, sec:e.sec, elems:[]}); G.get(k).elems.push(e);
+    [e.n1,e.n2].forEach(n=>{ if(!nodeG.has(n)) nodeG.set(n,new Set()); nodeG.get(n).add(k); }); });
+  const xyz=n=>M.nodes.get(n), dist=(a,b)=>{ const p=xyz(a), q=xyz(b); return Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2]); };
+  const ll=mesh.longLines||[];
+  const out=[];
+  G.forEach(g=>{
+    const type=typeOf[g.sec]||'other', sec=secName[g.sec];
+    if(g.sec===4 && type==='purlin'){}   // purlin
+    const chain=[g.elems[0].n1, ...g.elems.map(e=>e.n2)];
+    const sx=[0]; for(let i=1;i<chain.length;i++) sx.push(sx[i-1]+dist(chain[i-1],chain[i]));
+    const isBrace=(n,only)=>sup.has(n) || [...(nodeG.get(n)||[])].some(k=>k!==g.key && (!only || only(G.get(k))));
+    const segs=only=>{ const cut=[0]; for(let i=1;i<chain.length-1;i++) if(isBrace(chain[i],only)) cut.push(i); cut.push(chain.length-1);
+      const S=[]; for(let c=0;c+1<cut.length;c++){ const i0=cut[c], i1=cut[c+1];
+        const free0=i0===0 && !isBrace(chain[0],only), free1=i1===chain.length-1 && !isBrace(chain[i1],only);
+        S.push({i0, i1, L:sx[i1]-sx[i0], cant:free0?'start':free1?'end':null, elems:g.elems.slice(i0,i1)}); }
+      return S; };
+    const segB=segs(null);
+    // a rafter's in-plane length and its spans for deflection: between the columns (and the overhangs to the tips)
+    const segX=type==='rafter'?segs(o=>typeOf[o.sec]==='col'):segB;
+    let label;
+    const fr=g.frame==null?'':`F${g.frame+1} `;
+    if(type==='col') label=(g.frame==null?'':`F${g.frame+1}-`)+'C'+(+g.member.slice(3)+1);
+    else if(type==='rafter') label=fr+'rafter';
+    else { const L=ll[+String(g.member).slice(4)]; label=L?(L.kind==='purlin'?`Purlin at x = ${f(L.x,2)} ft`:(L.kind==='low eave'?'Low eave beam':'High eave beam')):g.member; }
+    const P=sectProps(sec), hss=window.SharedAiscHss&&P.shape==='B'?SharedAiscHss.find(sec):null;
+    out.push({key:g.key, label, type, sec, secName:sec, hss:!!hss, chain, sx, elems:g.elems, segB, segX, L:sx[sx.length-1]});
+  });
+  const ord={col:0,rafter:1,eave:2,purlin:3,other:4};
+  out.sort((a,b)=>(ord[a.type]-ord[b.type]) || (a.label<b.label?-1:a.label>b.label?1:0));
+  return out;
+}
+// segment of an element in a segment list
+const mdSegOf=(segs,eid)=>segs.find(sg=>sg.elems.some(e=>e.id===eid));
+// the analyses: each LRFD combination once, gravity-only combinations once per notional-load direction
+function mdRuns(R, s, o){
+  const grav=['DL','Snow'], is3=is3D(s), dirs=is3?[[1,0,'+X'],[-1,0,'−X'],[0,1,'+Y'],[0,-1,'−Y']]:[[1,0,'+X'],[-1,0,'−X']];
+  const runs=[];
+  R.model.combos.filter(c=>!c.env).forEach(cb=>{
+    const lat=cb.terms.some(t=>!grav.includes(t[1]));
+    if(!lat) dirs.forEach(d=>runs.push({combo:cb, dir:[d[0],d[1]], dirName:d[2], name:`${cb.name}, N ${d[2]}`}));
+    else if(o.method==='dam'){
+      // notional loads added in the direction of the combination's net lateral load
+      let hx=0, hy=0; cb.terms.forEach(([k,lc,fac])=>{ if(grav.includes(lc)) return; const F=R._int.CF[lc]&&R._int.CF[lc].F; if(!F) return; for(let i=0;i<R._int.N;i++){ hx+=fac*F[6*i]; hy+=fac*F[6*i+1]; } });
+      const d=Math.abs(hx)>=Math.abs(hy)?[Math.sign(hx)||1,0]:[0,Math.sign(hy)||1];
+      runs.push({combo:cb, dir:d, dirName:(d[0]?(d[0]>0?'+X':'−X'):(d[1]>0?'+Y':'−Y')), name:`${cb.name}, N ${(d[0]?(d[0]>0?'+X':'−X'):(d[1]>0?'+Y':'−Y'))}`});
+    }
+    else runs.push({combo:cb, dir:null, dirName:'', name:cb.name});
+  });
+  return runs;
+}
+function mdLengths(g, eid, o, topComp){
+  const sB=mdSegOf(g.segB,eid), sX=mdSegOf(g.segX,eid), K=o.K[g.type]||[1,1], dam=o.method==='dam';
+  const Kx=dam?1:K[0], Ky=dam?1:K[1];
+  const Lx=sX.L, Ly=sB.L;
+  let Lb=g.type==='rafter'?(o.rafterLb==='columns'?Lx:(o.rafterLb==='purlins'?Ly:(topComp?Ly:Lx))):Ly;
+  return {Kx, Ky, Lx, Ly, Lb, Lcx:Kx*Lx*12, Lcy:Ky*Ly*12, LbIn:Lb*12, cant:sB.cant||sX.cant, sB, sX};
+}
+// a rafter's top flange is in compression when its local momentY is positive (MIDAS sign: + = sagging for a member whose local z points up)
+const MD_TOP_SIGN=+1;
+function mdCompute(){
+  const s=state, o=mdOpts(), t0=performance.now();
+  if(!window.SharedAiscHss) return {error:'The AISC HSS engine (shared/aisc-hss.js) is not embedded in this file; run tools/sync-bpad.py.'};
+  const B=buildMCT(s), R=anaRun(B.text), mesh=B.mesh;
+  const groups=mdGroups(s, mesh, R.model), runs=mdRuns(R, s, o);
+  const Fy=SharedAiscHss.grades[o.grade].Fy;
+  const res=[]; let worstRatio=1, worstRun=null, notConv=[], errs=[];
+  runs.forEach(rn=>{ const r=anaSecond(R, rn.combo, {method:o.method, Fy, gravity:['DL','Snow'], dir:rn.dir});
+    if(r.error){ errs.push(r.error); return; } if(!r.conv) notConv.push(rn.name);
+    rn.ratio=r.ratio; rn.it=r.it; rn.notional=r.notional; rn.ends=r.ends;
+    if(r.ratio>worstRatio){ worstRatio=r.ratio; worstRun=rn.name; } });
+  const capCache=new Map();
+  const capOf=(g,L)=>{ const k=g.secName+'|'+[L.Lcx,L.Lcy,L.LbIn].map(v=>v.toFixed(3)).join('|'); if(!capCache.has(k)) capCache.set(k,SharedAiscHss.capacities(SharedAiscHss.section(g.secName,o.grade),{Lcx:L.Lcx,Lcy:L.Lcy,Lb:L.LbIn,Cb:o.Cb})); return capCache.get(k); };
+  groups.forEach(g=>{
+    g.worst=null;
+    if(!g.hss) return;
+    g.elems.forEach(e=>{
+      runs.forEach(rn=>{ if(!rn.ends) return; const fe=rn.ends.get(e.id); if(!fe) return;
+        [['I',-1,0],['J',1,6]].forEach(([end,sg,o0])=>{
+          const v=k=>sg*fe[o0+k];
+          const d={P:v(0)/1000, Vy:v(1)/1000, Vx:v(2)/1000, T:v(3)*12/1000, Mx:v(4)*12/1000, My:v(5)*12/1000};
+          const topComp=MD_TOP_SIGN*v(4)>0;
+          const L=mdLengths(g, e.id, o, topComp), cap=capOf(g,L), r=SharedAiscHss.ratios(cap,d);
+          if(!g.worst || r.gov>g.worst.r.gov){
+            const at=g.sx[g.chain.indexOf(end==='I'?e.n1:e.n2)];
+            g.worst={r, d, cap, L, run:rn.name, elem:e.id, end, at};
+          }
+        });
+      });
+    });
+  });
+  // serviceability (first-order, unfactored cases, nominal stiffness)
+  const u=lc=>R.cases[lc]&&R.cases[lc].u, ix=R.nodeIdx, uD=u('DL'), uS=u('Snow');
+  const dz=(U,n)=>U?U[6*ix.get(n)+2]:0;
+  const defl=[];
+  const roofSpans=g=>(g.type==='rafter'?g.segX:g.segB).filter(sg=>sg.L>1e-6);
+  groups.filter(g=>g.type!=='col').forEach(g=>{
+    roofSpans(g).forEach((sg,si)=>{
+      const nodes=g.chain.slice(sg.i0,sg.i1+1), x0=g.sx[sg.i0];
+      const Leff=sg.cant?2*sg.L:sg.L;
+      [['S',[uS],o.defl.S],['D+S',[uD,uS],o.defl.DS]].forEach(([nm,Us,den])=>{
+        const z=n=>Us.reduce((a,U)=>a+dz(U,n),0);
+        let best=0, bx=0;
+        nodes.forEach((n,k)=>{ const t=(g.sx[sg.i0+k]-x0)/(sg.L||1);
+          let d;
+          if(sg.cant==='start') d=z(n)-z(nodes[nodes.length-1]); else if(sg.cant==='end') d=z(n)-z(nodes[0]);
+          else d=z(n)-(z(nodes[0])+(z(nodes[nodes.length-1])-z(nodes[0]))*t);
+          if(Math.abs(d)>Math.abs(best)){ best=d; bx=g.sx[sg.i0+k]; } });
+        const lim=Leff/den;
+        defl.push({g:g.label, type:g.type, sec:g.secName, span:sg.cant?`overhang (${f(sg.L,2)} ft)`:`span ${f(x0,2)}–${f(x0+sg.L,2)} ft`, cant:!!sg.cant, L:sg.L, load:nm, den, d:best, lim, ratio:Math.abs(best)/lim, at:bx});
+      });
+    });
+  });
+  const wcs=R.model.cases.filter(c=>c!=='DL'&&c!=='Snow'), drift=[];
+  groups.filter(g=>g.type==='col').forEach(g=>{
+    const nb=g.chain[0], nt=g.chain[g.chain.length-1], H=g.L, lim=H/o.defl.drift;
+    let best=null;
+    wcs.forEach(w=>{ const Uw=u(w); if(!Uw) return; const h=k=>(uD?uD[6*ix.get(nt)+k]-uD[6*ix.get(nb)+k]:0)+o.defl.wFac*(Uw[6*ix.get(nt)+k]-Uw[6*ix.get(nb)+k]);
+      const d=Math.hypot(h(0),h(1)); if(!best||d>best.d) best={d,w}; });
+    if(best) drift.push({g:g.label, sec:g.secName, H, d:best.d, w:best.w, lim, ratio:best.d/lim});
+  });
+  const ms=performance.now()-t0;
+  return {o, groups, runs:runs.map(r=>({name:r.name, ratio:r.ratio, it:r.it, notional:r.notional})), worstRatio, worstRun, notConv, errs, defl, drift, ms, nRuns:runs.length, method:o.method, grade:SharedAiscHss.grades[o.grade]};
+}
+function mdSig(){ return modelSignature()+'|'+JSON.stringify(mdOpts()); }
+function mdEnsure(){ const sig=mdSig(); if(MD.sig!==sig || !MD.res){ try{ MD.res=mdCompute(); }catch(e){ console.error(e); MD.res={error:e.message}; } MD.sig=sig; } return MD.res; }
+const MD_CHECK={P:r=>'Axial ('+r.Pkind+')', Mx:()=>'Flexure, major axis', My:()=>'Flexure, minor axis', Vx:()=>'Shear (H walls)', Vy:()=>'Shear (B walls)', T:()=>'Torsion', H1:r=>'Combined axial + flexure, '+r.H1ref, H3:()=>'Combined with torsion, H3-6'};
+const mdStatus=v=>v==null?'—':`<b style="color:${v<=1.0?'var(--moss)':'var(--rust)'}">${isFinite(v)?f(v,2):'∞'} ${v<=1.0?'OK':'NG'}</b>`;
+// worked steps of a member's governing point (shared/steps.js format)
+function mdSteps(g){
+  const W=g.worst; if(!W) return [];
+  const o=MD.res.o, L=W.L, d=W.d, P='md';
+  const st=(id,label,sym,eq,sub,value,unit,dd,ref,note)=>{ const x={id:P+'.'+id,label,sym,eq:eq||'',sub:sub||'',value,unit:unit||'',d:dd==null?2:dd,ref:ref||''}; if(note) x.note=note; return x; };
+  const S=[];
+  const meth=o.method==='dam'?'Direct Analysis Method: K = 1 (AISC 360-16 C3).':'Effective Length Method: K from the inputs (AISC 360-16 Appendix 7.2.3).';
+  S.push(st('Lx','Unbraced length for buckling about x (strong axis)','L_{x}','','',L.Lx,'ft',2,'', g.type==='rafter'?'In the frame plane: between the columns (or column to the roof tip).':(g.type==='col'?'Base to the roof beam.':'Between the frames (or frame to the end).')));
+  S.push(st('Ly','Unbraced length for buckling about y (weak axis)','L_{y}','','',L.Ly,'ft',2,'', g.type==='rafter'?'Out of the frame plane: between the eave beams and purlins that frame into the rafter.':null));
+  S.push(st('Lcx','Effective length, x','L_{cx}','K_{x}L_{x}',`${f(L.Kx,2)}(${f(L.Lx,2)})`,L.Lcx/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3',meth));
+  S.push(st('Lcy','Effective length, y','L_{cy}','K_{y}L_{y}',`${f(L.Ky,2)}(${f(L.Ly,2)})`,L.Lcy/12,'ft',2,o.method==='dam'?'AISC 360-16 C3':'AISC 360-16 App. 7.2.3'));
+  S.push(st('Lb','Unbraced length of the compression flange (LTB)','L_{b}','','',L.Lb,'ft',2,'AISC 360-16 F7.4', (g.type==='rafter'?(o.rafterLb==='sign'?'Top flange in compression (gravity): braced by the purlins and eaves; bottom flange in compression (uplift): braced at the columns only.':(o.rafterLb==='columns'?'Taken between the columns for either flange.':'Taken between the purlins and eaves for either flange.')):'')+(L.cant?' Cantilever: C_b = 1.0 over the overhang length.':'') || null));
+  S.push(st('Pu','Required axial strength ('+(d.P>=0?'tension':'compression')+')','P_{u}','','',Math.abs(d.P),'kip',2,'',`Second-order analysis, ${W.run}, element ${W.elem} ${W.end}-end, ${f(W.at,2)} ft from the start of the member.`));
+  S.push(st('Mux','Required flexural strength, about x','M_{ux}','','',Math.abs(d.Mx)/12,'kip-ft',2,''));
+  S.push(st('Muy','Required flexural strength, about y','M_{uy}','','',Math.abs(d.My)/12,'kip-ft',2,''));
+  S.push(st('Vux','Required shear, H walls','V_{ux}','','',Math.abs(d.Vx),'kip',2,''));
+  S.push(st('Vuy','Required shear, B walls','V_{uy}','','',Math.abs(d.Vy),'kip',2,''));
+  S.push(st('Tu','Required torsional strength','T_{u}','','',Math.abs(d.T)/12,'kip-ft',3,''));
+  return S.concat(SharedAiscHss.capSteps(W.cap,P), SharedAiscHss.demandSteps(W.cap,d,W.r,P));
+}
+function mdStepsHTML(steps){
+  const T=window.SharedSteps; if(!T) return '';
+  const note=n=>n?`<div class="md-nt">${aesc(T.noteText(n)).replace(/\$([^$]+)\$/g,(m,t)=>T.toHTML(t.replace(/&lt;/g,'<').replace(/&amp;/g,'&').replace(/&quot;/g,'"')))}</div>`:'';
+  return steps.map(s=>`<div class="md-st"><div class="md-lb">${aesc(s.label)}${s.ref?` <span class="md-ref">${aesc(s.ref)}</span>`:''}</div><div class="md-ln">${T.line(s,true)}</div>${note(s.note)}</div>`).join('');
+}
+function mdRenderInputs(){
+  const o=mdOpts(), host=document.getElementById('mdInputs'); if(!host) return;
+  const dam=o.method==='dam';
+  const grades=window.SharedAiscHss?Object.values(SharedAiscHss.grades):[{id:'A500C',name:'ASTM A500 Gr. C',Fy:50}];
+  host.innerHTML=`<div class="md-grid">
+    <label>Stability design method</label><select id="mdMethod" class="inp"><option value="elm"${!dam?' selected':''}>Effective Length Method (App. 7)</option><option value="dam"${dam?' selected':''}>Direct Analysis Method (Ch. C)</option></select>
+    <label>HSS material</label><select id="mdGrade" class="inp">${grades.map(g=>`<option value="${g.id}"${g.id===o.grade?' selected':''}>${aesc(g.name)} (F<sub>y</sub> = ${g.Fy} ksi)</option>`).join('')}</select>
+    <label>Rafter L<sub>b</sub> (LTB)</label><select id="mdRafLb" class="inp"><option value="sign"${o.rafterLb==='sign'?' selected':''}>By flange in compression (Recommended)</option><option value="columns"${o.rafterLb==='columns'?' selected':''}>Between columns</option><option value="purlins"${o.rafterLb==='purlins'?' selected':''}>Between purlins</option></select>
+    <label>C<sub>b</sub></label><input id="mdCb" class="inp" type="number" step="0.05" min="1" max="3" value="${o.Cb}">
+  </div>
+  <table class="rpt md-k" style="max-width:520px;margin-top:8px"><thead><tr><th>Member</th><th>K<sub>x</sub> (strong axis)</th><th>K<sub>y</sub> (weak axis)</th></tr></thead><tbody>
+  ${MD_TYPES.map(([k,nm])=>`<tr><td>${nm}</td>${[0,1].map(a=>`<td><input class="inp mdK" data-k="${k}" data-a="${a}" type="number" step="0.05" min="0.5" value="${dam?1:o.K[k][a]}"${dam?' disabled':''} style="width:80px"></td>`).join('')}</tr>`).join('')}
+  </tbody></table>
+  <div class="hint" style="margin-top:4px">${dam?'Direct Analysis Method: K = 1 for every member (AISC 360-16 C3); the analysis uses 0.8τ<sub>b</sub>EI and 0.8EA, with notional loads 0.002Y<sub>i</sub> in every combination.':'Effective Length Method: K from the sidesway buckling of the frame (AISC 360-16 App. 7.2.3). The defaults are conservative: 2.1 for the columns (a cantilever with a fixed base, the AISC Commentary Table C-A-7.1 design value); 1.0 for the roof members (braced at their ends). K = 1 may be used for a member of a frame whose Δ<sub>2nd</sub>/Δ<sub>1st</sub> ≤ 1.1 (App. 7.2.3(b)).'}</div>
+  <h3 style="margin:12px 0 4px;font-size:13px">Deflection limits</h3>
+  <div class="md-grid">
+    <label>Roof members, snow S</label><span>L / <input id="mdDS" class="inp mdD" data-k="S" type="number" min="60" step="10" value="${o.defl.S}" style="width:70px"></span>
+    <label>Roof members, D + S</label><span>L / <input class="inp mdD" data-k="DS" type="number" min="60" step="10" value="${o.defl.DS}" style="width:70px"></span>
+    <label>Column drift, D + a·W</label><span>H / <input class="inp mdD" data-k="drift" type="number" min="20" step="10" value="${o.defl.drift}" style="width:70px">, a = <input class="inp mdD" data-k="wFac" type="number" min="0.1" max="1" step="0.01" value="${o.defl.wFac}" style="width:60px"></span>
+  </div>
+  <div class="hint" style="margin-top:4px">Spans: the deflection relative to the line between the span's supports. Overhangs (cantilevers): the tip deflection relative to the support, against 2L/limit (L = overhang length). The column drift uses a·W, the wind at a 10-year return period (a ≈ 0.42 for the ASCE 7-16 Risk Category II wind speed; ASCE 7-16 Commentary C.2.2). Unfactored load cases, nominal stiffness, first-order analysis.</div>`;
+  const chg=()=>{ MD.sel=null; mdRender(true); };
+  document.getElementById('mdMethod').onchange=e=>{ state.md.method=e.target.value; mdRenderInputs(); chg(); };
+  document.getElementById('mdGrade').onchange=e=>{ state.md.grade=e.target.value; chg(); };
+  document.getElementById('mdRafLb').onchange=e=>{ state.md.rafterLb=e.target.value; chg(); };
+  document.getElementById('mdCb').onchange=e=>{ const v=+e.target.value; state.md.Cb=v>=1?v:1; chg(); };
+  host.querySelectorAll('.mdK').forEach(el=>el.onchange=()=>{ const v=+el.value; if(v>0){ const K=state.md.K[el.dataset.k].slice(); K[+el.dataset.a]=v; state.md.K=Object.assign({},state.md.K,{[el.dataset.k]:K}); } chg(); });
+  host.querySelectorAll('.mdD').forEach(el=>el.onchange=()=>{ const v=+el.value; if(v>0) state.md.defl=Object.assign({},state.md.defl,{[el.dataset.k]:v}); chg(); });
+}
+function mdRender(force){
+  const st=document.getElementById('mdStatus'); if(!st) return;
+  if(!document.getElementById('mdMethod')) mdRenderInputs();
+  if(force) MD.sig=null;
+  else if(MD.res && MD.sig===mdSig()){ mdRenderResults(MD.res); return; }
+  st.innerHTML='<span style="color:var(--muted)">Running the second-order analysis…</span>';
+  setTimeout(()=>{ const R=mdEnsure(); mdRenderResults(R); },20);
+}
+function mdRenderResults(R){
+  const st=document.getElementById('mdStatus'), sum=document.getElementById('mdSummary'), dfl=document.getElementById('mdDefl'), det=document.getElementById('mdDetail');
+  if(R.error){ st.innerHTML=`<b style="color:var(--rust)">⚠ ${aesc(R.error)}</b>`; sum.innerHTML=dfl.innerHTML=det.innerHTML=''; return; }
+  const dam=R.method==='dam', hssN=R.groups.filter(g=>g.hss).length, other=R.groups.filter(g=>!g.hss);
+  const worst=R.groups.filter(g=>g.worst).reduce((m,g)=>!m||g.worst.r.gov>m.worst.r.gov?g:m,null);
+  const ng=R.groups.filter(g=>g.worst&&g.worst.r.gov>1).length + R.defl.filter(x=>x.ratio>1).length + R.drift.filter(x=>x.ratio>1).length;
+  let warn='';
+  if(R.errs.length) warn+=`<br><b style="color:var(--rust)">⚠ ${aesc(R.errs[0])}${R.errs.length>1?` (and ${R.errs.length-1} more)`:''}.</b>`;
+  if(R.notConv.length) warn+=`<br><span style="color:var(--rust)">The second-order iteration did not converge for ${aesc(R.notConv.join(', '))}.</span>`;
+  if(!dam && R.worstRatio>1.5) warn+=`<br><b style="color:var(--rust)">⚠ Δ<sub>2nd</sub>/Δ<sub>1st</sub> = ${f(R.worstRatio,2)} > 1.5 (${aesc(R.worstRun)}): the Effective Length Method is permitted only up to 1.5 (AISC 360-16 App. 7.2.1). Use the Direct Analysis Method.</b>`;
+  st.innerHTML=`<b style="color:${ng?'var(--rust)':'var(--moss)'}">${ng?'⚠ '+ng+' check'+(ng>1?'s':'')+' exceed 1.0':'✓ All checks ≤ 1.0'}</b> · ${hssN} HSS member${hssN!==1?'s':''} checked over ${R.nRuns} second-order analyses (${dam?'Direct Analysis Method':'Effective Length Method'}, ${aesc(R.grade.name)}) in ${f(R.ms/1000,1)} s.`
+    + ` Largest Δ<sub>2nd</sub>/Δ<sub>1st</sub> = ${f(R.worstRatio,3)}${R.worstRun?` (${aesc(R.worstRun)})`:''}.`
+    + (worst?` Governing: <b>${aesc(worst.label)}</b> ${mdStatus(worst.worst.r.gov)}.`:'')
+    + (other.length?`<br><span style="color:var(--muted)">Not checked for strength (W-shapes; this tab checks rectangular HSS only): ${aesc([...new Set(other.map(g=>g.secName))].join(', '))} — ${other.length} member${other.length>1?'s':''}. Their deflections are checked below.</span>`:'')
+    + warn;
+  const rows=R.groups.filter(g=>g.hss).map(g=>{ const W=g.worst; if(!W) return `<tr><td>${aesc(g.label)}</td><td>${aesc(g.secName)}</td><td colspan="5">no results</td></tr>`;
+    return `<tr class="mdRow${MD.sel===g.key?' sel':''}" data-k="${aesc(g.key)}" style="cursor:pointer"><td>${aesc(g.label)}</td><td>${aesc(g.secName)}</td><td>${mdStatus(W.r.gov)}</td><td>${aesc(MD_CHECK[W.r.govKey](W.r))}</td><td>${aesc(W.run)}</td><td>${f(W.at,2)} ft</td>`
+      +`<td>${f(W.r.P,2)} / ${f(W.r.Mx,2)} / ${f(W.r.My,2)} / ${f(Math.max(W.r.Vx,W.r.Vy),2)} / ${f(W.r.T,2)}</td></tr>`; }).join('');
+  sum.innerHTML=hssN?`<table class="rpt md-sum"><thead><tr><th>Member</th><th>Section</th><th>Ratio</th><th>Governing check</th><th>Combination</th><th>Location</th><th>P / M<sub>x</sub> / M<sub>y</sub> / V / T ratios</th></tr></thead><tbody>${rows}</tbody></table><div class="hint">Click a member for its worked check. The ratios in the last column are at the governing point.</div>`:'<p class="hint">No HSS members in the model.</p>';
+  sum.querySelectorAll('.mdRow').forEach(tr=>tr.onclick=()=>{ MD.sel=tr.dataset.k; mdRenderResults(R); });
+  const drow=x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>${aesc(x.span)}</td><td>${aesc(x.load)}</td><td>${uDisp(Math.abs(x.d))} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (${x.cant?'2L':'L'}/${x.den})</td><td>${mdStatus(x.ratio)}</td></tr>`;
+  const dmax=Object.values(R.defl.reduce((m,x)=>{ const k=x.g+'|'+x.load; if(!m[k]||x.ratio>m[k].ratio) m[k]=x; return m; },{}));
+  const dr=dmax.map(drow).join(''), dall=R.defl.map(drow).join('');
+  const dd=R.drift.map(x=>`<tr><td>${aesc(x.g)}</td><td>${aesc(x.sec)}</td><td>H = ${f(x.H,2)} ft</td><td>D + ${R.o.defl.wFac}·${aesc(x.w)}</td><td>${uDisp(x.d)} ${uDispLbl()}</td><td>${uDisp(x.lim)} ${uDispLbl()} (H/${R.o.defl.drift})</td><td>${mdStatus(x.ratio)}</td></tr>`).join('');
+  const dh='<thead><tr><th>Member</th><th>Section</th><th>Span</th><th>Load</th><th>Deflection</th><th>Limit</th><th>Ratio</th></tr></thead>';
+  dfl.innerHTML=`<table class="rpt md-dfl">${dh}<tbody>${dr}${dd}</tbody></table><div class="hint">The largest ratio of each member and load, and the drift of each column.</div>`
+    +`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px">Every span and overhang (${R.defl.length} rows)</summary><table class="rpt md-dfl">${dh}<tbody>${dall}</tbody></table></details>`;
+  const g=R.groups.find(x=>x.key===MD.sel) || worst;
+  if(g&&g.worst){ MD.sel=g.key; sum.querySelectorAll('.mdRow').forEach(tr=>tr.classList.toggle('sel',tr.dataset.k===g.key));
+    document.getElementById('mdDetailTitle').textContent=`Worked check: ${g.label} (${g.secName})`;
+    det.innerHTML=`<div class="hint" style="margin-bottom:6px">Governing point: ${aesc(g.worst.run)}, element ${g.worst.elem} ${g.worst.end}-end, ${f(g.worst.at,2)} ft from the start of the member (${g.type==='col'?'the base':g.type==='rafter'?'the low roof tip':'the front end'}). Ratio ${mdStatus(g.worst.r.gov)}.</div>`+mdStepsHTML(mdSteps(g)); }
+  else det.innerHTML='';
 }
 
 // ============================================================================
@@ -9243,6 +9628,409 @@ details.rp-lz{border-top:0.4pt solid #bbb;padding:2pt 0;} details.rp-lz>summary{
   }
 
   window.SharedReport = { build, html, text, mount, print, ref, keyOf, css };
+})();
+
+</script>
+<script id="sharedAisc-hss" data-src="All-Structural shared/aisc-hss.js" data-commit="42ca305">
+/* shared/aisc-hss.js — window.SharedAiscHss
+ * Strength of rectangular and square HSS members, AISC 360-16 (LRFD), and the
+ * worked steps that show it (shared/steps.js step format, plain objects).
+ * Created 2026-11-13 for the Steel Canopy Designer's Member Design tab
+ * (fixlog/shared-aisc-hss.md). The formulas follow the same provisions and
+ * conventions as Steel Beam Design - AISC 15th.html (classifyFlex,
+ * classifyComp, flexRectHSS, seSlenderRect, shearMajor/Minor (G4),
+ * compStrength (E3, E7), tensionStrength (D2), torsionHSS (H3)); the tests
+ * compare the two on the same shapes.
+ *
+ * Units: in, in^2, in^3, in^4, ksi, kip, kip-in.
+ * Axes: x = major axis (bending about x bends the H walls; H = Ht >= B for
+ * the AISC shapes). Demand fields:
+ *   P   axial force, + tension, - compression (kip)
+ *   Mx  moment about x, My moment about y (kip-in, magnitude used)
+ *   Vx  shear that accompanies Mx: carried by the two H walls (kip)
+ *   Vy  shear that accompanies My: carried by the two B walls (kip)
+ *   T   torsion (kip-in)
+ * Lengths: Lcx, Lcy effective lengths for buckling about x and y (K L, in);
+ * Lb unbraced length of the compression flange for LTB (in), 0 = braced; Cb.
+ *
+ * No DOM. Engine only. */
+(function () {
+  'use strict';
+  var EKSI = 29000, GKSI = 11200;
+  var SQ = Math.sqrt, PI = Math.PI;
+  /* AISC Shapes Database v15.0, rectangular and square HSS (the HSSR table of
+   * Steel Beam Design - AISC 15th.html, same values). Columns: */
+  var COLS = ['name', 'W', 'A', 'Ht', 'B', 'tnom', 'tdes', 'bt', 'ht', 'Ix', 'Zx', 'Sx', 'rx', 'Iy', 'Zy', 'Sy', 'ry', 'J', 'C'];
+  var ROWS = [
+    ["HSS34X10X1",277.07,76.2,34,10,1,0.93,7.75,33.6,9600,750,565,11.2,1340,307,268,4.19,4040,555],["HSS34X10X7/8",244.88,67.3,34,10,0.875,0.814,9.29,38.8,8600,668,506,11.3,1210,274,242,4.24,3630,494],["HSS34X10X3/4",212,58.2,34,10,0.75,0.698,11.3,45.7,7550,582,444,11.4,1070,240,215,4.29,3190,431],["HSS34X10X5/8",178.41,48.9,34,10,0.625,0.581,14.2,55.5,6430,493,378,11.5,924,205,185,4.35,2720,365],
+    ["HSS30X10X1",249.85,68.7,30,10,1,0.93,7.75,29.3,6900,606,460,10,1180,273,237,4.15,3460,487],["HSS30X10X7/8",221.06,60.8,30,10,0.875,0.814,9.29,33.9,6190,540,413,10.1,1070,245,215,4.2,3110,434],["HSS30X10X3/4",191.58,52.6,30,10,0.75,0.698,11.3,40,5440,471,363,10.2,952,215,190,4.25,2730,379],["HSS30X10X5/8",161.4,44.3,30,10,0.625,0.581,14.2,48.6,4640,400,310,10.2,820,183,164,4.31,2330,321],
+    ["HSS30X10X1/2",130.52,35.8,30,10,0.5,0.465,18.5,61.5,3810,326,254,10.3,679,149,136,4.36,1910,262],["HSS24X20X3/4",212,58.2,24,20,0.75,0.698,25.7,31.4,4960,489,413,9.23,3750,432,375,8.02,6740,627],["HSS24X20X5/8",178.41,48.9,24,20,0.625,0.581,31.4,38.3,4220,413,351,9.29,3190,365,319,8.08,5690,528],["HSS24X20X1/2",144.13,39.5,24,20,0.5,0.465,40,48.6,3450,336,287,9.34,2610,297,261,8.13,4620,427],
+    ["HSS24X20X3/8",109.15,29.9,24,20,0.375,0.349,54.3,65.8,2640,256,220,9.4,2000,226,200,8.19,3510,324],["HSS24X20X5/16",91.39,25.1,24,20,0.3125,0.291,65.7,79.5,2230,215,186,9.43,1690,190,169,8.21,2950,272],["HSS24X18X3/4",201.79,55.4,24,18,0.75,0.698,22.8,31.4,4580,456,382,9.09,2940,375,327,7.29,5690,562],["HSS24X18X5/8",169.91,46.6,24,18,0.625,0.581,28,38.3,3900,386,325,9.15,2510,318,279,7.34,4810,473],
+    ["HSS24X18X1/2",137.32,37.6,24,18,0.5,0.465,35.7,48.6,3190,314,266,9.21,2060,258,229,7.39,3910,383],["HSS24X18X3/8",104.04,28.5,24,18,0.375,0.349,48.6,65.8,2450,240,204,9.27,1580,197,176,7.45,2970,291],["HSS24X18X5/16",87.14,23.9,24,18,0.3125,0.291,58.9,79.5,2060,201,172,9.3,1330,166,148,7.47,2500,244],["HSS24X16X3/4",191.58,52.6,24,16,0.75,0.698,19.9,31.4,4200,424,350,8.93,2250,321,281,6.53,4680,496],
+    ["HSS24X16X5/8",161.4,44.3,24,16,0.625,0.581,24.5,38.3,3580,359,298,8.99,1920,272,240,6.59,3960,419],["HSS24X16X1/2",130.52,35.8,24,16,0.5,0.465,31.4,48.6,2930,292,244,9.05,1580,222,197,6.64,3220,340],["HSS24X16X3/8",98.94,27.1,24,16,0.375,0.349,42.8,65.8,2250,223,188,9.12,1210,169,152,6.69,2460,258],["HSS24X16X5/16",82.88,22.7,24,16,0.3125,0.291,52,79.5,1900,188,158,9.15,1030,143,128,6.72,2070,217],
+    ["HSS24X14X3/4",181.37,49.8,24,14,0.75,0.698,17.1,31.4,3820,391,318,8.76,1660,270,237,5.77,3730,431],["HSS24X14X5/8",152.89,41.9,24,14,0.625,0.581,21.1,38.3,3260,332,272,8.82,1420,229,203,5.82,3170,364],["HSS24X14X1/2",123.71,33.9,24,14,0.5,0.465,27.1,48.6,2680,270,223,8.88,1170,187,167,5.87,2580,296],["HSS24X14X3/8",93.83,25.7,24,14,0.375,0.349,37.1,65.8,2060,207,171,8.94,902,143,129,5.92,1970,225],
+    ["HSS24X14X5/16",78.63,21.6,24,14,0.3125,0.291,45.1,79.5,1740,174,145,8.98,763,120,109,5.95,1660,189],["HSS24X14X1/4",63.25,17.4,24,14,0.25,0.233,57.1,100,1410,140,117,9.01,619,97.4,88.5,5.98,1340,152],["HSS24X12X1",222.63,61.3,24,12,1,0.93,9.9,22.8,4340,459,362,8.42,1460,282,243,4.88,3630,472],["HSS24X12X7/8",197.24,54.3,24,12,0.875,0.814,11.7,26.5,3910,410,326,8.49,1320,252,220,4.93,3250,420],
+    ["HSS24X12X3/4",171.16,47.1,24,12,0.75,0.698,14.2,31.4,3440,359,287,8.55,1170,221,195,4.98,2850,366],["HSS24X12X5/8",144.39,39.6,24,12,0.625,0.581,17.7,38.4,2940,304,245,8.62,1000,188,167,5.03,2430,310],["HSS24X12X1/2",116.91,32.1,24,12,0.5,0.465,22.8,48.6,2420,248,202,8.68,829,154,138,5.08,1980,252],["HSS24X12X3/8",88.73,24.3,24,12,0.375,0.349,31.4,65.8,1860,190,155,8.75,642,118,107,5.14,1520,192],
+    ["HSS24X12X5/16",74.38,20.4,24,12,0.3125,0.291,38.2,79.5,1570,160,131,8.78,543,99.4,90.6,5.16,1280,161],["HSS24X12X1/4",59.85,16.4,24,12,0.25,0.233,48.5,100,1280,129,106,8.82,442,80.5,73.6,5.19,1030,130],["HSS24X8X1/2",103.3,28.3,24,8,0.5,0.465,14.2,48.6,1900,205,159,8.19,336,93.5,84,3.44,955,165],["HSS24X8X3/8",78.52,21.5,24,8,0.375,0.349,19.9,65.8,1470,157,123,8.27,263,72.2,65.8,3.5,739,126],
+    ["HSS24X8X5/16",65.87,18.1,24,8,0.3125,0.291,24.5,79.5,1250,132,104,8.3,224,61,56,3.52,625,106],["HSS24X8X1/4",53.05,14.6,24,8,0.25,0.233,31.3,100,1010,107,84.4,8.34,183,49.5,45.8,3.55,508,86],["HSS22X22X1",277.07,76.2,22,22,1,0.93,20.7,20.7,5550,596,505,8.54,5550,596,505,8.54,8890,823],["HSS22X22X7/8",244.88,67.3,22,22,0.875,0.814,24.1,24.1,4970,530,452,8.59,4970,530,452,8.59,7890,729],
+    ["HSS22X22X3/4",212,58.2,22,22,0.75,0.698,28.5,28.5,4350,462,395,8.65,4350,462,395,8.65,6860,632],["HSS22X22X5/8",178.41,48.9,22,22,0.625,0.581,34.9,34.9,3710,390,337,8.7,3710,390,337,8.7,5790,532],["HSS22X22X1/2",144.13,39.5,22,22,0.5,0.465,44.3,44.3,3030,317,276,8.76,3030,317,276,8.76,4700,431],["HSS22X20X3/4",201.79,55.4,22,20,0.75,0.698,25.7,28.5,4040,432,367,8.54,3490,405,349,7.93,5920,573],
+    ["HSS22X20X5/8",169.91,46.6,22,20,0.625,0.581,31.4,34.9,3440,366,313,8.59,2970,343,297,7.99,5000,483],["HSS22X20X1/2",137.32,37.6,22,20,0.5,0.465,40,44.3,2820,297,256,8.65,2440,279,244,8.04,4060,391],["HSS22X20X3/8",104.04,28.5,22,20,0.375,0.349,54.3,60,2160,227,196,8.71,1870,213,187,8.1,3090,297],["HSS22X20X5/16",87.14,23.9,22,20,0.3125,0.291,65.7,72.6,1820,191,166,8.73,1580,179,158,8.13,2590,249],
+    ["HSS22X18X3/4",191.58,52.6,22,18,0.75,0.698,22.8,28.5,3720,402,338,8.41,2730,351,304,7.21,5000,513],["HSS22X18X5/8",161.4,44.3,22,18,0.625,0.581,28,34.9,3170,341,288,8.47,2330,297,259,7.26,4230,433],["HSS22X18X1/2",130.52,35.8,22,18,0.5,0.465,35.7,44.3,2600,277,236,8.52,1910,242,213,7.31,3440,351],["HSS22X18X3/8",98.94,27.1,22,18,0.375,0.349,48.6,60,2000,212,182,8.58,1470,185,164,7.37,2620,267],
+    ["HSS22X18X5/16",82.88,22.7,22,18,0.3125,0.291,58.9,72.6,1680,178,153,8.61,1240,156,138,7.4,2200,224],["HSS22X16X3/4",181.37,49.8,22,16,0.75,0.698,19.9,28.5,3400,372,309,8.26,2080,300,260,6.47,4130,454],["HSS22X16X5/8",152.89,41.9,22,16,0.625,0.581,24.5,34.9,2910,316,264,8.32,1780,254,223,6.52,3500,383],["HSS22X16X1/2",123.71,33.9,22,16,0.5,0.465,31.4,44.3,2380,257,217,8.38,1470,207,183,6.57,2850,311],
+    ["HSS22X16X3/8",93.83,25.7,22,16,0.375,0.349,42.8,60,1830,197,167,8.44,1130,159,141,6.63,2170,236],["HSS22X16X5/16",78.63,21.6,22,16,0.3125,0.291,52,72.6,1550,165,141,8.47,954,133,119,6.65,1830,198],["HSS22X16X1/4",63.25,17.4,22,16,0.25,0.233,65.7,91.4,1250,134,114,8.5,774,108,96.7,6.68,1470,160],["HSS22X14X3/4",171.16,47.1,22,14,0.75,0.698,17.1,28.5,3090,343,281,8.1,1530,251,219,5.71,3300,394],
+    ["HSS22X14X5/8",144.39,39.6,22,14,0.625,0.581,21.1,34.9,2640,291,240,8.16,1320,213,188,5.76,2800,333],["HSS22X14X1/2",116.91,32.1,22,14,0.5,0.465,27.1,44.3,2170,237,197,8.22,1080,174,155,5.81,2290,271],["HSS22X14X3/8",88.73,24.3,22,14,0.375,0.349,37.1,60,1670,182,152,8.29,837,134,120,5.87,1750,206],["HSS22X14X5/16",74.38,20.4,22,14,0.3125,0.291,45.1,72.6,1410,153,128,8.32,708,112,101,5.89,1470,173],
+    ["HSS22X14X1/4",59.85,16.4,22,14,0.25,0.233,57.1,91.4,1140,123,104,8.35,575,90.9,82.2,5.92,1190,140],["HSS22X10X5/8",127.37,35,22,10,0.625,0.581,14.2,34.9,2110,241,191,7.76,614,139,123,4.19,1560,234],["HSS22X10X1/2",103.3,28.3,22,10,0.5,0.465,18.5,44.3,1740,197,158,7.83,510,114,102,4.24,1280,191],["HSS22X10X3/8",78.52,21.5,22,10,0.375,0.349,25.7,60,1340,151,122,7.9,397,87.7,79.4,4.29,986,146],
+    ["HSS22X10X5/16",65.87,18.1,22,10,0.3125,0.291,31.4,72.6,1140,128,103,7.93,337,74,67.4,4.32,832,123],["HSS22X10X1/4",53.05,14.6,22,10,0.25,0.233,39.9,91.4,923,103,83.9,7.96,275,60,55,4.34,674,99],["HSS20X20X1",249.85,68.7,20,20,1,0.93,18.5,18.5,4100,486,410,7.72,4100,486,410,7.72,6600,673],["HSS20X20X7/8",221.06,60.8,20,20,0.875,0.814,21.6,21.6,3670,433,367,7.77,3670,433,367,7.77,5870,597],
+    ["HSS20X20X3/4",191.58,52.6,20,20,0.75,0.698,25.6,25.6,3230,378,323,7.84,3230,378,323,7.84,5110,519],["HSS20X20X5/8",161.4,44.3,20,20,0.625,0.581,31.5,31.5,2750,320,275,7.88,2750,320,275,7.88,4320,437],["HSS20X20X1/2",130.52,35.8,20,20,0.5,0.465,40,40,2260,261,226,7.95,2260,261,226,7.95,3510,355],["HSS20X20X3/8",98.94,27.1,20,20,0.375,0.349,54.3,54.3,1740,199,174,8,1740,199,174,8,2680,269],
+    ["HSS20X20X5/16",82.88,22.7,20,20,0.3125,0.291,65.7,65.7,1460,167,146,8.03,1460,167,146,8.03,2250,226],["HSS20X16X3/4",171.16,47.1,20,16,0.75,0.698,19.9,25.7,2710,324,271,7.59,1920,278,240,6.39,3590,411],["HSS20X16X5/8",144.39,39.6,20,16,0.625,0.581,24.5,31.4,2320,275,232,7.65,1640,236,206,6.44,3040,347],["HSS20X16X1/2",116.91,32.1,20,16,0.5,0.465,31.4,40,1900,224,190,7.7,1350,193,169,6.5,2480,282],
+    ["HSS20X16X3/8",88.73,24.3,20,16,0.375,0.349,42.8,54.3,1470,172,147,7.76,1040,148,130,6.55,1890,215],["HSS20X16X5/16",74.38,20.4,20,16,0.3125,0.291,52,65.7,1240,144,124,7.79,882,124,110,6.58,1590,180],["HSS20X16X1/4",59.85,16.4,20,16,0.25,0.233,65.7,82.8,1000,117,100,7.82,716,100,89.5,6.6,1280,145],["HSS20X12X1",195.4,53.8,20,12,1,0.93,9.9,18.5,2740,344,274,7.14,1230,241,205,4.78,2820,390],
+    ["HSS20X12X7/8",173.43,47.7,20,12,0.875,0.814,11.7,21.6,2480,308,248,7.2,1110,216,186,4.83,2530,347],["HSS20X12X3/4",150.75,41.5,20,12,0.75,0.698,14.2,25.6,2190,270,219,7.26,988,190,165,4.88,2220,303],["HSS20X12X5/8",127.37,35,20,12,0.625,0.581,17.7,31.4,1880,230,188,7.33,851,162,142,4.93,1890,257],["HSS20X12X1/2",103.3,28.3,20,12,0.5,0.465,22.8,40,1550,188,155,7.39,705,132,117,4.99,1540,209],
+    ["HSS20X12X3/8",78.52,21.5,20,12,0.375,0.349,31.4,54.3,1200,144,120,7.45,547,102,91.1,5.04,1180,160],["HSS20X12X5/16",65.87,18.1,20,12,0.3125,0.291,38.2,65.7,1010,122,101,7.48,464,85.8,77.3,5.07,997,134],["HSS20X8X1",168.18,46.4,20,8,1,0.93,5.6,18.5,2060,273,206,6.67,472,141,118,3.19,1320,248],["HSS20X8X7/8",149.61,41.2,20,8,0.875,0.814,6.83,21.6,1880,246,188,6.74,432,127,108,3.24,1200,222],
+    ["HSS20X8X3/4",130.33,35.9,20,8,0.75,0.698,8.46,25.7,1670,216,167,6.82,388,112,97.1,3.29,1060,195],["HSS20X8X5/8",110.36,30.3,20,8,0.625,0.581,10.8,31.4,1440,185,144,6.89,338,96.4,84.6,3.34,916,167],["HSS20X8X1/2",89.68,24.6,20,8,0.5,0.465,14.2,40,1190,152,119,6.96,283,79.5,70.8,3.39,757,137],["HSS20X8X3/8",68.31,18.7,20,8,0.375,0.349,19.9,54.3,926,117,92.6,7.03,222,61.5,55.6,3.44,586,105],
+    ["HSS20X8X5/16",57.36,15.7,20,8,0.3125,0.291,24.5,65.7,786,98.6,78.6,7.07,189,52,47.4,3.47,496,88.3],["HSS20X6X5/8",101.85,28,20,6,0.625,0.581,7.33,31.4,1220,162,122,6.6,175,67.3,58.4,2.5,528,122],["HSS20X6X1/2",82.88,22.8,20,6,0.5,0.465,9.9,40,1020,134,102,6.68,148,55.8,49.4,2.55,441,100],["HSS20X6X3/8",63.21,17.3,20,6,0.375,0.349,14.2,54.3,792,103,79.2,6.76,118,43.4,39.2,2.6,345,77.3],
+    ["HSS20X6X5/16",53.11,14.6,20,6,0.3125,0.291,17.6,65.7,673,87.1,67.3,6.79,101,36.9,33.6,2.63,293,65.4],["HSS20X6X1/4",42.84,11.8,20,6,0.25,0.233,22.8,82.8,549,70.7,54.9,6.83,82.9,30,27.6,2.66,240,53.1],["HSS20X4X1/2",76.07,20.9,20,4,0.5,0.465,5.6,40,838,115,83.8,6.33,58.7,34,29.3,1.68,195,63.8],["HSS20X4X3/8",58.1,16,20,4,0.375,0.349,8.46,54.3,657,89.3,65.7,6.42,47.6,26.8,23.8,1.73,156,49.9],
+    ["HSS20X4X5/16",48.86,13.4,20,4,0.3125,0.291,10.7,65.7,560,75.6,56,6.46,41.2,22.9,20.6,1.75,134,42.4],["HSS20X4X1/4",39.43,10.8,20,4,0.25,0.233,14.2,82.8,458,61.5,45.8,6.5,34.3,18.7,17.1,1.78,111,34.7],["HSS18X18X1",222.63,61.3,18,18,1,0.93,16.4,16.4,2920,387,324,6.9,2920,387,324,6.9,4740,539],["HSS18X18X7/8",197.24,54.3,18,18,0.875,0.814,19.2,19.2,2630,346,292,6.96,2630,346,292,6.96,4220,479],
+    ["HSS18X18X3/4",171.16,47.1,18,18,0.75,0.698,22.8,22.8,2320,302,258,7.02,2320,302,258,7.02,3690,417],["HSS18X18X5/8",144.39,39.6,18,18,0.625,0.581,28.1,28.1,1980,257,220,7.07,1980,257,220,7.07,3120,352],["HSS18X18X1/2",116.91,32.1,18,18,0.5,0.465,35.7,35.7,1630,210,181,7.13,1630,210,181,7.13,2540,286],["HSS18X18X3/8",88.73,24.3,18,18,0.375,0.349,48.6,48.6,1250,160,139,7.18,1250,160,139,7.18,1940,217],
+    ["HSS18X18X5/16",74.38,20.4,18,18,0.3125,0.291,58.9,58.9,1060,135,118,7.21,1060,135,118,7.21,1630,182],["HSS18X18X1/4",59.85,16.4,18,18,0.25,0.233,74.3,74.3,860,109,95.6,7.24,860,109,95.6,7.24,1320,147],["HSS18X10X5/8",110.36,30.3,18,10,0.625,0.581,14.2,28,1280,176,142,6.49,511,117,102,4.1,1190,190],["HSS18X10X1/2",89.68,24.6,18,10,0.5,0.465,18.5,35.7,1060,144,117,6.55,425,96.2,85,4.16,977,155],
+    ["HSS18X10X3/8",68.31,18.7,18,10,0.375,0.349,25.7,48.6,820,111,91.1,6.61,332,74.2,66.4,4.21,752,119],["HSS18X10X5/16",57.36,15.7,18,10,0.3125,0.291,31.4,58.9,695,93.7,77.2,6.65,282,62.7,56.4,4.23,635,100],["HSS18X10X1/4",46.24,12.7,18,10,0.25,0.233,39.9,74.3,566,76,62.9,6.68,230,50.9,46.1,4.26,515,80.8],["HSS18X8X5/8",101.85,28,18,8,0.625,0.581,10.8,28,1100,156,122,6.27,306,87.8,76.6,3.31,797,149],
+    ["HSS18X8X1/2",82.88,22.8,18,8,0.5,0.465,14.2,35.7,913,128,101,6.33,257,72.5,64.2,3.36,659,122],["HSS18X8X3/8",63.21,17.3,18,8,0.375,0.349,19.9,48.6,711,98.7,79,6.4,202,56.1,50.5,3.41,510,94.1],["HSS18X8X5/16",53.11,14.6,18,8,0.3125,0.291,24.5,58.9,604,83.4,67.1,6.44,172,47.5,43,3.44,432,79.4],["HSS18X8X1/4",42.84,11.8,18,8,0.25,0.233,31.3,74.3,492,67.7,54.7,6.47,141,38.6,35.2,3.46,351,64.3],
+    ["HSS18X6X3/4",109.91,30.3,18,6,0.75,0.698,5.6,22.8,1060,158,118,5.92,179,70.4,59.6,2.43,530,127],["HSS18X6X5/8",93.34,25.7,18,6,0.625,0.581,7.33,28,923,135,103,6,158,61,52.7,2.48,462,109],["HSS18X6X1/2",76.07,20.9,18,6,0.5,0.465,9.9,35.7,770,112,85.6,6.07,134,50.7,44.6,2.53,387,89.9],["HSS18X6X3/8",58.1,16,18,6,0.375,0.349,14.2,48.6,602,86.4,66.9,6.15,106,39.5,35.5,2.58,302,69.5],
+    ["HSS18X6X5/16",48.86,13.4,18,6,0.3125,0.291,17.6,58.9,513,73.1,57,6.18,91.3,33.5,30.4,2.61,257,58.7],["HSS18X6X1/4",39.43,10.8,18,6,0.25,0.233,22.8,74.3,419,59.4,46.5,6.22,75.1,27.3,25,2.63,210,47.7],["HSS16X16X1",195.4,53.8,16,16,1,0.93,14.2,14.2,1990,300,249,6.09,1990,300,249,6.09,3270,419],["HSS16X16X7/8",173.43,47.7,16,16,0.875,0.814,16.7,16.7,1800,268,225,6.14,1800,268,225,6.14,2920,373],
+    ["HSS16X16X3/4",150.75,41.5,16,16,0.75,0.698,19.9,19.9,1590,235,199,6.19,1590,235,199,6.19,2560,326],["HSS16X16X5/8",127.37,35,16,16,0.625,0.581,24.5,24.5,1370,200,171,6.25,1370,200,171,6.25,2170,276],["HSS16X16X1/2",103.3,28.3,16,16,0.5,0.465,31.4,31.4,1130,164,141,6.31,1130,164,141,6.31,1770,224],["HSS16X16X3/8",78.52,21.5,16,16,0.375,0.349,42.8,42.8,873,126,109,6.37,873,126,109,6.37,1350,171],
+    ["HSS16X16X5/16",65.87,18.1,16,16,0.3125,0.291,52,52,739,106,92.3,6.39,739,106,92.3,6.39,1140,144],["HSS16X16X1/4",53.05,14.6,16,16,0.25,0.233,65.7,65.7,600,85.8,75,6.42,600,85.8,75,6.42,921,116],["HSS16X12X1",168.18,46.4,16,12,1,0.93,9.9,14.2,1570,244,196,5.82,1000,200,167,4.64,2030,307],["HSS16X12X7/8",149.61,41.2,16,12,0.875,0.814,11.7,16.7,1430,219,178,5.88,910,179,152,4.7,1830,274],
+    ["HSS16X12X3/4",130.33,35.9,16,12,0.75,0.698,14.2,19.9,1270,193,159,5.95,810,158,135,4.75,1610,240],["HSS16X12X5/8",110.36,30.3,16,12,0.625,0.581,17.7,24.5,1090,165,136,6,700,135,117,4.8,1370,204],["HSS16X12X1/2",89.68,24.6,16,12,0.5,0.465,22.8,31.4,904,135,113,6.06,581,111,96.8,4.86,1120,166],["HSS16X12X3/8",68.31,18.7,16,12,0.375,0.349,31.4,42.8,702,104,87.7,6.12,452,85.5,75.3,4.91,862,127],
+    ["HSS16X12X5/16",57.36,15.7,16,12,0.3125,0.291,38.2,52,595,87.7,74.4,6.15,384,72.2,64,4.94,727,107],["HSS16X10X5/8",101.85,28,16,10,0.625,0.581,14.2,24.5,953,147,119,5.84,459,106,91.8,4.05,1010,168],["HSS16X10X1/2",82.88,22.8,16,10,0.5,0.465,18.5,31.4,792,121,99,5.9,383,87.3,76.6,4.1,829,137],["HSS16X10X3/8",63.21,17.3,16,10,0.375,0.349,25.7,42.8,616,93,77,5.96,299,67.4,59.9,4.15,639,105],
+    ["HSS16X10X5/16",53.11,14.6,16,10,0.3125,0.291,31.4,52,523,78.6,65.4,5.99,255,57,50.9,4.18,539,88.7],["HSS16X10X1/4",42.84,11.8,16,10,0.25,0.233,39.9,65.7,426,63.7,53.3,6.02,208,46.3,41.6,4.21,437,71.7],["HSS16X8X7/8",125.79,34.7,16,8,0.875,0.814,6.83,16.7,1050,170,131,5.5,348,104,87,3.17,888,176],["HSS16X8X3/4",109.91,30.3,16,8,0.75,0.698,8.46,19.9,939,150,117,5.57,314,91.9,78.4,3.22,790,155],
+    ["HSS16X8X5/8",93.34,25.7,16,8,0.625,0.581,10.8,24.5,815,129,102,5.64,274,79.2,68.6,3.27,681,132],["HSS16X8X1/2",76.07,20.9,16,8,0.5,0.465,14.2,31.4,679,106,84.9,5.7,230,65.5,57.6,3.32,563,108],["HSS16X8X3/8",58.1,16,16,8,0.375,0.349,19.9,42.8,531,82.1,66.3,5.77,181,50.8,45.3,3.37,436,83.4],["HSS16X8X5/16",48.86,13.4,16,8,0.3125,0.291,24.5,52,451,69.4,56.4,5.8,155,43,38.7,3.4,369,70.4],
+    ["HSS16X8X1/4",39.43,10.8,16,8,0.25,0.233,31.3,65.7,368,56.4,46.1,5.83,127,35,31.7,3.42,300,57],["HSS16X6X5/8",84.84,23.3,16,6,0.625,0.581,7.33,24.5,677,111,84.6,5.38,141,54.7,46.9,2.46,398,96.3],["HSS16X6X1/2",69.27,19,16,6,0.5,0.465,9.9,31.4,567,91.7,70.9,5.46,120,45.5,39.9,2.51,333,79.6],["HSS16X6X3/8",53,14.6,16,6,0.375,0.349,14.2,42.8,445,71.1,55.6,5.53,95.3,35.5,31.8,2.56,260,61.6],
+    ["HSS16X6X5/16",44.6,12.2,16,6,0.3125,0.291,17.6,52,379,60.3,47.4,5.57,81.8,30.2,27.3,2.58,222,52.1],["HSS16X6X1/4",36.03,9.9,16,6,0.25,0.233,22.8,65.7,311,49,38.8,5.6,67.4,24.7,22.5,2.61,181,42.3],["HSS16X6X3/16",27.29,7.46,16,6,0.1875,0.174,31.5,89,237,37.2,29.6,5.64,51.8,18.8,17.3,2.64,138,32.1],["HSS16X4X5/8",76.33,21,16,4,0.625,0.581,3.88,24.5,539,92.9,67.3,5.06,54.1,32.5,27,1.6,174,60.5],
+    ["HSS16X4X1/2",62.46,17.2,16,4,0.5,0.465,5.6,31.4,455,77.3,56.9,5.15,47,27.4,23.5,1.65,150,50.7],["HSS16X4X3/8",47.9,13.2,16,4,0.375,0.349,8.46,42.8,360,60.2,45,5.23,38.3,21.7,19.1,1.71,120,39.7],["HSS16X4X5/16",40.35,11.1,16,4,0.3125,0.291,10.7,52,308,51.1,38.5,5.27,33.2,18.5,16.6,1.73,103,33.8],["HSS16X4X1/4",32.63,8.96,16,4,0.25,0.233,14.2,65.7,253,41.7,31.6,5.31,27.7,15.2,13.8,1.76,85.2,27.6],
+    ["HSS16X4X3/16",24.73,6.76,16,4,0.1875,0.174,20,89,193,31.7,24.2,5.35,21.5,11.7,10.8,1.78,65.5,21.1],["HSS14X14X1",168.18,46.4,14,14,1,0.93,12.1,12.1,1290,224,184,5.27,1290,224,184,5.27,2130,315],["HSS14X14X7/8",149.61,41.2,14,14,0.875,0.814,14.3,14.3,1170,201,167,5.33,1170,201,167,5.33,1910,281],["HSS14X14X3/4",130.33,35.9,14,14,0.75,0.698,17,17,1040,177,149,5.38,1040,177,149,5.38,1680,246],
+    ["HSS14X14X5/8",110.36,30.3,14,14,0.625,0.581,21.1,21.1,897,151,128,5.44,897,151,128,5.44,1430,208],["HSS14X14X1/2",89.68,24.6,14,14,0.5,0.465,27.1,27.1,743,124,106,5.49,743,124,106,5.49,1170,170],["HSS14X14X3/8",68.31,18.7,14,14,0.375,0.349,37.1,37.1,577,95.4,82.5,5.55,577,95.4,82.5,5.55,900,130],["HSS14X14X5/16",57.36,15.7,14,14,0.3125,0.291,45.1,45.1,490,80.5,69.9,5.58,490,80.5,69.9,5.58,759,109],
+    ["HSS14X14X1/4",46.24,12.7,14,14,0.25,0.233,57.1,57.1,399,65.3,57,5.6,399,65.3,57,5.6,614,88.3],["HSS14X12X5/8",101.85,28,14,12,0.625,0.581,17.7,21.1,792,135,113,5.32,624,122,104,4.72,1120,177],["HSS14X12X1/2",82.88,22.8,14,12,0.5,0.465,22.8,27.1,658,111,94,5.38,519,100,86.5,4.78,921,145],["HSS14X12X3/8",63.21,17.3,14,12,0.375,0.349,31.4,37.1,512,85.9,73.2,5.43,405,77.4,67.4,4.83,708,111],
+    ["HSS14X12X5/16",53.11,14.6,14,12,0.3125,0.291,38.2,45.1,435,72.6,62.1,5.46,344,65.4,57.3,4.86,598,93.3],["HSS14X12X1/4",42.84,11.8,14,12,0.25,0.233,48.5,57.1,354,58.9,50.6,5.49,280,53,46.7,4.88,484,75.4],["HSS14X10X7/8",125.79,34.7,14,10,0.875,0.814,9.29,14.2,886,158,127,5.05,522,125,104,3.88,1100,195],["HSS14X10X3/4",109.91,30.3,14,10,0.75,0.698,11.3,17.1,792,140,113,5.11,468,111,93.6,3.93,970,171],
+    ["HSS14X10X5/8",93.34,25.7,14,10,0.625,0.581,14.2,21.1,687,120,98.2,5.17,407,95.1,81.5,3.98,832,146],["HSS14X10X1/2",76.07,20.9,14,10,0.5,0.465,18.5,27.1,573,98.8,81.8,5.23,341,78.5,68.1,4.04,685,120],["HSS14X10X3/8",58.1,16,14,10,0.375,0.349,25.7,37.1,447,76.3,63.9,5.29,267,60.7,53.4,4.09,528,91.8],["HSS14X10X5/16",48.86,13.4,14,10,0.3125,0.291,31.4,45.1,380,64.6,54.3,5.32,227,51.4,45.5,4.12,446,77.4],
+    ["HSS14X10X1/4",39.43,10.8,14,10,0.25,0.233,39.9,57.1,310,52.4,44.3,5.35,186,41.8,37.2,4.14,362,62.6],["HSS14X8X5/8",84.84,23.3,14,8,0.625,0.581,10.8,21.1,582,104,83.2,5,242,70.5,60.6,3.22,566,115],["HSS14X8X1/2",69.27,19,14,8,0.5,0.465,14.2,27.1,487,86.2,69.6,5.06,204,58.5,51,3.27,469,94.5],["HSS14X8X3/8",53,14.6,14,8,0.375,0.349,19.9,37.1,382,66.8,54.6,5.12,161,45.5,40.2,3.32,363,72.7],
+    ["HSS14X8X5/16",44.6,12.2,14,8,0.3125,0.291,24.5,45.1,325,56.6,46.5,5.15,138,38.6,34.4,3.35,308,61.4],["HSS14X8X1/4",36.03,9.9,14,8,0.25,0.233,31.3,57.1,266,46,38,5.19,113,31.4,28.2,3.38,250,49.8],["HSS14X8X3/16",27.29,7.46,14,8,0.1875,0.174,43,77.5,203,34.9,29,5.22,86.4,23.8,21.6,3.4,190,37.6],["HSS14X6X5/8",76.33,21,14,6,0.625,0.581,7.33,21.1,478,88.7,68.3,4.77,124,48.4,41.2,2.43,334,83.7],
+    ["HSS14X6X1/2",62.46,17.2,14,6,0.5,0.465,9.9,27.1,402,73.6,57.4,4.84,105,40.4,35.1,2.48,279,69.3],["HSS14X6X3/8",47.9,13.2,14,6,0.375,0.349,14.2,37.1,317,57.3,45.3,4.91,84.1,31.6,28,2.53,219,53.7],["HSS14X6X5/16",40.35,11.1,14,6,0.3125,0.291,17.6,45.1,271,48.6,38.7,4.94,72.3,26.9,24.1,2.55,186,45.5],["HSS14X6X1/4",32.63,8.96,14,6,0.25,0.233,22.8,57.1,222,39.6,31.7,4.98,59.6,22,19.9,2.58,152,36.9],
+    ["HSS14X6X3/16",24.73,6.76,14,6,0.1875,0.174,31.5,77.5,170,30.1,24.3,5.01,45.9,16.7,15.3,2.61,116,28],["HSS14X4X5/8",67.82,18.7,14,4,0.625,0.581,3.88,21.1,373,73.1,53.3,4.47,47.2,28.5,23.6,1.59,148,52.6],["HSS14X4X1/2",55.66,15.3,14,4,0.5,0.465,5.6,27.1,317,61,45.3,4.55,41.2,24.1,20.6,1.64,127,44.1],["HSS14X4X3/8",42.79,11.8,14,4,0.375,0.349,8.46,37.1,252,47.8,36,4.63,33.6,19.1,16.8,1.69,102,34.6],
+    ["HSS14X4X5/16",36.1,9.92,14,4,0.3125,0.291,10.7,45.1,216,40.6,30.9,4.67,29.2,16.4,14.6,1.72,87.7,29.5],["HSS14X4X1/4",29.23,8.03,14,4,0.25,0.233,14.2,57.1,178,33.2,25.4,4.71,24.4,13.5,12.2,1.74,72.4,24.1],["HSS14X4X3/16",22.18,6.06,14,4,0.1875,0.174,20,77.5,137,25.3,19.5,4.74,19,10.3,9.48,1.77,55.8,18.4],["HSS12X12X1",140.96,39,12,12,1,0.93,9.9,9.9,772,158,129,4.45,772,158,129,4.45,1300,225],
+    ["HSS12X12X7/8",125.79,34.7,12,12,0.875,0.814,11.7,11.7,706,143,118,4.51,706,143,118,4.51,1170,202],["HSS12X12X3/4",109.91,30.3,12,12,0.75,0.698,14.2,14.2,631,127,105,4.56,631,127,105,4.56,1030,177],["HSS12X12X5/8",93.34,25.7,12,12,0.625,0.581,17.7,17.7,548,109,91.4,4.62,548,109,91.4,4.62,885,151],["HSS12X12X1/2",76.07,20.9,12,12,0.5,0.465,22.8,22.8,457,89.6,76.2,4.68,457,89.6,76.2,4.68,728,123],
+    ["HSS12X12X3/8",58.1,16,12,12,0.375,0.349,31.4,31.4,357,69.2,59.5,4.73,357,69.2,59.5,4.73,561,94.6],["HSS12X12X5/16",48.86,13.4,12,12,0.3125,0.291,38.2,38.2,304,58.6,50.7,4.76,304,58.6,50.7,4.76,474,79.7],["HSS12X12X1/4",39.43,10.8,12,12,0.25,0.233,48.5,48.5,248,47.6,41.4,4.79,248,47.6,41.4,4.79,384,64.5],["HSS12X12X3/16",29.84,8.15,12,12,0.1875,0.174,66,66,189,36,31.5,4.82,189,36,31.5,4.82,290,48.6],
+    ["HSS12X10X5/8",84.84,23.3,12,10,0.625,0.581,14.2,17.7,472,95.3,78.7,4.5,356,84.1,71.2,3.9,661,124],["HSS12X10X1/2",69.27,19,12,10,0.5,0.465,18.5,22.8,395,78.8,65.9,4.56,298,69.6,59.7,3.96,545,102],["HSS12X10X3/8",53,14.6,12,10,0.375,0.349,25.7,31.4,310,61.1,51.6,4.61,234,54,46.9,4.01,421,78.3],["HSS12X10X5/16",44.6,12.2,12,10,0.3125,0.291,31.4,38.2,264,51.7,44,4.64,200,45.7,40,4.04,356,66.1],
+    ["HSS12X10X1/4",36.03,9.9,12,10,0.25,0.233,39.9,48.5,216,42.1,36,4.67,164,37.2,32.7,4.07,289,53.5],["HSS12X10X3/16",27.29,7.46,12,10,0.1875,0.174,54.5,66,165,31.9,27.5,4.7,125,28.2,25,4.09,219,40.4],["HSS12X8X5/8",76.33,21,12,8,0.625,0.581,10.8,17.7,397,82.1,66.1,4.34,210,61.9,52.5,3.16,454,97.7],["HSS12X8X1/2",62.46,17.2,12,8,0.5,0.465,14.2,22.8,333,68.1,55.6,4.41,178,51.5,44.4,3.21,377,80.4],
+    ["HSS12X8X3/8",47.9,13.2,12,8,0.375,0.349,19.9,31.4,262,53,43.7,4.47,140,40.1,35.1,3.27,293,62.1],["HSS12X8X5/16",40.35,11.1,12,8,0.3125,0.291,24.5,38.2,224,44.9,37.4,4.5,120,34.1,30.1,3.29,248,52.4],["HSS12X8X1/4",32.63,8.96,12,8,0.25,0.233,31.3,48.5,184,36.6,30.6,4.53,98.8,27.8,24.7,3.32,202,42.5],["HSS12X8X3/16",24.73,6.76,12,8,0.1875,0.174,43,66,140,27.8,23.4,4.56,75.7,21.1,18.9,3.35,153,32.2],
+    ["HSS12X6X5/8",67.82,18.7,12,6,0.625,0.581,7.33,17.7,321,68.8,53.4,4.14,107,42.1,35.5,2.39,271,71.1],["HSS12X6X1/2",55.66,15.3,12,6,0.5,0.465,9.9,22.8,271,57.4,45.2,4.21,91.1,35.2,30.4,2.44,227,59],["HSS12X6X3/8",42.79,11.8,12,6,0.375,0.349,14.2,31.4,215,44.8,35.9,4.28,72.9,27.7,24.3,2.49,178,45.8],["HSS12X6X5/16",36.1,9.92,12,6,0.3125,0.291,17.6,38.2,184,38.1,30.7,4.31,62.8,23.6,20.9,2.52,152,38.8],
+    ["HSS12X6X1/4",29.23,8.03,12,6,0.25,0.233,22.8,48.5,151,31.1,25.2,4.34,51.9,19.3,17.3,2.54,124,31.6],["HSS12X6X3/16",22.18,6.06,12,6,0.1875,0.174,31.5,66,116,23.7,19.4,4.38,40,14.7,13.3,2.57,94.6,24],["HSS12X4X5/8",59.32,16.4,12,4,0.625,0.581,3.88,17.7,245,55.5,40.8,3.87,40.4,24.5,20.2,1.57,122,44.6],["HSS12X4X1/2",48.85,13.5,12,4,0.5,0.465,5.6,22.8,210,46.7,34.9,3.95,35.3,20.9,17.7,1.62,105,37.5],
+    ["HSS12X4X3/8",37.69,10.4,12,4,0.375,0.349,8.46,31.4,168,36.7,28,4.02,28.9,16.6,14.5,1.67,84.1,29.5],["HSS12X4X5/16",31.84,8.76,12,4,0.3125,0.291,10.7,38.2,144,31.3,24.1,4.06,25.2,14.2,12.6,1.7,72.4,25.2],["HSS12X4X1/4",25.82,7.1,12,4,0.25,0.233,14.2,48.5,119,25.6,19.9,4.1,21,11.7,10.5,1.72,59.8,20.6],["HSS12X4X3/16",19.63,5.37,12,4,0.1875,0.174,20,66,91.8,19.6,15.3,4.13,16.4,9,8.2,1.75,46.1,15.7],
+    ["HSS12X3X5/16",29.72,8.17,12,3,0.3125,0.291,7.31,38.2,124,27.9,20.7,3.9,13.1,10,8.73,1.27,41.3,18.4],["HSS12X3X1/4",24.12,6.63,12,3,0.25,0.233,9.88,48.5,103,22.9,17.2,3.94,11.1,8.28,7.38,1.29,34.5,15.1],["HSS12X3X3/16",18.35,5.02,12,3,0.1875,0.174,14.2,66,79.6,17.5,13.3,3.98,8.72,6.4,5.81,1.32,26.8,11.6],["HSS12X2X5/16",27.59,7.59,12,2,0.3125,0.291,3.87,38.2,104,24.5,17.4,3.71,5.1,6.05,5.1,0.82,17.6,11.6],
+    ["HSS12X2X1/4",22.42,6.17,12,2,0.25,0.233,5.58,48.5,86.9,20.1,14.5,3.75,4.41,5.08,4.41,0.845,15.1,9.64],["HSS12X2X3/16",17.08,4.67,12,2,0.1875,0.174,8.49,66,67.4,15.5,11.2,3.8,3.55,3.97,3.55,0.872,12,7.49],["HSS10X10X3/4",89.5,24.7,10,10,0.75,0.698,11.3,11.3,347,84.7,69.4,3.75,347,84.7,69.4,3.75,578,119],["HSS10X10X5/8",76.33,21,10,10,0.625,0.581,14.2,14.2,304,73.2,60.8,3.8,304,73.2,60.8,3.8,498,102],
+    ["HSS10X10X1/2",62.46,17.2,10,10,0.5,0.465,18.5,18.5,256,60.7,51.2,3.86,256,60.7,51.2,3.86,412,84.2],["HSS10X10X3/8",47.9,13.2,10,10,0.375,0.349,25.7,25.7,202,47.2,40.4,3.92,202,47.2,40.4,3.92,320,64.8],["HSS10X10X5/16",40.35,11.1,10,10,0.3125,0.291,31.4,31.4,172,40.1,34.5,3.94,172,40.1,34.5,3.94,271,54.8],["HSS10X10X1/4",32.63,8.96,10,10,0.25,0.233,39.9,39.9,141,32.7,28.3,3.97,141,32.7,28.3,3.97,220,44.4],
+    ["HSS10X10X3/16",24.73,6.76,10,10,0.1875,0.174,54.5,54.5,108,24.8,21.6,4,108,24.8,21.6,4,167,33.6],["HSS10X8X5/8",67.82,18.7,10,8,0.625,0.581,10.8,14.2,253,62.2,50.5,3.68,178,53.3,44.5,3.09,346,80.4],["HSS10X8X1/2",55.66,15.3,10,8,0.5,0.465,14.2,18.5,214,51.9,42.7,3.73,151,44.5,37.8,3.14,288,66.4],["HSS10X8X3/8",42.79,11.8,10,8,0.375,0.349,19.9,25.7,169,40.5,33.9,3.79,120,34.8,30,3.19,224,51.4],
+    ["HSS10X8X5/16",36.1,9.92,10,8,0.3125,0.291,24.5,31.4,145,34.4,29,3.82,103,29.6,25.7,3.22,190,43.5],["HSS10X8X1/4",29.23,8.03,10,8,0.25,0.233,31.3,39.9,119,28.1,23.8,3.85,84.7,24.2,21.2,3.25,155,35.3],["HSS10X8X3/16",22.18,6.06,10,8,0.1875,0.174,43,54.5,91.4,21.4,18.3,3.88,65.1,18.4,16.3,3.28,118,26.7],["HSS10X6X5/8",59.32,16.4,10,6,0.625,0.581,7.33,14.2,201,51.3,40.2,3.5,89.4,35.8,29.8,2.34,209,58.6],
+    ["HSS10X6X1/2",48.85,13.5,10,6,0.5,0.465,9.9,18.5,171,43,34.3,3.57,76.8,30.1,25.6,2.39,176,48.7],["HSS10X6X3/8",37.69,10.4,10,6,0.375,0.349,14.2,25.7,137,33.8,27.4,3.63,61.8,23.7,20.6,2.44,139,37.9],["HSS10X6X5/16",31.84,8.76,10,6,0.3125,0.291,17.6,31.4,118,28.8,23.5,3.66,53.3,20.2,17.8,2.47,118,32.2],["HSS10X6X1/4",25.82,7.1,10,6,0.25,0.233,22.8,39.9,96.9,23.6,19.4,3.69,44.1,16.6,14.7,2.49,96.7,26.2],
+    ["HSS10X6X3/16",19.63,5.37,10,6,0.1875,0.174,31.5,54.5,74.6,18,14.9,3.73,34.1,12.7,11.4,2.52,73.8,19.9],["HSS10X5X3/8",35.13,9.67,10,5,0.375,0.349,11.3,25.7,120,30.4,24.1,3.53,40.6,18.7,16.2,2.05,100,31.2],["HSS10X5X5/16",29.72,8.17,10,5,0.3125,0.291,14.2,31.4,104,26,20.8,3.56,35.2,16,14.1,2.07,86,26.5],["HSS10X5X1/4",24.12,6.63,10,5,0.25,0.233,18.5,39.9,85.8,21.3,17.2,3.6,29.3,13.2,11.7,2.1,70.7,21.6],
+    ["HSS10X4X5/8",50.81,14,10,4,0.625,0.581,3.88,14.2,149,40.3,29.9,3.26,33.5,20.6,16.8,1.54,95.7,36.7],["HSS10X4X1/2",42.05,11.6,10,4,0.5,0.465,5.6,18.5,129,34.1,25.8,3.34,29.5,17.6,14.7,1.59,82.6,31],["HSS10X4X3/8",32.58,8.97,10,4,0.375,0.349,8.46,25.7,104,27,20.8,3.41,24.3,14,12.1,1.64,66.5,24.4],["HSS10X4X5/16",27.59,7.59,10,4,0.3125,0.291,10.7,31.4,90.1,23.1,18,3.44,21.2,12.1,10.6,1.67,57.3,20.9],
+    ["HSS10X4X1/4",22.42,6.17,10,4,0.25,0.233,14.2,39.9,74.7,19,14.9,3.48,17.7,10,8.87,1.7,47.4,17.1],["HSS10X4X3/16",17.08,4.67,10,4,0.1875,0.174,20,54.5,57.8,14.6,11.6,3.52,13.9,7.66,6.93,1.72,36.5,13.1],["HSS10X4X1/8",11.56,3.16,10,4,0.125,0.116,31.5,83.2,39.8,10,7.97,3.55,9.65,5.26,4.83,1.75,25.1,8.9],["HSS10X3-1/2X3/8",31.31,8.62,10,3.5,0.375,0.349,7.03,25.7,96.1,25.3,19.2,3.34,17.8,11.8,10.2,1.44,51.5,21.1],
+    ["HSS10X3-1/2X5/16",26.53,7.3,10,3.5,0.3125,0.291,9.03,31.4,83.2,21.7,16.6,3.38,15.6,10.2,8.92,1.46,44.6,18],["HSS10X3-1/2X1/4",21.57,5.93,10,3.5,0.25,0.233,12,39.9,69.1,17.9,13.8,3.41,13.1,8.45,7.51,1.49,37,14.8],["HSS10X3-1/2X3/16",16.44,4.5,10,3.5,0.1875,0.174,17.1,54.5,53.6,13.7,10.7,3.45,10.3,6.52,5.89,1.51,28.6,11.4],["HSS10X3X3/8",30.03,8.27,10,3,0.375,0.349,5.6,25.7,88,23.7,17.6,3.26,12.4,9.73,8.28,1.22,37.8,17.7],
+    ["HSS10X3X5/16",25.46,7.01,10,3,0.3125,0.291,7.31,31.4,76.3,20.3,15.3,3.3,11,8.42,7.3,1.25,33,15.2],["HSS10X3X1/4",20.72,5.7,10,3,0.25,0.233,9.88,39.9,63.6,16.7,12.7,3.34,9.28,6.99,6.19,1.28,27.6,12.5],["HSS10X3X3/16",15.8,4.32,10,3,0.1875,0.174,14.2,54.5,49.4,12.8,9.87,3.38,7.33,5.41,4.89,1.3,21.5,9.64],["HSS10X3X1/8",10.71,2.93,10,3,0.125,0.116,22.9,83.2,34.2,8.8,6.83,3.42,5.16,3.74,3.44,1.33,14.9,6.61],
+    ["HSS10X2X3/8",27.48,7.58,10,2,0.375,0.349,2.73,25.7,71.7,20.3,14.3,3.08,4.7,5.76,4.7,0.787,15.9,11],["HSS10X2X5/16",23.34,6.43,10,2,0.3125,0.291,3.87,31.4,62.6,17.5,12.5,3.12,4.24,5.06,4.24,0.812,14.2,9.56],["HSS10X2X1/4",19.02,5.24,10,2,0.25,0.233,5.58,39.9,52.5,14.4,10.5,3.17,3.67,4.26,3.67,0.838,12.2,7.99],["HSS10X2X3/16",14.53,3.98,10,2,0.1875,0.174,8.49,54.5,41,11.1,8.19,3.21,2.97,3.34,2.97,0.864,9.74,6.22],
+    ["HSS10X2X1/8",9.86,2.7,10,2,0.125,0.116,14.2,83.2,28.5,7.65,5.7,3.25,2.14,2.33,2.14,0.89,6.9,4.31],["HSS9X9X5/8",67.82,18.7,9,9,0.625,0.581,12.5,12.5,216,58.1,47.9,3.4,216,58.1,47.9,3.4,356,81.6],["HSS9X9X1/2",55.66,15.3,9,9,0.5,0.465,16.4,16.4,183,48.4,40.6,3.45,183,48.4,40.6,3.45,296,67.4],["HSS9X9X3/8",42.79,11.8,9,9,0.375,0.349,22.8,22.8,145,37.8,32.2,3.51,145,37.8,32.2,3.51,231,52.1],
+    ["HSS9X9X5/16",36.1,9.92,9,9,0.3125,0.291,27.9,27.9,124,32.1,27.6,3.54,124,32.1,27.6,3.54,196,44],["HSS9X9X1/4",29.23,8.03,9,9,0.25,0.233,35.6,35.6,102,26.2,22.7,3.56,102,26.2,22.7,3.56,159,35.8],["HSS9X9X3/16",22.18,6.06,9,9,0.1875,0.174,48.7,48.7,78.2,20,17.4,3.59,78.2,20,17.4,3.59,121,27.1],["HSS9X9X1/8",14.96,4.09,9,9,0.125,0.116,74.6,74.6,53.5,13.6,11.9,3.62,53.5,13.6,11.9,3.62,82,18.3],
+    ["HSS9X7X5/8",59.32,16.4,9,7,0.625,0.581,9.05,12.5,174,48.3,38.7,3.26,117,40.5,33.5,2.68,235,62],["HSS9X7X1/2",48.85,13.5,9,7,0.5,0.465,12.1,16.4,149,40.5,33,3.32,100,34,28.7,2.73,197,51.5],["HSS9X7X3/8",37.69,10.4,9,7,0.375,0.349,17.1,22.8,119,31.8,26.4,3.38,80.4,26.7,23,2.78,154,40],["HSS9X7X5/16",31.84,8.76,9,7,0.3125,0.291,21.1,27.9,102,27.1,22.6,3.41,69.2,22.8,19.8,2.81,131,33.9],
+    ["HSS9X7X1/4",25.82,7.1,9,7,0.25,0.233,27,35.6,84.1,22.2,18.7,3.44,57.2,18.7,16.3,2.84,107,27.6],["HSS9X7X3/16",19.63,5.37,9,7,0.1875,0.174,37.2,48.7,64.7,16.9,14.4,3.47,44.1,14.3,12.6,2.87,81.7,20.9],["HSS9X5X5/8",50.81,14,9,5,0.625,0.581,5.61,12.5,133,38.5,29.6,3.08,52,25.3,20.8,1.92,128,42.5],["HSS9X5X1/2",42.05,11.6,9,5,0.5,0.465,7.75,16.4,115,32.5,25.5,3.14,45.2,21.5,18.1,1.97,109,35.6],
+    ["HSS9X5X3/8",32.58,8.97,9,5,0.375,0.349,11.3,22.8,92.5,25.7,20.5,3.21,36.8,17.1,14.7,2.03,86.9,27.9],["HSS9X5X5/16",27.59,7.59,9,5,0.3125,0.291,14.2,27.9,79.8,22,17.7,3.24,32,14.6,12.8,2.05,74.4,23.8],["HSS9X5X1/4",22.42,6.17,9,5,0.25,0.233,18.5,35.6,66.1,18.1,14.7,3.27,26.6,12,10.6,2.08,61.2,19.4],["HSS9X5X3/16",17.08,4.67,9,5,0.1875,0.174,25.7,48.7,51.1,13.8,11.4,3.31,20.7,9.25,8.28,2.1,46.9,14.8],
+    ["HSS9X3X1/2",35.24,9.74,9,3,0.5,0.465,3.45,16.4,80.8,24.6,18,2.88,13.2,10.8,8.81,1.17,40,19.7],["HSS9X3X3/8",27.48,7.58,9,3,0.375,0.349,5.6,22.8,66.3,19.7,14.7,2.96,11.2,8.8,7.45,1.21,33.1,15.8],["HSS9X3X5/16",23.34,6.43,9,3,0.3125,0.291,7.31,27.9,57.7,16.9,12.8,3,9.88,7.63,6.59,1.24,28.9,13.6],["HSS9X3X1/4",19.02,5.24,9,3,0.25,0.233,9.88,35.6,48.2,14,10.7,3.04,8.38,6.35,5.59,1.27,24.2,11.3],
+    ["HSS9X3X3/16",14.53,3.98,9,3,0.1875,0.174,14.2,48.7,37.6,10.8,8.35,3.07,6.64,4.92,4.42,1.29,18.9,8.66],["HSS8X8X5/8",59.32,16.4,8,8,0.625,0.581,10.8,10.8,146,44.7,36.5,2.99,146,44.7,36.5,2.99,244,63.2],["HSS8X8X1/2",48.85,13.5,8,8,0.5,0.465,14.2,14.2,125,37.5,31.2,3.04,125,37.5,31.2,3.04,204,52.4],["HSS8X8X3/8",37.69,10.4,8,8,0.375,0.349,19.9,19.9,100,29.4,24.9,3.1,100,29.4,24.9,3.1,160,40.7],
+    ["HSS8X8X5/16",31.84,8.76,8,8,0.3125,0.291,24.5,24.5,85.6,25.1,21.4,3.13,85.6,25.1,21.4,3.13,136,34.5],["HSS8X8X1/4",25.82,7.1,8,8,0.25,0.233,31.3,31.3,70.7,20.5,17.7,3.15,70.7,20.5,17.7,3.15,111,28.1],["HSS8X8X3/16",19.63,5.37,8,8,0.1875,0.174,43,43,54.4,15.7,13.6,3.18,54.4,15.7,13.6,3.18,84.5,21.3],["HSS8X8X1/8",13.26,3.62,8,8,0.125,0.116,66,66,37.4,10.7,9.34,3.21,37.4,10.7,9.34,3.21,57.3,14.4],
+    ["HSS8X6X5/8",50.81,14,8,6,0.625,0.581,7.33,10.8,114,36.1,28.5,2.85,72.3,29.5,24.1,2.27,150,46],["HSS8X6X1/2",42.05,11.6,8,6,0.5,0.465,9.9,14.2,98.2,30.5,24.6,2.91,62.5,24.9,20.8,2.32,127,38.4],["HSS8X6X3/8",32.58,8.97,8,6,0.375,0.349,14.2,19.9,79.1,24.1,19.8,2.97,50.6,19.8,16.9,2.38,100,30],["HSS8X6X5/16",27.59,7.59,8,6,0.3125,0.291,17.6,24.5,68.3,20.6,17.1,3,43.8,16.9,14.6,2.4,85.8,25.5],
+    ["HSS8X6X1/4",22.42,6.17,8,6,0.25,0.233,22.8,31.3,56.6,16.9,14.2,3.03,36.4,13.9,12.1,2.43,70.3,20.8],["HSS8X6X3/16",17.08,4.67,8,6,0.1875,0.174,31.5,43,43.7,13,10.9,3.06,28.2,10.7,9.39,2.46,53.7,15.8],["HSS8X4X5/8",42.3,11.7,8,4,0.625,0.581,3.88,10.8,82,27.4,20.5,2.64,26.6,16.6,13.3,1.51,70.3,28.7],["HSS8X4X1/2",35.24,9.74,8,4,0.5,0.465,5.6,14.2,71.8,23.5,17.9,2.71,23.6,14.3,11.8,1.56,61.1,24.4],
+    ["HSS8X4X3/8",27.48,7.58,8,4,0.375,0.349,8.46,19.9,58.7,18.8,14.7,2.78,19.6,11.5,9.8,1.61,49.3,19.3],["HSS8X4X5/16",23.34,6.43,8,4,0.3125,0.291,10.7,24.5,51,16.1,12.8,2.82,17.2,9.91,8.58,1.63,42.6,16.5],["HSS8X4X1/4",19.02,5.24,8,4,0.25,0.233,14.2,31.3,42.5,13.3,10.6,2.85,14.4,8.2,7.21,1.66,35.3,13.6],["HSS8X4X3/16",14.53,3.98,8,4,0.1875,0.174,20,43,33.1,10.2,8.27,2.88,11.3,6.33,5.65,1.69,27.2,10.4],
+    ["HSS8X4X1/8",9.86,2.7,8,4,0.125,0.116,31.5,66,22.9,7.02,5.73,2.92,7.9,4.36,3.95,1.71,18.7,7.1],["HSS8X3X1/2",31.84,8.81,8,3,0.5,0.465,3.45,14.2,58.6,20,14.6,2.58,11.7,9.64,7.81,1.15,34.3,17.4],["HSS8X3X3/8",24.93,6.88,8,3,0.375,0.349,5.6,19.9,48.5,16.1,12.1,2.65,10,7.88,6.63,1.2,28.5,14],["HSS8X3X5/16",21.21,5.85,8,3,0.3125,0.291,7.31,24.5,42.4,13.9,10.6,2.69,8.81,6.84,5.87,1.23,24.9,12.1],
+    ["HSS8X3X1/4",17.32,4.77,8,3,0.25,0.233,9.88,31.3,35.5,11.5,8.88,2.73,7.49,5.7,4.99,1.25,20.8,10],["HSS8X3X3/16",13.25,3.63,8,3,0.1875,0.174,14.2,43,27.8,8.87,6.94,2.77,5.94,4.43,3.96,1.28,16.2,7.68],["HSS8X3X1/8",9.01,2.46,8,3,0.125,0.116,22.9,66,19.3,6.11,4.83,2.8,4.2,3.07,2.8,1.31,11.3,5.27],["HSS8X2X1/2",28.43,7.88,8,2,0.5,0.465,1.3,14.2,45.3,16.5,11.3,2.4,4.19,5.47,4.19,0.73,13.6,10.4],
+    ["HSS8X2X3/8",22.37,6.18,8,2,0.375,0.349,2.73,19.9,38.2,13.4,9.56,2.49,3.73,4.61,3.73,0.777,12.1,8.65],["HSS8X2X5/16",19.08,5.26,8,2,0.3125,0.291,3.87,24.5,33.7,11.6,8.43,2.53,3.38,4.06,3.38,0.802,10.9,7.57],["HSS8X2X1/4",15.62,4.3,8,2,0.25,0.233,5.58,31.3,28.5,9.68,7.12,2.57,2.94,3.43,2.94,0.827,9.36,6.35],["HSS8X2X3/16",11.97,3.28,8,2,0.1875,0.174,8.49,43,22.4,7.51,5.61,2.61,2.39,2.7,2.39,0.853,7.48,4.95],
+    ["HSS8X2X1/8",8.16,2.23,8,2,0.125,0.116,14.2,66,15.7,5.19,3.93,2.65,1.72,1.9,1.72,0.879,5.3,3.44],["HSS7X7X5/8",50.81,14,7,7,0.625,0.581,9.05,9.05,93.4,33.1,26.7,2.58,93.4,33.1,26.7,2.58,158,47.1],["HSS7X7X1/2",42.05,11.6,7,7,0.5,0.465,12.1,12.1,80.5,27.9,23,2.63,80.5,27.9,23,2.63,133,39.3],["HSS7X7X3/8",32.58,8.97,7,7,0.375,0.349,17.1,17.1,65,22.1,18.6,2.69,65,22.1,18.6,2.69,105,30.7],
+    ["HSS7X7X5/16",27.59,7.59,7,7,0.3125,0.291,21.1,21.1,56.1,18.9,16,2.72,56.1,18.9,16,2.72,89.7,26.1],["HSS7X7X1/4",22.42,6.17,7,7,0.25,0.233,27,27,46.5,15.5,13.3,2.75,46.5,15.5,13.3,2.75,73.5,21.3],["HSS7X7X3/16",17.08,4.67,7,7,0.1875,0.174,37.2,37.2,36,11.9,10.3,2.77,36,11.9,10.3,2.77,56.1,16.2],["HSS7X7X1/8",11.56,3.16,7,7,0.125,0.116,57.3,57.3,24.8,8.13,7.09,2.8,24.8,8.13,7.09,2.8,38.2,11],
+    ["HSS7X5X1/2",35.24,9.74,7,5,0.5,0.465,7.75,12.1,60.6,21.9,17.3,2.5,35.6,17.3,14.2,1.91,75.8,27.2],["HSS7X5X3/8",27.48,7.58,7,5,0.375,0.349,11.3,17.1,49.5,17.5,14.1,2.56,29.3,13.8,11.7,1.97,60.6,21.4],["HSS7X5X5/16",23.34,6.43,7,5,0.3125,0.291,14.2,21.1,43,15,12.3,2.59,25.5,11.9,10.2,1.99,52.1,18.3],["HSS7X5X1/4",19.02,5.24,7,5,0.25,0.233,18.5,27,35.9,12.4,10.2,2.62,21.3,9.83,8.53,2.02,42.9,15],
+    ["HSS7X5X3/16",14.53,3.98,7,5,0.1875,0.174,25.7,37.2,27.9,9.52,7.96,2.65,16.6,7.57,6.65,2.05,32.9,11.4],["HSS7X5X1/8",9.86,2.7,7,5,0.125,0.116,40.1,57.3,19.3,6.53,5.52,2.68,11.6,5.2,4.63,2.07,22.5,7.79],["HSS7X4X1/2",31.84,8.81,7,4,0.5,0.465,5.6,12.1,50.7,18.8,14.5,2.4,20.7,12.6,10.4,1.53,50.5,21.1],["HSS7X4X3/8",24.93,6.88,7,4,0.375,0.349,8.46,17.1,41.8,15.1,11.9,2.46,17.3,10.2,8.63,1.58,41,16.8],
+    ["HSS7X4X5/16",21.21,5.85,7,4,0.3125,0.291,10.7,21.1,36.5,13.1,10.4,2.5,15.2,8.83,7.58,1.61,35.4,14.4],["HSS7X4X1/4",17.32,4.77,7,4,0.25,0.233,14.2,27,30.5,10.8,8.72,2.53,12.8,7.33,6.38,1.64,29.3,11.8],["HSS7X4X3/16",13.25,3.63,7,4,0.1875,0.174,20,37.2,23.8,8.33,6.81,2.56,10,5.67,5.02,1.66,22.7,9.07],["HSS7X4X1/8",9.01,2.46,7,4,0.125,0.116,31.5,57.3,16.6,5.73,4.73,2.59,7.03,3.91,3.51,1.69,15.6,6.2],
+    ["HSS7X3X1/2",28.43,7.88,7,3,0.5,0.465,3.45,12.1,40.7,15.8,11.6,2.27,10.2,8.46,6.8,1.14,28.6,15],["HSS7X3X3/8",22.37,6.18,7,3,0.375,0.349,5.6,17.1,34.1,12.8,9.73,2.35,8.71,6.95,5.81,1.19,23.9,12.1],["HSS7X3X5/16",19.08,5.26,7,3,0.3125,0.291,7.31,21.1,29.9,11.1,8.54,2.38,7.74,6.05,5.16,1.21,20.9,10.5],["HSS7X3X1/4",15.62,4.3,7,3,0.25,0.233,9.88,27,25.2,9.22,7.19,2.42,6.6,5.06,4.4,1.24,17.5,8.68],
+    ["HSS7X3X3/16",11.97,3.28,7,3,0.1875,0.174,14.2,37.2,19.8,7.14,5.65,2.45,5.24,3.94,3.5,1.26,13.7,6.69],["HSS7X3X1/8",8.16,2.23,7,3,0.125,0.116,22.9,57.3,13.8,4.93,3.95,2.49,3.71,2.73,2.48,1.29,9.48,4.6],["HSS7X2X1/4",13.91,3.84,7,2,0.25,0.233,5.58,27,19.8,7.64,5.67,2.27,2.58,3.02,2.58,0.819,7.95,5.52],["HSS7X2X3/16",10.7,2.93,7,2,0.1875,0.174,8.49,37.2,15.7,5.95,4.49,2.31,2.1,2.39,2.1,0.845,6.35,4.32],
+    ["HSS7X2X1/8",7.31,2,7,2,0.125,0.116,14.2,57.3,11.1,4.13,3.16,2.35,1.52,1.68,1.52,0.871,4.51,3],["HSS6X6X5/8",42.3,11.7,6,6,0.625,0.581,7.33,7.33,55.2,23.2,18.4,2.17,55.2,23.2,18.4,2.17,94.9,33.4],["HSS6X6X1/2",35.24,9.74,6,6,0.5,0.465,9.9,9.9,48.3,19.8,16.1,2.23,48.3,19.8,16.1,2.23,81.1,28.1],["HSS6X6X3/8",27.48,7.58,6,6,0.375,0.349,14.2,14.2,39.5,15.8,13.2,2.28,39.5,15.8,13.2,2.28,64.6,22.1],
+    ["HSS6X6X5/16",23.34,6.43,6,6,0.3125,0.291,17.6,17.6,34.3,13.6,11.4,2.31,34.3,13.6,11.4,2.31,55.4,18.9],["HSS6X6X1/4",19.02,5.24,6,6,0.25,0.233,22.8,22.8,28.6,11.2,9.54,2.34,28.6,11.2,9.54,2.34,45.6,15.4],["HSS6X6X3/16",14.53,3.98,6,6,0.1875,0.174,31.5,31.5,22.3,8.63,7.42,2.37,22.3,8.63,7.42,2.37,35,11.8],["HSS6X6X1/8",9.86,2.7,6,6,0.125,0.116,48.7,48.7,15.5,5.92,5.15,2.39,15.5,5.92,5.15,2.39,23.9,8.03],
+    ["HSS6X5X1/2",31.84,8.81,6,5,0.5,0.465,7.75,9.9,41.1,17.2,13.7,2.16,30.8,15.2,12.3,1.87,59.8,23],["HSS6X5X3/8",24.93,6.88,6,5,0.375,0.349,11.3,14.2,33.9,13.8,11.3,2.22,25.5,12.2,10.2,1.92,48.1,18.2],["HSS6X5X5/16",21.21,5.85,6,5,0.3125,0.291,14.2,17.6,29.6,11.9,9.85,2.25,22.3,10.5,8.91,1.95,41.4,15.6],["HSS6X5X1/4",17.32,4.77,6,5,0.25,0.233,18.5,22.8,24.7,9.87,8.25,2.28,18.7,8.72,7.47,1.98,34.2,12.8],
+    ["HSS6X5X3/16",13.25,3.63,6,5,0.1875,0.174,25.7,31.5,19.3,7.62,6.44,2.31,14.6,6.73,5.84,2.01,26.3,9.76],["HSS6X5X1/8",9.01,2.46,6,5,0.125,0.116,40.1,48.7,13.4,5.24,4.48,2.34,10.2,4.63,4.07,2.03,18,6.66],["HSS6X4X1/2",28.43,7.88,6,4,0.5,0.465,5.6,9.9,34,14.6,11.3,2.08,17.8,11,8.89,1.5,40.3,17.8],["HSS6X4X3/8",22.37,6.18,6,4,0.375,0.349,8.46,14.2,28.3,11.9,9.43,2.14,14.9,8.94,7.47,1.55,32.8,14.2],
+    ["HSS6X4X5/16",19.08,5.26,6,4,0.3125,0.291,10.7,17.6,24.8,10.3,8.27,2.17,13.2,7.75,6.58,1.58,28.4,12.2],["HSS6X4X1/4",15.62,4.3,6,4,0.25,0.233,14.2,22.8,20.9,8.53,6.96,2.2,11.1,6.45,5.56,1.61,23.6,10.1],["HSS6X4X3/16",11.97,3.28,6,4,0.1875,0.174,20,31.5,16.4,6.6,5.46,2.23,8.76,5,4.38,1.63,18.2,7.74],["HSS6X4X1/8",8.16,2.23,6,4,0.125,0.116,31.5,48.7,11.4,4.56,3.81,2.26,6.15,3.46,3.08,1.66,12.6,5.3],
+    ["HSS6X3X1/2",25.03,6.95,6,3,0.5,0.465,3.45,9.9,26.8,12.1,8.95,1.97,8.69,7.28,5.79,1.12,23.1,12.7],["HSS6X3X3/8",19.82,5.48,6,3,0.375,0.349,5.6,14.2,22.7,9.9,7.57,2.04,7.48,6.03,4.99,1.17,19.3,10.3],["HSS6X3X5/16",16.96,4.68,6,3,0.3125,0.291,7.31,17.6,20.1,8.61,6.69,2.07,6.67,5.27,4.45,1.19,16.9,8.91],["HSS6X3X1/4",13.91,3.84,6,3,0.25,0.233,9.88,22.8,17,7.19,5.66,2.1,5.7,4.41,3.8,1.22,14.2,7.39],
+    ["HSS6X3X3/16",10.7,2.93,6,3,0.1875,0.174,14.2,31.5,13.4,5.59,4.47,2.14,4.55,3.45,3.03,1.25,11.1,5.71],["HSS6X3X1/8",7.31,2,6,3,0.125,0.116,22.9,48.7,9.43,3.87,3.14,2.17,3.23,2.4,2.15,1.27,7.73,3.93],["HSS6X2X3/8",17.27,4.78,6,2,0.375,0.349,2.73,14.2,17.1,7.93,5.71,1.89,2.77,3.46,2.77,0.76,8.42,6.35],["HSS6X2X5/16",14.83,4.1,6,2,0.3125,0.291,3.87,17.6,15.3,6.95,5.11,1.93,2.52,3.07,2.52,0.785,7.6,5.58],
+    ["HSS6X2X1/4",12.21,3.37,6,2,0.25,0.233,5.58,22.8,13.1,5.84,4.37,1.97,2.21,2.61,2.21,0.81,6.55,4.7],["HSS6X2X3/16",9.42,2.58,6,2,0.1875,0.174,8.49,31.5,10.5,4.58,3.49,2.01,1.8,2.07,1.8,0.836,5.24,3.68],["HSS6X2X1/8",6.46,1.77,6,2,0.125,0.116,14.2,48.7,7.42,3.19,2.47,2.05,1.31,1.46,1.31,0.861,3.72,2.57],["HSS5-1/2X5-1/2X3/8",24.93,6.88,5.5,5.5,0.375,0.349,12.8,12.8,29.7,13.1,10.8,2.08,29.7,13.1,10.8,2.08,49,18.4],
+    ["HSS5-1/2X5-1/2X5/16",21.21,5.85,5.5,5.5,0.3125,0.291,15.9,15.9,25.9,11.3,9.43,2.11,25.9,11.3,9.43,2.11,42.2,15.7],["HSS5-1/2X5-1/2X1/4",17.32,4.77,5.5,5.5,0.25,0.233,20.6,20.6,21.7,9.32,7.9,2.13,21.7,9.32,7.9,2.13,34.8,12.9],["HSS5-1/2X5-1/2X3/16",13.25,3.63,5.5,5.5,0.1875,0.174,28.6,28.6,17,7.19,6.17,2.16,17,7.19,6.17,2.16,26.7,9.85],["HSS5-1/2X5-1/2X1/8",9.01,2.46,5.5,5.5,0.125,0.116,44.4,44.4,11.8,4.95,4.3,2.19,11.8,4.95,4.3,2.19,18.3,6.72],
+    ["HSS5X5X1/2",28.43,7.88,5,5,0.5,0.465,7.75,7.75,26,13.1,10.4,1.82,26,13.1,10.4,1.82,44.6,18.7],["HSS5X5X3/8",22.37,6.18,5,5,0.375,0.349,11.3,11.3,21.7,10.6,8.68,1.87,21.7,10.6,8.68,1.87,36.1,14.9],["HSS5X5X5/16",19.08,5.26,5,5,0.3125,0.291,14.2,14.2,19,9.16,7.62,1.9,19,9.16,7.62,1.9,31.2,12.8],["HSS5X5X1/4",15.62,4.3,5,5,0.25,0.233,18.5,18.5,16,7.61,6.41,1.93,16,7.61,6.41,1.93,25.8,10.5],
+    ["HSS5X5X3/16",11.97,3.28,5,5,0.1875,0.174,25.7,25.7,12.6,5.89,5.03,1.96,12.6,5.89,5.03,1.96,19.9,8.08],["HSS5X5X1/8",8.16,2.23,5,5,0.125,0.116,40.1,40.1,8.8,4.07,3.52,1.99,8.8,4.07,3.52,1.99,13.7,5.53],["HSS5X4X1/2",25.03,6.95,5,4,0.5,0.465,5.6,7.75,21.2,10.9,8.49,1.75,14.9,9.35,7.43,1.46,30.3,14.5],["HSS5X4X3/8",19.82,5.48,5,4,0.375,0.349,8.46,11.3,17.9,8.96,7.17,1.81,12.6,7.67,6.3,1.52,24.9,11.7],
+    ["HSS5X4X5/16",16.96,4.68,5,4,0.3125,0.291,10.7,14.2,15.8,7.79,6.32,1.84,11.1,6.67,5.57,1.54,21.7,10.1],["HSS5X4X1/4",13.91,3.84,5,4,0.25,0.233,14.2,18.5,13.4,6.49,5.35,1.87,9.46,5.57,4.73,1.57,18,8.32],["HSS5X4X3/16",10.7,2.93,5,4,0.1875,0.174,20,25.7,10.6,5.05,4.22,1.9,7.48,4.34,3.74,1.6,14,6.41],["HSS5X4X1/8",7.31,2,5,4,0.125,0.116,31.5,40.1,7.42,3.5,2.97,1.93,5.27,3.01,2.64,1.62,9.66,4.39],
+    ["HSS5X3X1/2",21.63,6.02,5,3,0.5,0.465,3.45,7.75,16.4,8.83,6.57,1.65,7.18,6.1,4.78,1.09,17.6,10.3],["HSS5X3X3/8",17.27,4.78,5,3,0.375,0.349,5.6,11.3,14.1,7.34,5.65,1.72,6.25,5.1,4.16,1.14,14.9,8.44],["HSS5X3X5/16",14.83,4.1,5,3,0.3125,0.291,7.31,14.2,12.6,6.42,5.03,1.75,5.6,4.48,3.73,1.17,13.1,7.33],["HSS5X3X1/4",12.21,3.37,5,3,0.25,0.233,9.88,18.5,10.7,5.38,4.29,1.78,4.81,3.77,3.21,1.19,11,6.1],
+    ["HSS5X3X3/16",9.42,2.58,5,3,0.1875,0.174,14.2,25.7,8.53,4.21,3.41,1.82,3.85,2.96,2.57,1.22,8.64,4.73],["HSS5X3X1/8",6.46,1.77,5,3,0.125,0.116,22.9,40.1,6.03,2.93,2.41,1.85,2.75,2.07,1.83,1.25,6.02,3.26],["HSS5X2-1/2X1/4",11.36,3.14,5,2.5,0.25,0.233,7.73,18.5,9.4,4.83,3.76,1.73,3.13,2.95,2.5,0.999,7.93,4.99],["HSS5X2-1/2X3/16",8.78,2.41,5,2.5,0.1875,0.174,11.4,25.7,7.51,3.79,3.01,1.77,2.53,2.33,2.03,1.02,6.26,3.89],
+    ["HSS5X2-1/2X1/8",6.03,1.65,5,2.5,0.125,0.116,18.6,40.1,5.34,2.65,2.14,1.8,1.82,1.64,1.46,1.05,4.4,2.7],["HSS5X2X3/8",14.72,4.09,5,2,0.375,0.349,2.73,11.3,10.4,5.71,4.14,1.59,2.28,2.88,2.28,0.748,6.61,5.2],["HSS5X2X5/16",12.7,3.52,5,2,0.3125,0.291,3.87,14.2,9.35,5.05,3.74,1.63,2.1,2.57,2.1,0.772,5.99,4.59],["HSS5X2X1/4",10.51,2.91,5,2,0.25,0.233,5.58,18.5,8.08,4.27,3.23,1.67,1.84,2.2,1.84,0.797,5.17,3.88],
+    ["HSS5X2X3/16",8.15,2.24,5,2,0.1875,0.174,8.49,25.7,6.5,3.37,2.6,1.7,1.51,1.75,1.51,0.823,4.15,3.05],["HSS5X2X1/8",5.61,1.54,5,2,0.125,0.116,14.2,40.1,4.65,2.37,1.86,1.74,1.1,1.24,1.1,0.848,2.95,2.13],["HSS4-1/2X4-1/2X1/2",25.03,6.95,4.5,4.5,0.5,0.465,6.68,6.68,18.1,10.2,8.03,1.61,18.1,10.2,8.03,1.61,31.3,14.8],["HSS4-1/2X4-1/2X3/8",19.82,5.48,4.5,4.5,0.375,0.349,9.89,9.89,15.3,8.36,6.79,1.67,15.3,8.36,6.79,1.67,25.7,11.9],
+    ["HSS4-1/2X4-1/2X5/16",16.96,4.68,4.5,4.5,0.3125,0.291,12.5,12.5,13.5,7.27,6,1.7,13.5,7.27,6,1.7,22.3,10.2],["HSS4-1/2X4-1/2X1/4",13.91,3.84,4.5,4.5,0.25,0.233,16.3,16.3,11.4,6.06,5.08,1.73,11.4,6.06,5.08,1.73,18.5,8.44],["HSS4-1/2X4-1/2X3/16",10.7,2.93,4.5,4.5,0.1875,0.174,22.9,22.9,9.02,4.71,4.01,1.75,9.02,4.71,4.01,1.75,14.4,6.49],["HSS4-1/2X4-1/2X1/8",7.31,2,4.5,4.5,0.125,0.116,35.8,35.8,6.35,3.27,2.82,1.78,6.35,3.27,2.82,1.78,9.92,4.45],
+    ["HSS4X4X1/2",21.63,6.02,4,4,0.5,0.465,5.6,5.6,11.9,7.7,5.97,1.41,11.9,7.7,5.97,1.41,21,11.2],["HSS4X4X3/8",17.27,4.78,4,4,0.375,0.349,8.46,8.46,10.3,6.39,5.13,1.47,10.3,6.39,5.13,1.47,17.5,9.14],["HSS4X4X5/16",14.83,4.1,4,4,0.3125,0.291,10.7,10.7,9.14,5.59,4.57,1.49,9.14,5.59,4.57,1.49,15.3,7.91],["HSS4X4X1/4",12.21,3.37,4,4,0.25,0.233,14.2,14.2,7.8,4.69,3.9,1.52,7.8,4.69,3.9,1.52,12.8,6.56],
+    ["HSS4X4X3/16",9.42,2.58,4,4,0.1875,0.174,20,20,6.21,3.67,3.1,1.55,6.21,3.67,3.1,1.55,10,5.07],["HSS4X4X1/8",6.46,1.77,4,4,0.125,0.116,31.5,31.5,4.4,2.56,2.2,1.58,4.4,2.56,2.2,1.58,6.91,3.49],["HSS4X3X3/8",14.72,4.09,4,3,0.375,0.349,5.6,8.46,7.93,5.12,3.97,1.39,5.01,4.18,3.34,1.11,10.6,6.59],["HSS4X3X5/16",12.7,3.52,4,3,0.3125,0.291,7.31,10.7,7.14,4.51,3.57,1.42,4.52,3.69,3.02,1.13,9.41,5.75],
+    ["HSS4X3X1/4",10.51,2.91,4,3,0.25,0.233,9.88,14.2,6.15,3.81,3.07,1.45,3.91,3.12,2.61,1.16,7.96,4.81],["HSS4X3X3/16",8.15,2.24,4,3,0.1875,0.174,14.2,20,4.93,3,2.47,1.49,3.16,2.46,2.1,1.19,6.26,3.74],["HSS4X3X1/8",5.61,1.54,4,3,0.125,0.116,22.9,31.5,3.52,2.11,1.76,1.52,2.27,1.73,1.51,1.21,4.38,2.59],["HSS4X2-1/2X1/4",9.66,2.67,4,2.5,0.25,0.233,7.73,14.2,5.32,3.38,2.66,1.41,2.53,2.43,2.02,0.973,5.78,3.93],
+    ["HSS4X2-1/2X3/16",7.51,2.06,4,2.5,0.1875,0.174,11.4,20,4.3,2.67,2.15,1.44,2.06,1.93,1.65,0.999,4.59,3.08],["HSS4X2-1/2X1/8",5.18,1.42,4,2.5,0.125,0.116,18.6,31.5,3.09,1.88,1.54,1.47,1.49,1.36,1.19,1.03,3.23,2.14],["HSS4X2X3/8",12.17,3.39,4,2,0.375,0.349,2.73,8.46,5.6,3.84,2.8,1.29,1.8,2.31,1.8,0.729,4.83,4.04],["HSS4X2X5/16",10.58,2.94,4,2,0.3125,0.291,3.87,10.7,5.13,3.43,2.56,1.32,1.67,2.08,1.67,0.754,4.4,3.59],
+    ["HSS4X2X1/4",8.81,2.44,4,2,0.25,0.233,5.58,14.2,4.49,2.94,2.25,1.36,1.48,1.79,1.48,0.779,3.82,3.05],["HSS4X2X3/16",6.87,1.89,4,2,0.1875,0.174,8.49,20,3.66,2.34,1.83,1.39,1.22,1.43,1.22,0.804,3.08,2.41],["HSS4X2X1/8",4.75,1.3,4,2,0.125,0.116,14.2,31.5,2.65,1.66,1.32,1.43,0.898,1.02,0.898,0.83,2.2,1.69],["HSS4X1-1/2X1/4",7.96,2.21,4,1.5,0.25,0.233,3.44,14.2,3.66,2.5,1.83,1.29,0.733,1.21,0.977,0.576,2.14,2.18],
+    ["HSS4X1-1/2X3/16",6.23,1.71,4,1.5,0.1875,0.174,5.62,20,3.02,2.01,1.51,1.33,0.621,0.982,0.827,0.602,1.78,1.75],["HSS4X1-1/2X1/8",4.33,1.19,4,1.5,0.125,0.116,9.93,31.5,2.21,1.43,1.11,1.36,0.467,0.71,0.622,0.627,1.3,1.24],["HSS3-1/2X3-1/2X3/8",14.72,4.09,3.5,3.5,0.375,0.349,7.03,7.03,6.49,4.69,3.71,1.26,6.49,4.69,3.71,1.26,11.2,6.77],["HSS3-1/2X3-1/2X5/16",12.7,3.52,3.5,3.5,0.3125,0.291,9.03,9.03,5.84,4.14,3.34,1.29,5.84,4.14,3.34,1.29,9.89,5.9],
+    ["HSS3-1/2X3-1/2X1/4",10.51,2.91,3.5,3.5,0.25,0.233,12,12,5.04,3.5,2.88,1.32,5.04,3.5,2.88,1.32,8.35,4.92],["HSS3-1/2X3-1/2X3/16",8.15,2.24,3.5,3.5,0.1875,0.174,17.1,17.1,4.05,2.76,2.31,1.35,4.05,2.76,2.31,1.35,6.56,3.83],["HSS3-1/2X3-1/2X1/8",5.61,1.54,3.5,3.5,0.125,0.116,27.2,27.2,2.9,1.93,1.66,1.37,2.9,1.93,1.66,1.37,4.58,2.65],["HSS3-1/2X2-1/2X3/8",12.17,3.39,3.5,2.5,0.375,0.349,4.16,7.03,4.75,3.59,2.72,1.18,2.77,2.82,2.21,0.904,6.16,4.57],
+    ["HSS3-1/2X2-1/2X5/16",10.58,2.94,3.5,2.5,0.3125,0.291,5.59,9.03,4.34,3.2,2.48,1.22,2.54,2.52,2.03,0.93,5.53,4.03],["HSS3-1/2X2-1/2X1/4",8.81,2.44,3.5,2.5,0.25,0.233,7.73,12,3.79,2.74,2.17,1.25,2.23,2.16,1.78,0.956,4.75,3.4],["HSS3-1/2X2-1/2X3/16",6.87,1.89,3.5,2.5,0.1875,0.174,11.4,17.1,3.09,2.18,1.76,1.28,1.82,1.72,1.46,0.983,3.78,2.67],["HSS3-1/2X2-1/2X1/8",4.75,1.3,3.5,2.5,0.125,0.116,18.6,27.2,2.23,1.54,1.28,1.31,1.33,1.22,1.06,1.01,2.67,1.87],
+    ["HSS3-1/2X2X1/4",7.96,2.21,3.5,2,0.25,0.233,5.58,12,3.17,2.36,1.81,1.2,1.3,1.58,1.3,0.766,3.16,2.64],["HSS3-1/2X2X3/16",6.23,1.71,3.5,2,0.1875,0.174,8.49,17.1,2.61,1.89,1.49,1.23,1.08,1.27,1.08,0.792,2.55,2.09],["HSS3-1/2X2X1/8",4.33,1.19,3.5,2,0.125,0.116,14.2,27.2,1.9,1.34,1.09,1.27,0.795,0.912,0.795,0.818,1.83,1.47],["HSS3-1/2X1-1/2X1/4",7.11,1.97,3.5,1.5,0.25,0.233,3.44,12,2.55,1.98,1.46,1.14,0.638,1.06,0.851,0.569,1.79,1.88],
+    ["HSS3-1/2X1-1/2X3/16",5.59,1.54,3.5,1.5,0.1875,0.174,5.62,17.1,2.12,1.6,1.21,1.17,0.544,0.867,0.725,0.594,1.49,1.51],["HSS3-1/2X1-1/2X1/8",3.9,1.07,3.5,1.5,0.125,0.116,9.93,27.2,1.57,1.15,0.896,1.21,0.411,0.63,0.548,0.619,1.09,1.08],["HSS3X3X3/8",12.17,3.39,3,3,0.375,0.349,5.6,5.6,3.78,3.25,2.52,1.06,3.78,3.25,2.52,1.06,6.64,4.74],["HSS3X3X5/16",10.58,2.94,3,3,0.3125,0.291,7.31,7.31,3.45,2.9,2.3,1.08,3.45,2.9,2.3,1.08,5.94,4.18],
+    ["HSS3X3X1/4",8.81,2.44,3,3,0.25,0.233,9.88,9.88,3.02,2.48,2.01,1.11,3.02,2.48,2.01,1.11,5.08,3.52],["HSS3X3X3/16",6.87,1.89,3,3,0.1875,0.174,14.2,14.2,2.46,1.97,1.64,1.14,2.46,1.97,1.64,1.14,4.03,2.76],["HSS3X3X1/8",4.75,1.3,3,3,0.125,0.116,22.9,22.9,1.78,1.4,1.19,1.17,1.78,1.4,1.19,1.17,2.84,1.92],["HSS3X2-1/2X5/16",9.51,2.64,3,2.5,0.3125,0.291,5.59,7.31,2.92,2.51,1.94,1.05,2.18,2.2,1.74,0.908,4.34,3.39],
+    ["HSS3X2-1/2X1/4",7.96,2.21,3,2.5,0.25,0.233,7.73,9.88,2.57,2.16,1.72,1.08,1.93,1.9,1.54,0.935,3.74,2.87],["HSS3X2-1/2X3/16",6.23,1.71,3,2.5,0.1875,0.174,11.4,14.2,2.11,1.73,1.41,1.11,1.59,1.52,1.27,0.963,3,2.27],["HSS3X2-1/2X1/8",4.33,1.19,3,2.5,0.125,0.116,18.6,22.9,1.54,1.23,1.03,1.14,1.16,1.09,0.931,0.99,2.13,1.59],["HSS3X2X5/16",8.45,2.35,3,2,0.3125,0.291,3.87,7.31,2.38,2.11,1.59,1.01,1.24,1.58,1.24,0.725,2.87,2.6],
+    ["HSS3X2X1/4",7.11,1.97,3,2,0.25,0.233,5.58,9.88,2.13,1.83,1.42,1.04,1.11,1.38,1.11,0.751,2.52,2.23],["HSS3X2X3/16",5.59,1.54,3,2,0.1875,0.174,8.49,14.2,1.77,1.48,1.18,1.07,0.932,1.12,0.932,0.778,2.05,1.78],["HSS3X2X1/8",3.9,1.07,3,2,0.125,0.116,14.2,22.9,1.3,1.06,0.867,1.1,0.692,0.803,0.692,0.804,1.47,1.25],["HSS3X1-1/2X1/4",6.26,1.74,3,1.5,0.25,0.233,3.44,9.88,1.68,1.51,1.12,0.982,0.543,0.911,0.725,0.559,1.44,1.58],
+    ["HSS3X1-1/2X3/16",4.96,1.37,3,1.5,0.1875,0.174,5.62,14.2,1.42,1.24,0.945,1.02,0.467,0.752,0.622,0.584,1.21,1.28],["HSS3X1-1/2X1/8",3.48,0.956,3,1.5,0.125,0.116,9.93,22.9,1.06,0.895,0.706,1.05,0.355,0.55,0.474,0.61,0.886,0.92],["HSS3X1X3/16",4.32,1.19,3,1,0.1875,0.174,2.75,14.2,1.07,0.989,0.713,0.947,0.173,0.432,0.345,0.38,0.526,0.792],["HSS3X1X1/8",3.05,0.84,3,1,0.125,0.116,5.62,22.9,0.817,0.728,0.545,0.987,0.138,0.325,0.276,0.405,0.408,0.585],
+    ["HSS2-1/2X2-1/2X5/16",8.45,2.35,2.5,2.5,0.3125,0.291,5.59,5.59,1.82,1.88,1.46,0.88,1.82,1.88,1.46,0.88,3.2,2.74],["HSS2-1/2X2-1/2X1/4",7.11,1.97,2.5,2.5,0.25,0.233,7.73,7.73,1.63,1.63,1.3,0.908,1.63,1.63,1.3,0.908,2.79,2.35],["HSS2-1/2X2-1/2X3/16",5.59,1.54,2.5,2.5,0.1875,0.174,11.4,11.4,1.35,1.32,1.08,0.937,1.35,1.32,1.08,0.937,2.25,1.86],["HSS2-1/2X2-1/2X1/8",3.9,1.07,2.5,2.5,0.125,0.116,18.6,18.6,0.998,0.947,0.799,0.965,0.998,0.947,0.799,0.965,1.61,1.31],
+    ["HSS2-1/2X2X1/4",6.26,1.74,2.5,2,0.25,0.233,5.58,7.73,1.33,1.37,1.06,0.874,0.93,1.17,0.93,0.731,1.9,1.82],["HSS2-1/2X2X3/16",4.96,1.37,2.5,2,0.1875,0.174,8.49,11.4,1.12,1.12,0.894,0.904,0.786,0.956,0.786,0.758,1.55,1.46],["HSS2-1/2X2X1/8",3.48,0.956,2.5,2,0.125,0.116,14.2,18.6,0.833,0.809,0.667,0.934,0.589,0.694,0.589,0.785,1.12,1.04],["HSS2-1/2X1-1/2X1/4",5.41,1.51,2.5,1.5,0.25,0.233,3.44,7.73,1.03,1.11,0.822,0.826,0.449,0.764,0.599,0.546,1.1,1.29],
+    ["HSS2-1/2X1-1/2X3/16",4.32,1.19,2.5,1.5,0.1875,0.174,5.62,11.4,0.882,0.915,0.705,0.86,0.39,0.636,0.52,0.572,0.929,1.05],["HSS2-1/2X1-1/2X1/8",3.05,0.84,2.5,1.5,0.125,0.116,9.93,18.6,0.668,0.671,0.535,0.892,0.3,0.469,0.399,0.597,0.687,0.759],["HSS2-1/2X1X3/16",3.68,1.02,2.5,1,0.1875,0.174,2.75,11.4,0.646,0.713,0.517,0.796,0.143,0.36,0.285,0.374,0.412,0.648],["HSS2-1/2X1X1/8",2.63,0.724,2.5,1,0.125,0.116,5.62,18.6,0.503,0.532,0.403,0.834,0.115,0.274,0.23,0.399,0.322,0.483],
+    ["HSS2-1/4X2-1/4X1/4",6.26,1.74,2.25,2.25,0.25,0.233,6.66,6.66,1.13,1.28,1.01,0.806,1.13,1.28,1.01,0.806,1.96,1.85],["HSS2-1/4X2-1/4X3/16",4.96,1.37,2.25,2.25,0.1875,0.174,9.93,9.93,0.953,1.04,0.847,0.835,0.953,1.04,0.847,0.835,1.6,1.48],["HSS2-1/4X2-1/4X1/8",3.48,0.956,2.25,2.25,0.125,0.116,16.4,16.4,0.712,0.755,0.633,0.863,0.712,0.755,0.633,0.863,1.15,1.05],["HSS2X2X1/4",5.41,1.51,2,2,0.25,0.233,5.58,5.58,0.747,0.964,0.747,0.704,0.747,0.964,0.747,0.704,1.31,1.41],
+    ["HSS2X2X3/16",4.32,1.19,2,2,0.1875,0.174,8.49,8.49,0.641,0.797,0.641,0.733,0.641,0.797,0.641,0.733,1.09,1.14],["HSS2X2X1/8",3.05,0.84,2,2,0.125,0.116,14.2,14.2,0.486,0.584,0.486,0.761,0.486,0.584,0.486,0.761,0.796,0.817],["HSS2X1-1/2X3/16",3.68,1.02,2,1.5,0.1875,0.174,5.62,8.49,0.495,0.639,0.495,0.697,0.313,0.521,0.417,0.554,0.664,0.822],["HSS2X1-1/2X1/8",2.63,0.724,2,1.5,0.125,0.116,9.93,14.2,0.383,0.475,0.383,0.728,0.244,0.389,0.325,0.581,0.496,0.599],
+    ["HSS2X1X3/16",3.04,0.845,2,1,0.1875,0.174,2.75,8.49,0.35,0.48,0.35,0.643,0.112,0.288,0.225,0.365,0.301,0.505],["HSS2X1X1/8",2.2,0.608,2,1,0.125,0.116,5.62,14.2,0.28,0.366,0.28,0.679,0.0922,0.223,0.184,0.39,0.238,0.38],["HSS1-1/2X1-1/2X1/4",3.71,1.04,1.5,1.5,0.25,0.233,3.44,3.44,0.26,0.469,0.346,0.5,0.26,0.469,0.346,0.5,0.47,0.699],["HSS1-1/2X1-1/2X3/16",3.04,0.845,1.5,1.5,0.188,0.174,5.62,5.62,0.236,0.406,0.315,0.528,0.236,0.406,0.315,0.528,0.414,0.592],
+    ["HSS1-1/2X1-1/2X1/8",2.2,0.608,1.5,1.5,0.125,0.116,9.93,9.93,0.188,0.309,0.251,0.557,0.188,0.309,0.251,0.557,0.316,0.438]
+  ];
+  var GRADES = {
+    A500C: { id: 'A500C', name: 'ASTM A500 Gr. C', Fy: 50, Fu: 62, tRule: 'des' },
+    A500B: { id: 'A500B', name: 'ASTM A500 Gr. B', Fy: 46, Fu: 58, tRule: 'des' },
+    A1085: { id: 'A1085', name: 'ASTM A1085', Fy: 50, Fu: 65, tRule: 'nom' }
+  };
+  var FRAC = { '1/8': 0.125, '3/16': 0.1875, '1/4': 0.25, '5/16': 0.3125, '3/8': 0.375, '7/16': 0.4375, '1/2': 0.5, '5/8': 0.625, '3/4': 0.75, '7/8': 0.875, '1': 1 };
+  var byName = null;
+  function index() {
+    if (byName) return byName;
+    byName = {};
+    ROWS.forEach(function (r) { byName[r[0]] = r; });
+    return byName;
+  }
+  function num(s) { return FRAC[s] != null ? FRAC[s] : parseFloat(s); }
+  /* parse "HSS6X6X1/4", "HSS6x6x.250", "HSS 6x6x0.25" -> {H, B, t} (inches) */
+  function parseName(name) {
+    var m = String(name || '').toUpperCase().replace(/\s+/g, '').match(/^HSS([0-9.]+(?:-[0-9]+\/[0-9]+)?)X([0-9.]+(?:-[0-9]+\/[0-9]+)?)X([0-9./]+)$/);
+    if (!m) return null;
+    var dim = function (s) { var p = s.split('-'); return p.length > 1 ? parseFloat(p[0]) + num(p[1]) : parseFloat(s); };
+    return { H: dim(m[1]), B: dim(m[2]), t: num(m[3]) };
+  }
+  /* table row of a designation in either form, or null */
+  function find(name) {
+    var ix = index(), k = String(name || '').toUpperCase().replace(/\s+/g, '');
+    if (ix[k]) return ix[k];
+    var q = parseName(k);
+    if (!q) return null;
+    for (var i = 0; i < ROWS.length; i++) {
+      var r = ROWS[i];
+      if (Math.abs(r[3] - q.H) < 0.01 && Math.abs(r[4] - q.B) < 0.01 && Math.abs(r[5] - q.t) < 0.002) return r;
+    }
+    return null;
+  }
+  /* resolved section: table values + material + the B4.1b flat widths
+   * (b = B - 3t, h = H - 3t: the AISC convention when the corner radii are
+   * not known, Spec. B4.1b(d)). A1085 uses the nominal wall (B4.2). */
+  function section(name, grade, opt) {
+    var r = typeof name === 'string' ? find(name) : name;
+    if (!r) return null;
+    var g = typeof grade === 'string' ? GRADES[grade] : (grade || GRADES.A500C);
+    opt = opt || {};
+    var p = { name: r[0], grade: g, Fy: opt.Fy || g.Fy, Fu: opt.Fu || g.Fu, E: opt.E || EKSI, G: opt.G || GKSI };
+    COLS.forEach(function (c, i) { if (i) p[c] = r[i]; });
+    p.t = g.tRule === 'nom' ? p.tnom : p.tdes;
+    p.bFlat = p.B - 3 * p.t; p.hFlat = p.Ht - 3 * p.t;
+    p.btdes = p.bFlat / p.t; p.htdes = p.hFlat / p.t;
+    return p;
+  }
+  function cls3(lam, lp, lr) { return lam <= lp ? 'compact' : lam <= lr ? 'noncompact' : 'slender'; }
+  /* Table B4.1b (flexure) cases 17 (flange) and 19 (web); Table B4.1a case 6 (compression walls) */
+  function classify(p) {
+    var rt = SQ(p.E / p.Fy);
+    var mk = function (lam, lp, lr, cs) { return { lam: lam, lp: lp, lr: lr, cs: cs, cls: cls3(lam, lp, lr) }; };
+    return {
+      x: { flange: mk(p.btdes, 1.12 * rt, 1.40 * rt, '17'), web: mk(p.htdes, 2.42 * rt, 5.70 * rt, '19') },
+      y: { flange: mk(p.htdes, 1.12 * rt, 1.40 * rt, '17'), web: mk(p.btdes, 2.42 * rt, 5.70 * rt, '19') },
+      comp: {
+        b: { lam: p.btdes, lr: 1.40 * rt, cs: '6', cls: p.btdes <= 1.40 * rt ? 'nonslender' : 'slender' },
+        h: { lam: p.htdes, lr: 1.40 * rt, cs: '6', cls: p.htdes <= 1.40 * rt ? 'nonslender' : 'slender' }
+      }
+    };
+  }
+  /* D2: phi_t Pn = min(0.90 Fy Ag, 0.75 Fu Ae); Ae = U An (D3-1), An = Ag and U = 1 unless given */
+  function tension(p, An, U) {
+    var Ag = p.A, An2 = An > 0 ? Math.min(An, Ag) : Ag, U2 = U > 0 ? Math.min(U, 1) : 1, Ae = U2 * An2;
+    var Pny = p.Fy * Ag, Pnr = p.Fu * Ae;
+    return { Ag: Ag, An: An2, U: U2, Ae: Ae, Pny: Pny, Pnr: Pnr, phiY: 0.9 * Pny, phiR: 0.75 * Pnr,
+      phiPn: Math.min(0.9 * Pny, 0.75 * Pnr), rupture: 0.75 * Pnr < 0.9 * Pny };
+  }
+  /* E3 flexural buckling (doubly symmetric closed section: no E4 torsional mode), E7 slender walls (Table E7.1 case (b)) */
+  function compression(p, Lcx, Lcy) {
+    var E = p.E, Fy = p.Fy;
+    var sx = Lcx / p.rx, sy = Lcy / p.ry, s = Math.max(sx, sy), ax = sx >= sy ? 'x' : 'y';
+    var Fe = s > 0 ? PI * PI * E / (s * s) : Infinity;
+    var Fcr = Fy / Fe <= 2.25 ? Math.pow(0.658, Fy / Fe) * Fy : 0.877 * Fe;
+    var cc = classify(p).comp, Ae = p.A, eff = [];
+    var beOf = function (b, lam, lr) {
+      var thr = lr * SQ(Fy / Fcr);
+      if (lam <= thr) return { b: b, be: b, red: 0, lam: lam, thr: thr };
+      var Fel = Math.pow(1.38 * lr / lam, 2) * Fy;                  /* E7-5, c2 = 1.38 */
+      var be = Math.min(b, b * (1 - 0.20 * SQ(Fel / Fcr)) * SQ(Fel / Fcr));   /* E7-3, c1 = 0.20 */
+      return { b: b, be: be, red: (b - be) * p.t, lam: lam, thr: thr, Fel: Fel };
+    };
+    var rb = beOf(p.bFlat, cc.b.lam, cc.b.lr), rh = beOf(p.hFlat, cc.h.lam, cc.h.lr);
+    if (rb.red > 0) { Ae -= 2 * rb.red; eff.push({ el: 'b', r: rb }); }
+    if (rh.red > 0) { Ae -= 2 * rh.red; eff.push({ el: 'h', r: rh }); }
+    var Pn = Fcr * Ae;
+    return { Lcx: Lcx, Lcy: Lcy, sx: sx, sy: sy, s: s, axis: ax, Fe: Fe, Fcr: Fcr, inelastic: Fy / Fe <= 2.25,
+      Ae: Ae, eff: eff, wb: rb, wh: rh, Pn: Pn, phiPn: 0.9 * Pn };
+  }
+  /* F7-4 effective section modulus with the slender compression flange reduced to be (F7-4 for be) */
+  function seSlender(p, axis) {
+    var E = p.E, Fy = p.Fy, t = p.t;
+    var H = axis === 'x' ? p.Ht : p.B, bF = axis === 'x' ? p.bFlat : p.hFlat, bt = bF / t;
+    var be = Math.min(bF, 1.92 * t * SQ(E / Fy) * (1 - 0.38 / bt * SQ(E / Fy)));
+    var dA = (bF - be) * t, yE = (H - t) / 2, A2 = p.A - dA, ybar = (-dA * yE) / A2;
+    var I0 = axis === 'x' ? p.Ix : p.Iy, Icg = I0 - dA * yE * yE - A2 * ybar * ybar, cc = H / 2 - ybar;
+    return { be: be, Se: Icg / cc };
+  }
+  /* F7: yielding, FLB, WLB, LTB (major axis only) */
+  function flexure(p, axis, Lb, Cb) {
+    var E = p.E, Fy = p.Fy, c = classify(p)[axis];
+    var Z = axis === 'x' ? p.Zx : p.Zy, S = axis === 'x' ? p.Sx : p.Sy, Mp = Fy * Z;
+    Cb = Cb > 0 ? Cb : 1;
+    var ls = [{ k: 'Y', name: 'Yielding', ref: 'F7-1', Mn: Mp }];
+    var f = c.flange, w = c.web, blocked = null;
+    if (f.cls === 'noncompact') ls.push({ k: 'FLB', name: 'Flange local buckling', ref: 'F7-2', Mn: Math.min(Mp, Mp - (Mp - Fy * S) * (3.57 * f.lam * SQ(Fy / E) - 4.0)) });
+    else if (f.cls === 'slender') { var se = seSlender(p, axis); ls.push({ k: 'FLB', name: 'Flange local buckling', ref: 'F7-3', Mn: Fy * se.Se, Se: se.Se, be: se.be }); }
+    if (w.cls === 'noncompact') ls.push({ k: 'WLB', name: 'Web local buckling', ref: 'F7-6', Mn: Math.min(Mp, Mp - (Mp - Fy * S) * (0.305 * w.lam * SQ(Fy / E) - 0.738)) });
+    else if (w.cls === 'slender') blocked = 'slender web in flexure (F7.3(c)) is outside this engine';
+    var ltb = null;
+    if (axis === 'x' && Lb > 0 && p.Ht > p.B + 1e-9) {
+      var JA = SQ(p.J * p.A), Lp = 0.13 * E * p.ry * JA / Mp, Lr = 2 * E * p.ry * JA / (0.7 * Fy * p.Sx);
+      ltb = { Lb: Lb, Cb: Cb, Lp: Lp, Lr: Lr };
+      if (Lb > Lp && Lb <= Lr) { ltb.ref = 'F7-10'; ltb.Mn = Math.min(Mp, Cb * (Mp - (Mp - 0.7 * Fy * p.Sx) * (Lb - Lp) / (Lr - Lp))); }
+      else if (Lb > Lr) { ltb.ref = 'F7-11'; ltb.Mn = Math.min(Mp, 2 * E * Cb * JA / (Lb / p.ry)); }
+      if (ltb.Mn != null) ls.push({ k: 'LTB', name: 'Lateral-torsional buckling', ref: ltb.ref, Mn: ltb.Mn });
+    }
+    var gov = ls.reduce(function (m, l) { return l.Mn < m.Mn ? l : m; }, ls[0]);
+    var Mn = blocked ? 0 : gov.Mn;
+    return { axis: axis, cls: c, Mp: Mp, Z: Z, S: S, ls: ls, ltb: ltb, gov: gov, Mn: Mn, phiMn: 0.9 * Mn, blocked: blocked };
+  }
+  /* G4: Vn = 0.6 Fy Aw Cv2, Aw = 2 h t, kv = 5, Cv2 per G2-9..G2-11; phi_v = 0.90 */
+  function shear(p, axis) {
+    var E = p.E, Fy = p.Fy, h = axis === 'x' ? p.hFlat : p.bFlat, lam = h / p.t, kv = 5;
+    var a = 1.10 * SQ(kv * E / Fy), b = 1.37 * SQ(kv * E / Fy), Cv2, ref;
+    if (lam <= a) { Cv2 = 1; ref = 'G2-9'; } else if (lam <= b) { Cv2 = a / lam; ref = 'G2-10'; } else { Cv2 = 1.51 * kv * E / (lam * lam * Fy); ref = 'G2-11'; }
+    var Aw = 2 * h * p.t, Vn = 0.6 * Fy * Aw * Cv2;
+    return { axis: axis, h: h, lam: lam, kv: kv, lim1: a, lim2: b, Cv2: Cv2, ref: ref, Aw: Aw, Vn: Vn, phiVn: 0.9 * Vn };
+  }
+  /* H3.1(b): Tn = Fcr C; h = flat width of the longer side */
+  function torsion(p) {
+    var E = p.E, Fy = p.Fy, ht = Math.max(p.htdes, p.btdes), a = 2.45 * SQ(E / Fy), b = 3.07 * SQ(E / Fy), Fcr, ref;
+    if (ht <= a) { Fcr = 0.6 * Fy; ref = 'H3-3'; } else if (ht <= b) { Fcr = 0.6 * Fy * a / ht; ref = 'H3-4'; } else { Fcr = 0.458 * PI * PI * E / (ht * ht); ref = 'H3-5'; }
+    var Tn = Fcr * p.C;
+    return { ht: ht, lim1: a, lim2: b, Fcr: Fcr, ref: ref, C: p.C, Tn: Tn, phiTn: 0.9 * Tn };
+  }
+  /* every capacity of a member (independent of the demand) */
+  function capacities(p, L) {
+    L = L || {};
+    return { p: p, L: L, cls: classify(p), ten: tension(p, L.An, L.U), comp: compression(p, L.Lcx || 0, L.Lcy || 0),
+      fx: flexure(p, 'x', L.Lb || 0, L.Cb), fy: flexure(p, 'y', 0, 1), vx: shear(p, 'x'), vy: shear(p, 'y'), tor: torsion(p) };
+  }
+  /* ratios of a demand: H1-1a/b (H1.1), and H3-6 when Tr > 0.2 Tc (H3.2) */
+  function ratios(cap, d) {
+    var P = d.P || 0, Pc = P >= 0 ? cap.ten.phiPn : cap.comp.phiPn;
+    var rP = Math.abs(P) / Pc, rMx = Math.abs(d.Mx || 0) / cap.fx.phiMn, rMy = Math.abs(d.My || 0) / cap.fy.phiMn;
+    var rVx = Math.abs(d.Vx || 0) / cap.vx.phiVn, rVy = Math.abs(d.Vy || 0) / cap.vy.phiVn, rT = Math.abs(d.T || 0) / cap.tor.phiTn;
+    var h1 = rP >= 0.2 ? rP + 8 / 9 * (rMx + rMy) : rP / 2 + (rMx + rMy), h1ref = rP >= 0.2 ? 'H1-1a' : 'H1-1b';
+    var torsionOn = rT > 0.2, h3 = torsionOn ? (rP + rMx + rMy) + Math.pow(Math.max(rVx, rVy) + rT, 2) : null;
+    var r = { P: rP, Pc: Pc, Pkind: P >= 0 ? 'tension' : 'compression', Mx: rMx, My: rMy, Vx: rVx, Vy: rVy, T: rT,
+      H1: h1, H1ref: h1ref, torsionOn: torsionOn, H3: h3 };
+    var list = [['P', rP], ['Mx', rMx], ['My', rMy], ['Vx', rVx], ['Vy', rVy], ['T', rT], ['H1', h1]];
+    if (h3 != null) list.push(['H3', h3]);
+    var g = list.reduce(function (m, x) { return x[1] > m[1] ? x : m; }, list[0]);
+    r.gov = g[1]; r.govKey = g[0];
+    return r;
+  }
+  function check(p, L, d) { var cap = capacities(p, L); return { cap: cap, r: ratios(cap, d) }; }
+
+  /* ---------- worked steps (shared/steps.js format) ---------- */
+  function f(v, d) { return (v == null || !isFinite(v)) ? '\\infty' : (+v).toFixed(d == null ? 2 : d); }
+  function st(id, label, sym, eq, sub, value, unit, d, ref, note, ok) {
+    var s = { id: id, label: label, sym: sym, eq: eq, sub: sub, value: value, unit: unit || '', d: d == null ? 2 : d, ref: ref ? 'AISC 360-16 ' + ref : '' };
+    if (note) s.note = note;
+    if (ok != null) s.ok = ok;
+    return s;
+  }
+  /* steps of the capacities; id prefix pre (e.g. 'md.C1') */
+  function capSteps(cap, pre) {
+    var p = cap.p, c = cap.cls, S = [], P = pre ? pre + '.' : '';
+    var tl = p.grade.tRule === 'nom' ? 't = t_{nom}' : 't = t_{des}';
+    S.push(st(P + 'b', 'Flat width of the B walls', 'b', 'B - 3t', f(p.B, 3) + ' - 3(' + f(p.t, 3) + ')', p.bFlat, 'in', 3, 'B4.1b(d)',
+      'Corner radii not known: the AISC convention b = B - 3t, h = H - 3t; ' + tl + ' (' + p.grade.name + ').'));
+    S.push(st(P + 'h', 'Flat width of the H walls', 'h', 'H - 3t', f(p.Ht, 3) + ' - 3(' + f(p.t, 3) + ')', p.hFlat, 'in', 3, 'B4.1b(d)'));
+    var rt = SQ(p.E / p.Fy);
+    S.push(st(P + 'cls.f', 'Flange slenderness (bending about x)', '\\lambda_{f}', 'b/t', f(p.bFlat, 3) + '/' + f(p.t, 3), p.btdes, '', 1, 'Table B4.1b case 17',
+      '$\\lambda_p = 1.12\\sqrt{E/F_y}$ = ' + f(1.12 * rt, 1) + ', $\\lambda_r = 1.40\\sqrt{E/F_y}$ = ' + f(1.40 * rt, 1) + ': ' + c.x.flange.cls + '.'));
+    S.push(st(P + 'cls.w', 'Web slenderness (bending about x)', '\\lambda_{w}', 'h/t', f(p.hFlat, 3) + '/' + f(p.t, 3), p.htdes, '', 1, 'Table B4.1b case 19',
+      '$\\lambda_p = 2.42\\sqrt{E/F_y}$ = ' + f(2.42 * rt, 1) + ', $\\lambda_r = 5.70\\sqrt{E/F_y}$ = ' + f(5.70 * rt, 1) + ': ' + c.x.web.cls + '; in compression (Table B4.1a case 6, $\\lambda_r$ = ' + f(1.40 * rt, 1) + '): walls b ' + c.comp.b.cls + ', walls h ' + c.comp.h.cls + '.'));
+    var t = cap.ten;
+    S.push(st(P + 'ten', 'Tensile strength', '\\phi_t P_n', '\\min(0.90F_yA_g,\\ 0.75F_uA_e)', '\\min(0.90(' + f(p.Fy, 0) + ')(' + f(t.Ag, 2) + '),\\ 0.75(' + f(p.Fu, 0) + ')(' + f(t.Ae, 2) + '))', t.phiPn, 'kip', 1, 'D2-1, D2-2',
+      '$A_e = A_g$ assumed (welded end connections, no holes: U = 1.0, Table D3.1 case 1).'));
+    var k = cap.comp;
+    S.push(st(P + 'kl', 'Governing slenderness', '\\frac{L_c}{r}', '\\max\\left(\\frac{L_{cx}}{r_x},\\frac{L_{cy}}{r_y}\\right)', '\\max\\left(\\frac{' + f(k.Lcx, 1) + '}{' + f(p.rx, 2) + '},\\frac{' + f(k.Lcy, 1) + '}{' + f(p.ry, 2) + '}\\right)', k.s, '', 1, 'E2',
+      k.s > 200 ? '$L_c/r$ > 200 (User Note E2: preferably not more than 200).' : null, k.s <= 200));
+    S.push(st(P + 'fe', 'Elastic buckling stress', 'F_e', '\\frac{\\pi^{2}E}{(L_c/r)^{2}}', '\\frac{\\pi^{2}(' + f(p.E, 0) + ')}{(' + f(k.s, 1) + ')^{2}}', k.Fe, 'ksi', 1, 'E3-4'));
+    S.push(st(P + 'fcr', 'Critical stress', 'F_{cr}', k.inelastic ? '0.658^{F_y/F_e}F_y' : '0.877F_e', k.inelastic ? '0.658^{' + f(p.Fy, 0) + '/' + f(k.Fe, 1) + '}(' + f(p.Fy, 0) + ')' : '0.877(' + f(k.Fe, 1) + ')', k.Fcr, 'ksi', 2, k.inelastic ? 'E3-2' : 'E3-3'));
+    if (k.eff.length) S.push(st(P + 'ae', 'Effective area (slender walls)', 'A_e', 'A_g - \\sum (b - b_e)t', f(p.A, 2) + ' - ' + f(p.A - k.Ae, 3), k.Ae, 'in^{2}', 2, 'E7-3, Table E7.1 case (b)',
+      '$c_1$ = 0.20, $c_2$ = 1.38; ' + k.eff.map(function (e) { return 'walls ' + e.el + ': $b_e$ = ' + f(e.r.be, 3) + ' in'; }).join(', ') + '.'));
+    S.push(st(P + 'pn', 'Compressive strength', '\\phi_c P_n', '0.90F_{cr}A_e', '0.90(' + f(k.Fcr, 2) + ')(' + f(k.Ae, 2) + ')', k.phiPn, 'kip', 1, k.eff.length ? 'E7-1' : 'E3-1'));
+    ['fx', 'fy'].forEach(function (key) {
+      var F = cap[key], ax = F.axis, Zs = ax === 'x' ? 'Z_x' : 'Z_y';
+      S.push(st(P + key + '.mp', 'Plastic moment, about ' + ax, 'M_{p' + ax + '}', 'F_y' + Zs, f(p.Fy, 0) + '(' + f(F.Z, 2) + ')', F.Mp / 12, 'kip-ft', 2, 'F7-1'));
+      F.ls.slice(1).forEach(function (l) {
+        S.push(st(P + key + '.' + l.k.toLowerCase(), l.name + ', about ' + ax, 'M_{n' + ax + '}', l.k === 'LTB' ? (l.ref === 'F7-10' ? 'C_b[M_p - (M_p - 0.7F_yS_x)\\frac{L_b - L_p}{L_r - L_p}]' : '\\frac{2EC_b\\sqrt{JA_g}}{L_b/r_y}') :
+          l.ref === 'F7-3' ? 'F_yS_e' : l.k === 'FLB' ? 'M_p - (M_p - F_yS)(3.57\\frac{b}{t}\\sqrt{F_y/E} - 4.0)' : 'M_p - (M_p - F_yS)(0.305\\frac{h}{t}\\sqrt{F_y/E} - 0.738)',
+          l.k === 'LTB' ? 'L_b = ' + f(F.ltb.Lb, 1) + ',\\ L_p = ' + f(F.ltb.Lp, 1) + ',\\ L_r = ' + f(F.ltb.Lr, 1) + '\\text{ in}' : l.ref === 'F7-3' ? f(p.Fy, 0) + '(' + f(l.Se, 2) + ')' : '', l.Mn / 12, 'kip-ft', 2, l.ref));
+      });
+      if (ax === 'x' && !F.ltb) S.push(st(P + 'fx.ltbna', 'Lateral-torsional buckling, about x', '\\text{LTB}', '', '', 'does not apply', '', 0, 'F7.4',
+        p.Ht <= p.B + 1e-9 ? 'Square HSS: no lateral-torsional buckling (F7.4 applies to bending about the major axis of a rectangular HSS).' : 'Compression flange braced ($L_b$ = 0).'));
+      else if (ax === 'x' && F.ltb && F.ltb.Mn == null) S.push(st(P + 'fx.ltbna', 'Lateral-torsional buckling, about x', 'L_b', '\\le L_p', f(F.ltb.Lb, 1) + ' \\le ' + f(F.ltb.Lp, 1), 'does not apply', '', 0, 'F7.4(a)'));
+      S.push(st(P + key + '.phi', 'Flexural strength, about ' + ax + ' (' + F.gov.name.toLowerCase() + ' governs)', '\\phi_b M_{n' + ax + '}', '0.90M_{n' + ax + '}', '0.90(' + f(F.Mn / 12, 2) + ')', F.phiMn / 12, 'kip-ft', 2, 'F1(a)', F.blocked));
+    });
+    ['vx', 'vy'].forEach(function (key) {
+      var V = cap[key], w = V.axis === 'x' ? 'h' : 'b';
+      S.push(st(P + key, 'Shear strength, ' + (V.axis === 'x' ? 'H walls (with M_x)' : 'B walls (with M_y)'), '\\phi_v V_{n' + V.axis + '}', '0.90(0.6F_yA_wC_{v2}),\\ A_w = 2' + w + 't', '0.90(0.6)(' + f(p.Fy, 0) + ')(' + f(V.Aw, 3) + ')(' + f(V.Cv2, 3) + ')', V.phiVn, 'kip', 1, 'G4-1, ' + V.ref,
+        '$k_v$ = 5, ' + w + '/t = ' + f(V.lam, 1) + ' vs $1.10\\sqrt{k_vE/F_y}$ = ' + f(V.lim1, 1) + '.'));
+    });
+    var T = cap.tor;
+    S.push(st(P + 'tor', 'Torsional strength', '\\phi_T T_n', '0.90F_{cr}C', '0.90(' + f(T.Fcr, 1) + ')(' + f(T.C, 2) + ')', T.phiTn / 12, 'kip-ft', 2, 'H3-1, ' + T.ref,
+      'h/t = ' + f(T.ht, 1) + ' (longer wall) vs $2.45\\sqrt{E/F_y}$ = ' + f(T.lim1, 1) + '.'));
+    return S;
+  }
+  /* steps of one demand point against the capacities */
+  function demandSteps(cap, d, r, pre) {
+    var S = [], P = pre ? pre + '.' : '';
+    var Pc = r.Pkind === 'tension' ? '\\phi_t P_n' : '\\phi_c P_n';
+    S.push(st(P + 'rp', 'Axial ratio (' + r.Pkind + ')', '\\frac{P_r}{P_c}', '\\frac{|P_u|}{' + Pc + '}', '\\frac{' + f(Math.abs(d.P || 0), 2) + '}{' + f(r.Pc, 1) + '}', r.P, '', 3, 'H1.1'));
+    var rx = '\\frac{' + f(Math.abs(d.Mx || 0) / 12, 2) + '}{' + f(cap.fx.phiMn / 12, 2) + '}', ry = '\\frac{' + f(Math.abs(d.My || 0) / 12, 2) + '}{' + f(cap.fy.phiMn / 12, 2) + '}';
+    if (r.P >= 0.2) S.push(st(P + 'h1', 'Combined axial and flexure', 'H1', '\\frac{P_r}{P_c} + \\frac{8}{9}\\left(\\frac{M_{rx}}{M_{cx}} + \\frac{M_{ry}}{M_{cy}}\\right)', f(r.P, 3) + ' + \\frac{8}{9}\\left(' + rx + ' + ' + ry + '\\right)', r.H1, '', 3, 'H1-1a', '$P_r/P_c \\ge 0.2$.', r.H1 <= 1));
+    else S.push(st(P + 'h1', 'Combined axial and flexure', 'H1', '\\frac{P_r}{2P_c} + \\frac{M_{rx}}{M_{cx}} + \\frac{M_{ry}}{M_{cy}}', '\\frac{' + f(r.P, 3) + '}{2} + ' + rx + ' + ' + ry, r.H1, '', 3, 'H1-1b', '$P_r/P_c < 0.2$.', r.H1 <= 1));
+    S.push(st(P + 'rv', 'Shear ratio', '\\frac{V_r}{V_c}', '\\max\\left(\\frac{V_{ux}}{\\phi_vV_{nx}},\\frac{V_{uy}}{\\phi_vV_{ny}}\\right)', '\\max\\left(\\frac{' + f(Math.abs(d.Vx || 0), 2) + '}{' + f(cap.vx.phiVn, 1) + '},\\frac{' + f(Math.abs(d.Vy || 0), 2) + '}{' + f(cap.vy.phiVn, 1) + '}\\right)', Math.max(r.Vx, r.Vy), '', 3, 'G4', null, Math.max(r.Vx, r.Vy) <= 1));
+    S.push(st(P + 'rt', 'Torsion ratio', '\\frac{T_r}{T_c}', '\\frac{|T_u|}{\\phi_TT_n}', '\\frac{' + f(Math.abs(d.T || 0) / 12, 3) + '}{' + f(cap.tor.phiTn / 12, 2) + '}', r.T, '', 3, 'H3.2',
+      r.torsionOn ? '$T_r > 0.2T_c$: combined force interaction H3-6 applies.' : '$T_r \\le 0.2T_c$: torsion is neglected in the interaction (H3.2).'));
+    if (r.torsionOn) S.push(st(P + 'h3', 'Combined force with torsion', 'H3', '\\left(\\frac{P_r}{P_c} + \\frac{M_{rx}}{M_{cx}} + \\frac{M_{ry}}{M_{cy}}\\right) + \\left(\\frac{V_r}{V_c} + \\frac{T_r}{T_c}\\right)^{2}', '(' + f(r.P + r.Mx + r.My, 3) + ') + (' + f(Math.max(r.Vx, r.Vy), 3) + ' + ' + f(r.T, 3) + ')^{2}', r.H3, '', 3, 'H3-6',
+      'Both flexure terms and the larger shear ratio are used (biaxial bending, the worse wall).', r.H3 <= 1));
+    return S;
+  }
+
+  window.SharedAiscHss = {
+    E: EKSI, G: GKSI, COLS: COLS, rows: ROWS, grades: GRADES,
+    find: find, parseName: parseName, section: section, classify: classify,
+    tension: tension, compression: compression, flexure: flexure, shear: shear, torsion: torsion,
+    capacities: capacities, ratios: ratios, check: check, capSteps: capSteps, demandSteps: demandSteps
+  };
 })();
 
 </script>

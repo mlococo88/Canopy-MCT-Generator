@@ -85,17 +85,17 @@ def inline_shared(repo, html):
 DXF_START, DXF_END = "<!--SHARED-DXF-START-->", "<!--SHARED-DXF-END-->"
 
 
-SHARED_FILES = ["shared/dxf.js", "shared/steps.js", "shared/report.js"]
+SHARED_FILES = ["shared/dxf.js", "shared/steps.js", "shared/report.js", "shared/aisc-hss.js"]
 
 
 def embed_shared_dxf(repo, index):
     """Copy All-Structural's shared/dxf.js (window.SharedDxf: sheet preview, pan/zoom, printing; Drawings tab),
-    shared/steps.js (window.SharedSteps) and shared/report.js (window.SharedReport: the report viewer; Output tab)
-    into index.html between the SHARED-DXF markers."""
+    shared/steps.js (window.SharedSteps), shared/report.js (window.SharedReport: the report viewer; Output tab) and
+    shared/aisc-hss.js (window.SharedAiscHss: AISC 360-16 HSS member checks; Members tab) into index.html between the SHARED-DXF markers."""
     blocks = []
     for rel in SHARED_FILES:
         src = (repo / rel).read_text(encoding="utf-8")
-        glob = {"shared/dxf.js": "window.SharedDxf", "shared/steps.js": "window.SharedSteps", "shared/report.js": "window.SharedReport"}[rel]
+        glob = {"shared/dxf.js": "window.SharedDxf", "shared/steps.js": "window.SharedSteps", "shared/report.js": "window.SharedReport", "shared/aisc-hss.js": "window.SharedAiscHss"}[rel]
         if glob not in src or "</script" in src.lower():
             sys.exit(f"{rel} is missing {glob} or contains </script: check it before embedding.")
         try:
